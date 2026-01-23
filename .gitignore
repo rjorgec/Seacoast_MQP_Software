@@ -1,0 +1,19 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+
+# Managed components
+managed_components/
+
+# VSCode / editor
+.vscode/
+*.code-workspace
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Python / tooling caches
+__pycache__/
+*.pyc
