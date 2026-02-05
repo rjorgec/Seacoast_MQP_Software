@@ -3,3 +3,6 @@
 
 void ui_init(const display_handles_t *disp);
 void ui_build_touch_test(void);
+void ui_show_home(void);
+void ui_show_run(void);
+
