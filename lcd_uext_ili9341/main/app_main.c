@@ -21,6 +21,7 @@ void app_main(void)
 
     display_handles_t disp = display_init();
     ui_init(&disp);
+    control_init();
 
     ESP_ERROR_CHECK(touch_ns2009_init(&g_touch, 6, 7, 100000, 0x48, 320, 240));
 
