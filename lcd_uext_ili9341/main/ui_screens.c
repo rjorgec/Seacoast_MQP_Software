@@ -18,10 +18,19 @@ static const char *TAG = "ui_screens";
 
 static lv_obj_t *lbl_status = NULL;
 
+void ui_status_set(const char *s)
+{
+    if (!s) s = "";
+    lvgl_port_lock(0);
+    if (lbl_status) lv_label_set_text(lbl_status, s);
+    lvgl_port_unlock();
+}
+
 static void set_status(const char *s)
 {
-    if (lbl_status) lv_label_set_text(lbl_status, s);
+    ui_status_set(s);
 }
+
 
 // ---- Button callbacks ----
 
