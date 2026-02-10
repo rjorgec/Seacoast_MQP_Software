@@ -98,10 +98,19 @@ void drv8163_pico_pwm_init(uint32_t pwm_freq);
 /**
  * @brief Sets the PWM duty cycle for motor speed control.
  *        Assumes PWM is configured on one of the IN pins (e.g., IN1).
- * @param duty_cycle Duty cycle value (0-255 for 8-bit resolution, or 0-65535 for 16-bit).
+ * @param duty_cycle Duty cycle value (0-255 for 8-bit resolution, or 0-4096 for 1-bit).
  *                   This example uses 16-bit for consistency with `pwm_set_chan_level`.
  */
 void drv8163_set_pwm_duty_cycle(uint16_t duty_cycle);
+
+/**
+ * @brief Sets motor control with direction and speed in a single call.
+ *        Handles both forward and reverse operation with speed control.
+ * @param state Motor state (MOTOR_FORWARD, MOTOR_REVERSE, MOTOR_STOP, MOTOR_BRAKE).
+ * @param speed Speed value (0-65535 for 16-bit PWM resolution). Only used for MOTOR_FORWARD and MOTOR_REVERSE.
+ *              For MOTOR_STOP and MOTOR_BRAKE, this parameter is ignored.
+ */
+void drv8163_set_motor_control(motor_state_t state, uint16_t speed);
 
 /**
  * @brief Initializes the Pico's PWM for ITRIP pin to simulate DAC output.
@@ -141,5 +150,22 @@ void drv8163_enable_driver(void);
  * @brief Disables the DRV8163 by deasserting the nSLEEP pin.
  */
 void drv8163_disable_driver(void);
+
+/**
+ * @brief Initializes a non-blocking current monitor task that reverses motor direction
+ *        if current is too high or too low.
+ * @param speed Motor speed (0-4096 for PWM level to maintain).
+ * @param low_threshold ADC threshold for low current condition.
+ * @param high_threshold ADC threshold for high current condition.
+ * @param check_interval_ms How often to check current in milliseconds.
+ * @return true if task started successfully, false otherwise.
+ */
+bool drv8163_start_current_monitor_task(uint16_t speed, uint16_t low_threshold,
+                                        uint16_t high_threshold, uint32_t check_interval_ms);
+
+/**
+ * @brief Stops the non-blocking current monitor task.
+ */
+void drv8163_stop_current_monitor_task(void);
 
 #endif // DRV8163_PICO_H
