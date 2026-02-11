@@ -10,5 +10,15 @@ idf_component_register(
         "loadcell.c"
         "flap.c"
         "touch_cal.c"
+        "wifi_ap.c"
+        "web_server.c"
+        "recipes.c"
     INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        spiffs
 )
