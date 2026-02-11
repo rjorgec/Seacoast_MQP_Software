@@ -3,7 +3,6 @@
 
 #include "ui.h"
 #include "control.h"
-#include "dosing.h"
 
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
@@ -44,7 +43,7 @@ static void on_btn_recipes(lv_event_t *e);
 static void on_btn_abort(lv_event_t *e);
 static void on_btn_home(lv_event_t *e);
 
-static const char *dose_state_str(dose_state_t s);
+static const char *pico_state_str(uint8_t s);
 
 /* ---------------------------
  * Helpers
@@ -132,6 +131,7 @@ void ui_show_run(void)
     lv_obj_clean(scr);
     lv_obj_set_style_pad_all(scr, 10, 0);
     ui_apply_noscroll(scr);
+    lbl_status = NULL;
 
     lbl_state = lv_label_create(scr);
     lv_label_set_text(lbl_state, "State: ---");
@@ -233,24 +233,19 @@ static void on_btn_abort(lv_event_t *e)
 static void on_btn_home(lv_event_t *e)
 {
     (void)e;
+    ctrl_cmd_t cmd = { .id = CTRL_CMD_HOME };
+    control_send(&cmd);
     ui_show_home();
 }
 
 /* ---------------------------
  * Run telemetry update
  * --------------------------- */
-static const char *dose_state_str(dose_state_t s)
+static const char *pico_state_str(uint8_t s)
 {
     switch (s) {
-        case DOSE_IDLE:       return "IDLE";
-        case DOSE_OPENING:    return "OPENING";
-        case DOSE_FULL_FLOW:  return "FULL";
-        case DOSE_THROTTLING: return "THROTTLE";
-        case DOSE_CLOSING:    return "CLOSING";
-        case DOSE_SETTLE:     return "SETTLE";
-        case DOSE_DONE:       return "DONE";
-        case DOSE_ABORTED:    return "ABORTED";
-        case DOSE_FAULT:      return "FAULT";
+        case 0: return "IDLE";
+        case 1: return "RUNNING";
         default:              return "?";
     }
 }
@@ -259,11 +254,11 @@ static void ui_run_tick(lv_timer_t *t)
 {
     (void)t;
 
-    dose_status_t st = dosing_get_status();
+    ctrl_status_t st = control_get_status();
 
     if (lbl_state) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "State: %s", dose_state_str(st.state));
+        snprintf(buf, sizeof(buf), "State: %s", pico_state_str(st.pico_state));
         lv_label_set_text(lbl_state, buf);
     }
 
@@ -275,16 +270,15 @@ static void ui_run_tick(lv_timer_t *t)
 
     if (lbl_flow) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "Flow: %.1f g/s", (double)st.flow_gps);
+        snprintf(buf, sizeof(buf), "Fault: %u", (unsigned)st.fault);
         lv_label_set_text(lbl_flow, buf);
     }
 
     if (bar_opening) {
-        int pct = (int)(st.opening * 100.0f + 0.5f);
-        if (pct < 0) pct = 0;
-        if (pct > 100) pct = 100;
+        int pct = st.pico_state ? 100 : 0;
         lv_bar_set_value(bar_opening, pct, LV_ANIM_OFF);
     }
+
 }
 
 /* ---------------------------

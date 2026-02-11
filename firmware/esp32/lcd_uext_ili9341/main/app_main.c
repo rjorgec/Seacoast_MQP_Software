@@ -11,7 +11,6 @@
 #include "esp_lvgl_port.h"
 
 #include "control.h"
-#include "ui_screens.h"
 
 static touch_ns2009_t g_touch;
 
@@ -25,21 +24,17 @@ void app_main(void)
 
     ESP_ERROR_CHECK(touch_ns2009_init(&g_touch, 6, 7, 100000, 0x48, 320, 240));
 
- //calibration
-    touch_cal_t cal = {.version = 1, .x_min = 412, .x_max = 3677, .y_min = 602, .y_max = 3755};
+    touch_cal_t cal = { .version = 1, .x_min = 412, .x_max = 3677, .y_min = 602, .y_max = 3755 };
     if (touch_cal_load(&cal) == ESP_OK) {
         touch_cal_apply(&g_touch, &cal);
     } else {
         touch_cal_apply(&g_touch, &cal);
-        
-        // touch_cal_save(&cal); //persist defaults once
+        // touch_cal_save(&cal);
     }
 
     g_touch.swap_xy  = true;
     g_touch.mirror_x = false;
     g_touch.mirror_y = false;
-
-    ESP_ERROR_CHECK(control_start());
 
     lvgl_port_lock(0);
     touch_ns2009_register_lvgl(&g_touch);

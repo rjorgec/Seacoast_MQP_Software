@@ -3,11 +3,12 @@ idf_component_register(
     "app_main.c"
     "display.c"
     "ui.c"
-    "app_state.c"
     "control.c"
-    "i2c_scan.c"
+    "uart_link.c"
     "touch_ns2009.c"
-    "ui_screens.c"
     "touch_cal.c"
-  INCLUDE_DIRS "."
+    "../../../common/src/seacoast_proto.c"
+  INCLUDE_DIRS
+    "."
+    "../../../common/include"
 )
