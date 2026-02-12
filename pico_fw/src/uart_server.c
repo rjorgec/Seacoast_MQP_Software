@@ -10,15 +10,16 @@
 #include "hardware/uart.h"
 
 #include "board_pins.h"
-#include "drv8163.h"
-#include "proto.h"
-#include "cobs.h"
+#include "drivers/drv8163/drv8163.h"
+#include "shared/proto.h"
+#include "shared/cobs.h"
 
-#define UART_RX_RING_SIZE          512u
-#define UART_ENCODED_FRAME_MAX     256u
-#define UART_DECODED_FRAME_MAX     ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 2u)
+#define UART_RX_RING_SIZE 512u
+#define UART_ENCODED_FRAME_MAX 256u
+#define UART_DECODED_FRAME_MAX ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 2u)
 
-typedef struct {
+typedef struct
+{
     uint8_t buf[UART_RX_RING_SIZE];
     uint16_t head;
     uint16_t tail;
@@ -36,12 +37,15 @@ static bool s_drv8163_ready;
 static uart_inst_t *s_uart;
 static bool s_uart_ready;
 
-static uart_inst_t *uart_from_id(void) {
+static uart_inst_t *uart_from_id(void)
+{
     return (PICO_UART_ID == 0) ? uart0 : uart1;
 }
 
-static bool rx_ring_push(uint8_t b) {
-    if (s_rx_ring.count >= UART_RX_RING_SIZE) {
+static bool rx_ring_push(uint8_t b)
+{
+    if (s_rx_ring.count >= UART_RX_RING_SIZE)
+    {
         return false;
     }
 
@@ -51,8 +55,10 @@ static bool rx_ring_push(uint8_t b) {
     return true;
 }
 
-static bool rx_ring_pop(uint8_t *out) {
-    if (s_rx_ring.count == 0u || out == NULL) {
+static bool rx_ring_pop(uint8_t *out)
+{
+    if (s_rx_ring.count == 0u || out == NULL)
+    {
         return false;
     }
 
@@ -62,11 +68,13 @@ static bool rx_ring_pop(uint8_t *out) {
     return true;
 }
 
-static bool uart_send_frame(uint8_t type, uint16_t seq, const void *payload, uint16_t len) {
+static bool uart_send_frame(uint8_t type, uint16_t seq, const void *payload, uint16_t len)
+{
     uint8_t raw[UART_DECODED_FRAME_MAX];
     uint8_t enc[UART_ENCODED_FRAME_MAX];
 
-    if (len > PROTO_MAX_PAYLOAD) {
+    if (len > PROTO_MAX_PAYLOAD)
+    {
         return false;
     }
 
@@ -78,7 +86,8 @@ static bool uart_send_frame(uint8_t type, uint16_t seq, const void *payload, uin
     };
 
     memcpy(raw, &hdr, sizeof(hdr));
-    if (payload != NULL && len > 0u) {
+    if (payload != NULL && len > 0u)
+    {
         memcpy(raw + sizeof(hdr), payload, len);
     }
 
@@ -88,7 +97,8 @@ static bool uart_send_frame(uint8_t type, uint16_t seq, const void *payload, uin
     raw[sizeof(hdr) + len + 1u] = (uint8_t)((crc >> 8) & 0xFFu);
 
     const size_t enc_len = cobs_encode(raw, raw_len, enc);
-    if (enc_len == 0u || enc_len > sizeof(enc)) {
+    if (enc_len == 0u || enc_len > sizeof(enc))
+    {
         return false;
     }
 
@@ -98,22 +108,27 @@ static bool uart_send_frame(uint8_t type, uint16_t seq, const void *payload, uin
     return true;
 }
 
-static void send_ack(uint16_t seq) {
+static void send_ack(uint16_t seq)
+{
     (void)uart_send_frame(MSG_ACK, seq, NULL, 0u);
 }
 
-static void send_nack(uint16_t seq, nack_code_t code) {
-    pl_nack_t nack = { .code = (uint8_t)code };
+static void send_nack(uint16_t seq, nack_code_t code)
+{
+    pl_nack_t nack = {.code = (uint8_t)code};
     (void)uart_send_frame(MSG_NACK, seq, &nack, (uint16_t)sizeof(nack));
 }
 
-static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t len) {
-    if (len != (uint16_t)sizeof(pl_drv8163_start_mon_t)) {
+static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len != (uint16_t)sizeof(pl_drv8163_start_mon_t))
+    {
         send_nack(seq, NACK_BAD_LEN);
         return;
     }
 
-    if (!s_drv8163_ready) {
+    if (!s_drv8163_ready)
+    {
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
@@ -126,11 +141,14 @@ static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t 
 
     (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_FORWARD, p->speed);
 
-    if (s_drv8163.monitoring_enabled) {
+    if (s_drv8163.monitoring_enabled)
+    {
         drv8163_stop_current_monitoring(&s_drv8163);
     }
 
-    if (!drv8163_start_current_monitoring(&s_drv8163)) {
+    if (!drv8163_start_current_monitoring(&s_drv8163))
+    {
+        printf("ADC %u\n", s_drv8163.last_current_adc.average);
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
@@ -138,8 +156,10 @@ static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t 
     send_ack(seq);
 }
 
-static void handle_drv8163_stop(uint16_t seq) {
-    if (!s_drv8163_ready) {
+static void handle_drv8163_stop(uint16_t seq)
+{
+    if (!s_drv8163_ready)
+    {
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
@@ -149,11 +169,13 @@ static void handle_drv8163_stop(uint16_t seq) {
     send_ack(seq);
 }
 
-static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len) {
-    if (decoded_len < sizeof(proto_hdr_t) + 2u) {
+static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
+{
+    if (decoded_len < sizeof(proto_hdr_t) + 2u)
+    {
         return;
     }
-
+    printf("message recieved\n");
     proto_hdr_t hdr;
     memcpy(&hdr, decoded, sizeof(hdr));
 
@@ -161,58 +183,69 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len) {
                              ((uint16_t)decoded[decoded_len - 1u] << 8);
     const uint16_t calc_crc = proto_crc16_ccitt(decoded, (uint32_t)(decoded_len - 2u));
 
-    if (got_crc != calc_crc) {
+    if (got_crc != calc_crc)
+    {
         send_nack(hdr.seq, NACK_BAD_CRC);
         return;
     }
 
-    if (hdr.version != PROTO_VERSION) {
+    if (hdr.version != PROTO_VERSION)
+    {
         send_nack(hdr.seq, NACK_BAD_VERSION);
         return;
     }
 
-    if (hdr.len > PROTO_MAX_PAYLOAD) {
+    if (hdr.len > PROTO_MAX_PAYLOAD)
+    {
         send_nack(hdr.seq, NACK_BAD_LEN);
         return;
     }
 
-    if (decoded_len != (size_t)sizeof(proto_hdr_t) + hdr.len + 2u) {
+    if (decoded_len != (size_t)sizeof(proto_hdr_t) + hdr.len + 2u)
+    {
         send_nack(hdr.seq, NACK_BAD_LEN);
         return;
     }
 
     const uint8_t *payload = decoded + sizeof(proto_hdr_t);
 
-    switch ((msg_type_t)hdr.type) {
-        case MSG_PING:
-            send_ack(hdr.seq);
-            break;
+    switch ((msg_type_t)hdr.type)
+    {
+    case MSG_PING:
+        printf("Ping\n");
+        send_ack(hdr.seq);
+        break;
 
-        case MSG_MOTOR_DRV8163_START_MON:
-            handle_drv8163_start(hdr.seq, payload, hdr.len);
-            break;
+    case MSG_MOTOR_DRV8163_START_MON:
+        printf("Start\n");
+        handle_drv8163_start(hdr.seq, payload, hdr.len);
+        break;
 
-        case MSG_MOTOR_DRV8163_STOP_MON:
-            handle_drv8163_stop(hdr.seq);
-            break;
+    case MSG_MOTOR_DRV8163_STOP_MON:
+        printf("Stop\n");
+        handle_drv8163_stop(hdr.seq);
+        break;
 
-        default:
-            send_nack(hdr.seq, NACK_UNKNOWN);
-            break;
+    default:
+        send_nack(hdr.seq, NACK_UNKNOWN);
+        break;
     }
 }
 
-static void process_frame(void) {
+static void process_frame(void)
+{
     uint8_t decoded[UART_DECODED_FRAME_MAX];
 
-    if (s_frame_len == 0u || s_frame_overflow) {
+    if (s_frame_len == 0u || s_frame_overflow)
+    {
         s_frame_len = 0u;
         s_frame_overflow = false;
         return;
     }
 
     const size_t decoded_len = cobs_decode(s_frame_buf, s_frame_len, decoded);
-    if (decoded_len == 0u || decoded_len > sizeof(decoded)) {
+    if (decoded_len == 0u || decoded_len > sizeof(decoded))
+    {
         s_frame_len = 0u;
         return;
     }
@@ -221,11 +254,13 @@ static void process_frame(void) {
     s_frame_len = 0u;
 }
 
-static void init_drv8163(void) {
+static void init_drv8163(void)
+{
     s_drv8163_ready = false;
 
     if (DRV8163_CTRL_A_GPIO < 0 || DRV8163_CTRL_B_GPIO < 0 || DRV8163_SENSE_GPIO < 0 ||
-        DRV8163_SENSE_ADC_CH < 0 || DRV8163_SENSE_ADC_CH > 3) {
+        DRV8163_SENSE_ADC_CH < 0 || DRV8163_SENSE_ADC_CH > 3)
+    {
         printf("uart_server: DRV8163 pins/ch not set in board_pins.h; motor RPC disabled\n");
         return;
     }
@@ -245,7 +280,8 @@ static void init_drv8163(void) {
         .delay_ms = NULL,
     };
 
-    if (!drv8163_init(&s_drv8163, &cfg)) {
+    if (!drv8163_init(&s_drv8163, &cfg))
+    {
         printf("uart_server: DRV8163 init failed\n");
         return;
     }
@@ -253,7 +289,8 @@ static void init_drv8163(void) {
     s_drv8163_ready = true;
 }
 
-void uart_server_init(void) {
+void uart_server_init(void)
+{
     memset(&s_rx_ring, 0, sizeof(s_rx_ring));
     s_frame_len = 0u;
     s_frame_overflow = false;
@@ -261,9 +298,12 @@ void uart_server_init(void) {
     s_uart = uart_from_id();
     s_uart_ready = false;
 
-    if (PICO_UART_TX_GPIO < 0 || PICO_UART_RX_GPIO < 0) {
+    if (PICO_UART_TX_GPIO < 0 || PICO_UART_RX_GPIO < 0)
+    {
         printf("uart_server: UART pins unset in board_pins.h; UART disabled\n");
-    } else {
+    }
+    else
+    {
         uart_init(s_uart, PICO_UART_BAUD);
         gpio_set_function((uint)PICO_UART_TX_GPIO, GPIO_FUNC_UART);
         gpio_set_function((uint)PICO_UART_RX_GPIO, GPIO_FUNC_UART);
@@ -279,31 +319,39 @@ void uart_server_init(void) {
     init_drv8163();
 }
 
-void uart_server_poll(void) {
-    if (!s_uart_ready) {
+void uart_server_poll(void)
+{
+    if (!s_uart_ready)
+    {
         return;
     }
 
-    while (uart_is_readable(s_uart)) {
+    while (uart_is_readable(s_uart))
+    {
         uint8_t b = uart_getc(s_uart);
-        if (!rx_ring_push(b)) {
+        if (!rx_ring_push(b))
+        {
             s_frame_len = 0u;
             s_frame_overflow = true;
         }
     }
 
     uint8_t b = 0u;
-    while (rx_ring_pop(&b)) {
-        if (b == PROTO_DELIM) {
+    while (rx_ring_pop(&b))
+    {
+        if (b == PROTO_DELIM)
+        {
             process_frame();
             continue;
         }
 
-        if (s_frame_overflow) {
+        if (s_frame_overflow)
+        {
             continue;
         }
 
-        if (s_frame_len >= sizeof(s_frame_buf)) {
+        if (s_frame_len >= sizeof(s_frame_buf))
+        {
             s_frame_overflow = true;
             continue;
         }

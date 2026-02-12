@@ -3,15 +3,17 @@
 
 #include "uart_server.h"
 
-int main(void) {
+int main(void)
+{
     stdio_init_all();
-    sleep_ms(500);
+    sleep_ms(10000);
 
     printf("Pico FW boot\n");
 
     uart_server_init();
 
-    while (true) {
+    while (true)
+    {
         uart_server_poll();
         sleep_ms(5);
     }

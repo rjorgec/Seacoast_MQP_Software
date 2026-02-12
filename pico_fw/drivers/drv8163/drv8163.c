@@ -90,11 +90,13 @@ bool drv8163_init(drv8163_t *dev, const drv8163_config_t *cfg)
     dev->monitoring_enabled = false;
     dev->current_status = DRV8163_CURRENT_OK;
     dev->last_current_adc.sum = drv8163_read_current(dev) * ADC_AVERAGES;
+    dev->last_current_adc.average = dev->last_current_adc.sum / ADC_AVERAGES;
 
     printf("DRV8163: Initialized on pins A=%d, B=%d, Sense=%d (ADC%d)\n",
            cfg->ctrl_a_pin, cfg->ctrl_b_pin, cfg->sense_pin, cfg->sense_adc_channel);
     printf("DRV8163: PWM freq=%u Hz, Current thresholds: %u - %u\n",
            cfg->pwm_frequency_hz, cfg->current_low_threshold, cfg->current_high_threshold);
+    printf("DRV8163: ADC val=%u\n", dev->last_current_adc.average);
 
     return true;
 }
