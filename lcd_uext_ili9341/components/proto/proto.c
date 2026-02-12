@@ -1,4 +1,4 @@
-#include "proto.h"
+#include "proto/proto.h"
 
 uint16_t proto_crc16_ccitt(const uint8_t *data, uint32_t len) {
     uint16_t crc = 0xFFFF;

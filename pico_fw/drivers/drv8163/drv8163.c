@@ -7,6 +7,7 @@
 
 #include "drv8163.h"
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include "hardware/pwm.h"
 #include "hardware/adc.h"
 #include "hardware/gpio.h"

@@ -11,27 +11,22 @@ pico_sdk_init()
 add_executable(pico_fw
   src/main.c
   src/uart_server.c
-  src/stepper8434s.c
-  shared/proto_crc.c
+  ../shared/proto/proto_crc.c
+  ../shared/proto/cobs.c
   drivers/drv8163/drv8163.c
-  drivers/drv8163/drv8163_pico.c
-  drivers/drv8434s/drv8434s.c
 )
 
 target_include_directories(pico_fw PRIVATE
   src
-  shared
+  ../shared/proto
   drivers/drv8163
-  drivers/drv8434s
 )
 
 target_link_libraries(pico_fw
   pico_stdlib
   hardware_uart
-  hardware_spi
   hardware_pwm
   hardware_adc
-  hardware_irq
   hardware_timer
 )
 

@@ -15,6 +15,7 @@
 
 #include "motor_hal.h"
 #include "pico_link.h"
+#include "proto/proto.h"
 
 
 // #include "recipes.h"
@@ -42,9 +43,8 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(pico_link_init(&link));
 
-    //ping on boot
-    uint8_t dummy = 0xAA;
-    pico_link_send(0x01, &dummy, 1, NULL);
+    // ping on boot
+    ESP_ERROR_CHECK(pico_link_send(MSG_PING, NULL, 0, NULL));
 
 
 

@@ -1,5 +1,6 @@
 idf_component_register(
-  SRCS "proto.c"
+  SRCS "../../../shared/proto/proto_crc.c"
+       "../../../shared/proto/cobs.c"
   INCLUDE_DIRS "include"
-  REQUIRES driver freertos proto
+               "../../../shared/proto"
 )
