@@ -1,6 +1,14 @@
+#include <assert.h>
+#include <stdio.h>
+
 #include "ui_screens.h"
-#include "lvgl.h"
 #include "control.h"
+
+#include "lvgl.h"
+#include "esp_log.h"
+#include "esp_lvgl_port.h"
+
+static const char *TAG = "ui_screens";
 
 #if defined(LVGL_VERSION_MAJOR) && (LVGL_VERSION_MAJOR >= 9)
 #define LVGL_ACTIVE_SCREEN() lv_screen_active()
@@ -8,139 +16,169 @@
 #define LVGL_ACTIVE_SCREEN() lv_scr_act()
 #endif
 
-static lv_obj_t *lbl_status;
-static lv_obj_t *lbl_target;
+static lv_obj_t *lbl_status = NULL;
+
+void ui_status_set(const char *s)
+{
+    if (!s) s = "";
+    lvgl_port_lock(0);
+    if (lbl_status) lv_label_set_text(lbl_status, s);
+    lvgl_port_unlock();
+}
 
 static void set_status(const char *s)
 {
-    if (lbl_status) lv_label_set_text(lbl_status, s);
+    ui_status_set(s);
 }
+
+
+// ---- Button callbacks ----
 
 static void on_start(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_START, .target_g = 50.0f, .recipe_id = 0};
-    control_send(&cmd);
-    ui_show_run();
+    ctrl_cmd_t cmd = {
+        .type = CTRL_CMD_START,
+        .target_g = 50.0f,   //TODO make it editable
+        .recipe_id = 0,
+    };
+
+    bool ok = control_send(&cmd);
+    set_status(ok ? "START sent" : "START failed");
+    ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
 }
 
 static void on_clean(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_CLEAN};
-    control_send(&cmd);
-    set_status("Cleaning requested");
+    ctrl_cmd_t cmd = { .type = CTRL_CMD_CLEAN };
+
+    bool ok = control_send(&cmd);
+    set_status(ok ? "CLEAN sent" : "CLEAN failed");
+    ESP_LOGI(TAG, "Clean pressed (send=%d)", (int)ok);
 }
 
 static void on_tare(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_TARE};
-    control_send(&cmd);
-    set_status("Tare requested");
+    ctrl_cmd_t cmd = { .type = CTRL_CMD_TARE };
+
+    bool ok = control_send(&cmd);
+    set_status(ok ? "TARE sent" : "TARE failed");
+    ESP_LOGI(TAG, "Tare pressed (send=%d)", (int)ok);
+}
+
+static void on_recipes(lv_event_t *e)
+{
+    (void)e;
+    //TODO
+    set_status("RECIPES (TODO)");
+    ESP_LOGI(TAG, "Recipes pressed");
 }
 
 static void on_pause(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_PAUSE};
-    control_send(&cmd);
+    ctrl_cmd_t cmd = { .type = CTRL_CMD_PAUSE };
+
+    bool ok = control_send(&cmd);
+    set_status(ok ? "PAUSE sent" : "PAUSE failed");
+    ESP_LOGI(TAG, "Pause pressed (send=%d)", (int)ok);
 }
 
 static void on_stop(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
-    control_send(&cmd);
-    ui_show_home();
+    ctrl_cmd_t cmd = { .type = CTRL_CMD_STOP };
+
+    bool ok = control_send(&cmd);
+    set_status(ok ? "STOP sent" : "STOP failed");
+    ESP_LOGI(TAG, "Stop pressed (send=%d)", (int)ok);
+}
+
+// ---- UI helpers ----
+
+static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *txt, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, txt);
+    lv_obj_center(label);
+
+    return btn;
 }
 
 void ui_show_home(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    //fix scrolling
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
 
-    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE); //stop scrolling smh
-    // Status strip
+    //status strip
     lbl_status = lv_label_create(scr);
     lv_label_set_text(lbl_status, "IDLE • Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    // 2x2 big buttons
+    //container for 2x2 big butt
     lv_obj_t *cont = lv_obj_create(scr);
-
-    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);  //stop scrolling smh
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_set_size(cont, 300, 200);
     lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, 0);
+
     lv_obj_set_style_pad_all(cont, 6, 0);
     lv_obj_set_style_pad_row(cont, 6, 0);
     lv_obj_set_style_pad_column(cont, 6, 0);
+
     lv_obj_set_layout(cont, LV_LAYOUT_GRID);
 
-    static lv_coord_t col[] = {145, 145, LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row[] = {95, 95, LV_GRID_TEMPLATE_LAST};
-    lv_obj_set_grid_dsc_array(cont, col, row);
+    static lv_coord_t col_dsc[] = { LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
+    static lv_coord_t row_dsc[] = { LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
+    lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
 
-    lv_obj_t *b_start = lv_btn_create(cont);
-    lv_obj_set_grid_cell(b_start, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_add_event_cb(b_start, on_start, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *t1 = lv_label_create(b_start);
-    lv_label_set_text(t1, "START");
-    lv_obj_center(t1);
+    // Create buttons
+    lv_obj_t *b_start   = make_big_btn(cont, "Start",   on_start);
+    lv_obj_t *b_clean   = make_big_btn(cont, "Clean",   on_clean);
+    lv_obj_t *b_tare    = make_big_btn(cont, "Tare",    on_tare);
+    lv_obj_t *b_recipes = make_big_btn(cont, "Recipes", on_recipes);
 
-    lv_obj_t *b_clean = lv_btn_create(cont);
-    lv_obj_set_grid_cell(b_clean, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_add_event_cb(b_clean, on_clean, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *t2 = lv_label_create(b_clean);
-    lv_label_set_text(t2, "CLEAN");
-    lv_obj_center(t2);
-
-    lv_obj_t *b_tare = lv_btn_create(cont);
-    lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_add_event_cb(b_tare, on_tare, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *t3 = lv_label_create(b_tare);
-    lv_label_set_text(t3, "TARE");
-    lv_obj_center(t3);
-
-    lv_obj_t *b_run = lv_btn_create(cont);
-    lv_obj_set_grid_cell(b_run, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_add_event_cb(b_run, on_start, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *t4 = lv_label_create(b_run);
-    lv_label_set_text(t4, "RECIPES");
-    lv_obj_center(t4);
+    // Place them in the grid (row, col)
+    lv_obj_set_grid_cell(b_start,   LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_clean,   LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_tare,    LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
+    lv_obj_set_grid_cell(b_recipes, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
 }
 
-void ui_show_run(void)
+//dosing screens tub
+void ui_show_dosing(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
-
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
 
     lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "RUNNING");
+    lv_label_set_text(lbl_status, "DOSING…");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    lbl_target = lv_label_create(scr);
-    lv_label_set_text(lbl_target, "Target: 50.0 g");
-    lv_obj_align(lbl_target, LV_ALIGN_TOP_LEFT, 0, 25);
+    lv_obj_t *btn_pause = lv_btn_create(scr);
+    lv_obj_set_size(btn_pause, 140, 70);
+    lv_obj_align(btn_pause, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_add_event_cb(btn_pause, on_pause, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lp = lv_label_create(btn_pause);
+    lv_label_set_text(lp, "Pause");
+    lv_obj_center(lp);
 
-    // Big pause/stop
-    lv_obj_t *b_pause = lv_btn_create(scr);
-    lv_obj_set_size(b_pause, 150, 70);
-    lv_obj_align(b_pause, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-    lv_obj_add_event_cb(b_pause, on_pause, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *tp = lv_label_create(b_pause);
-    lv_label_set_text(tp, "PAUSE");
-    lv_obj_center(tp);
-
-    lv_obj_t *b_stop = lv_btn_create(scr);
-    lv_obj_set_size(b_stop, 150, 70);
-    lv_obj_align(b_stop, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_obj_add_event_cb(b_stop, on_stop, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *ts = lv_label_create(b_stop);
-    lv_label_set_text(ts, "STOP");
-    lv_obj_center(ts);
+    lv_obj_t *btn_stop = lv_btn_create(scr);
+    lv_obj_set_size(btn_stop, 140, 70);
+    lv_obj_align(btn_stop, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_stop, on_stop, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ls = lv_label_create(btn_stop);
+    lv_label_set_text(ls, "Stop");
+    lv_obj_center(ls);
 }
