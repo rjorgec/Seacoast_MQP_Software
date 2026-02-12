@@ -43,9 +43,9 @@
 #define MOTOR_TORQUE 0                      // TRQ DAC (0=100%, 15=25%)
 #define MOTOR_DECAY DRV8434S_DECAY_SMART_TUNE_RIPPLE
 #define MOTOR_STEP_INTERVAL_US 500 // Step period (µs) → speed
-#define MOTOR_STEPS_PER_REV 200     // Full steps per revolution
-#define MOTOR_STALL_THRESHOLD 0     // HW stall: TRQ_COUNT floor (12-bit, 0–4095)
-#define MOTOR_TORQUE_FLOOR 200       // SW monitor: TRQ_COUNT floor (0–255)
+#define MOTOR_STEPS_PER_REV 200    // Full steps per revolution
+#define MOTOR_STALL_THRESHOLD 0    // HW stall: TRQ_COUNT floor (12-bit, 0–4095)
+#define MOTOR_TORQUE_FLOOR 200     // SW monitor: TRQ_COUNT floor (0–255)
 #define TORQUE_CHECK_INTERVAL_MS 1 // How often to poll TRQ_COUNT
 
 // ── Global driver instance ──────────────────────────────────────────────────
@@ -658,8 +658,8 @@ int main(void)
 
             // Read back the learned STALL_TH for display
             uint8_t stall_lo = 0, stall_hi_reg = 0;
-            drv8434s_reg_read(&g_dev, DRV8434S_REG_CTRL6, &stall_lo);
-            drv8434s_reg_read(&g_dev, DRV8434S_REG_CTRL7, &stall_hi_reg);
+            drv8434s_read_reg(&g_dev, DRV8434S_REG_CTRL6, &stall_lo);
+            drv8434s_read_reg(&g_dev, DRV8434S_REG_CTRL7, &stall_hi_reg);
             uint16_t learned_th = stall_lo |
                                   ((uint16_t)(stall_hi_reg & DRV8434S_CTRL7_STALL_TH_HI_MASK) << 8);
             printf("  Learned STALL_TH = %u\n", learned_th);

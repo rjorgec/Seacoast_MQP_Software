@@ -165,54 +165,11 @@ bool drv8434s_probe_cmd(drv8434s_t *dev, const uint8_t *tx, size_t tx_len,
     return any_valid;
 }
 
-bool drv8434s_read_register(drv8434s_t *dev, uint8_t reg, uint8_t *out,
-                            size_t out_len)
-{
-    if (!dev || !out || out_len == 0)
-        return false;
-
-    size_t tx_len = 1 + out_len;
-    uint8_t *tx = (uint8_t *)calloc(tx_len, 1);
-    uint8_t *rx = (uint8_t *)malloc(tx_len);
-    if (!tx || !rx)
-    {
-        free(tx);
-        free(rx);
-        return false;
-    }
-
-    tx[0] = reg;
-
-    dev->cfg.cs(dev->cfg.user_ctx, true);
-    dev->cfg.spi_xfer(dev->cfg.user_ctx, tx, rx, tx_len);
-    dev->cfg.cs(dev->cfg.user_ctx, false);
-    drv_delay_us(dev, DRV8434S_CS_HOLD_US);
-
-    for (size_t i = 0; i < out_len; ++i)
-    {
-        out[i] = rx[1 + i];
-    }
-
-    bool any_valid = false;
-    for (size_t i = 0; i < out_len; ++i)
-    {
-        if (out[i] != 0xFF)
-        {
-            any_valid = true;
-            break;
-        }
-    }
-
-    free(tx);
-    free(rx);
-    return any_valid;
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 //  Register-level API (with timing guards)
 // ═════════════════════════════════════════════════════════════════════════════
 
-bool drv8434s_write_register(drv8434s_t *dev, uint8_t reg, uint8_t value)
+bool drv8434s_write_reg(drv8434s_t *dev, uint8_t reg, uint8_t value)
 {
     if (!dev || !dev->cfg.spi_xfer || !dev->cfg.cs)
         return false;
@@ -234,7 +191,7 @@ bool drv8434s_write_register(drv8434s_t *dev, uint8_t reg, uint8_t value)
     return (r == 0);
 }
 
-bool drv8434s_reg_read(drv8434s_t *dev, uint8_t reg, uint8_t *value)
+bool drv8434s_read_reg(drv8434s_t *dev, uint8_t reg, uint8_t *value)
 {
     if (!dev || !value || !dev->cfg.spi_xfer || !dev->cfg.cs)
         return false;
@@ -254,15 +211,15 @@ bool drv8434s_reg_read(drv8434s_t *dev, uint8_t reg, uint8_t *value)
     return (r == 0);
 }
 
-bool drv8434s_reg_modify(drv8434s_t *dev, uint8_t reg, uint8_t mask,
+bool drv8434s_modify_reg(drv8434s_t *dev, uint8_t reg, uint8_t mask,
                          uint8_t value)
 {
     uint8_t current;
-    if (!drv8434s_reg_read(dev, reg, &current))
+    if (!drv8434s_read_reg(dev, reg, &current))
         return false;
 
     uint8_t updated = (current & ~mask) | (value & mask);
-    return drv8434s_write_register(dev, reg, updated);
+    return drv8434s_write_reg(dev, reg, updated);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -272,7 +229,7 @@ bool drv8434s_reg_modify(drv8434s_t *dev, uint8_t reg, uint8_t mask,
 bool drv8434s_enable(drv8434s_t *dev)
 {
     // EN_OUT is CTRL2 bit 7
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL2,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL2,
                                DRV8434S_CTRL2_EN_OUT,
                                DRV8434S_CTRL2_EN_OUT);
 }
@@ -280,7 +237,7 @@ bool drv8434s_enable(drv8434s_t *dev)
 bool drv8434s_disable(drv8434s_t *dev)
 {
     // EN_OUT is CTRL2 bit 7
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL2,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL2,
                                DRV8434S_CTRL2_EN_OUT, 0);
 }
 
@@ -289,7 +246,7 @@ bool drv8434s_set_microstep(drv8434s_t *dev, drv8434s_microstep_t mode)
     if ((uint8_t)mode > 9)
         return false;
     // MICROSTEP_MODE is CTRL3 bits [3:0]
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL3,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL3,
                                DRV8434S_CTRL3_MICROSTEP_MASK,
                                (uint8_t)mode << DRV8434S_CTRL3_MICROSTEP_SHIFT);
 }
@@ -299,7 +256,7 @@ bool drv8434s_set_torque(drv8434s_t *dev, uint8_t trq)
     if (trq > 15)
         trq = 15;
     // TRQ_DAC is CTRL1 bits [6:3]
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL1,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL1,
                                DRV8434S_CTRL1_TRQ_DAC_MASK,
                                trq << DRV8434S_CTRL1_TRQ_DAC_SHIFT);
 }
@@ -307,7 +264,7 @@ bool drv8434s_set_torque(drv8434s_t *dev, uint8_t trq)
 bool drv8434s_set_decay(drv8434s_t *dev, drv8434s_decay_t decay)
 {
     // DECAY is CTRL2 bits [2:0]
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL2,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL2,
                                DRV8434S_CTRL2_DECAY_MASK,
                                ((uint8_t)decay << DRV8434S_CTRL2_DECAY_SHIFT));
 }
@@ -316,7 +273,7 @@ bool drv8434s_set_spi_step_mode(drv8434s_t *dev)
 {
     // Set SPI_STEP (bit 4) and SPI_DIR (bit 5) to enable SPI control.
     // Once set, STEP (bit 6) and DIR (bit 7) become the active controls.
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL3,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL3,
                                DRV8434S_CTRL3_SPI_STEP | DRV8434S_CTRL3_SPI_DIR,
                                DRV8434S_CTRL3_SPI_STEP | DRV8434S_CTRL3_SPI_DIR);
 }
@@ -324,7 +281,7 @@ bool drv8434s_set_spi_step_mode(drv8434s_t *dev)
 bool drv8434s_set_spi_dir(drv8434s_t *dev, bool reverse)
 {
     // DIR is CTRL3 bit 7 (active when SPI_DIR mode is enabled)
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL3,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL3,
                                DRV8434S_CTRL3_DIR,
                                reverse ? DRV8434S_CTRL3_DIR : 0);
 }
@@ -336,7 +293,7 @@ bool drv8434s_spi_step(drv8434s_t *dev)
 
     // The DRV8434S advances one step on the *rising edge* of the STEP
     // bit (CTRL3 bit 6, active when SPI_STEP mode is enabled).
-    // The bit is self-clearing on the device, but drv8434s_write_register()
+    // The bit is self-clearing on the device, but drv8434s_write_reg()
     // caches the written value.  If we don't correct the cache, the next
     // call reads STEP=1 from the cache, writes the same value, and the
     // device sees no edge → no step.
@@ -349,7 +306,7 @@ bool drv8434s_spi_step(drv8434s_t *dev)
     uint8_t ctrl3_base = dev->reg_cache[addr] & (uint8_t)~DRV8434S_CTRL3_STEP;
 
     uint8_t ctrl3_high = ctrl3_base | DRV8434S_CTRL3_STEP;
-    if (!drv8434s_write_register(dev, DRV8434S_REG_CTRL3, ctrl3_high))
+    if (!drv8434s_write_reg(dev, DRV8434S_REG_CTRL3, ctrl3_high))
         return false;
 
     // STEP is self-clearing on the device — update the shadow cache
@@ -366,14 +323,14 @@ bool drv8434s_spi_step(drv8434s_t *dev)
 bool drv8434s_enable_stall_detection(drv8434s_t *dev)
 {
     // Set both EN_STL (enable stall comparator) and STL_REP (report on nFAULT)
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL5,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL5,
                                DRV8434S_CTRL5_EN_STL | DRV8434S_CTRL5_STL_REP,
                                DRV8434S_CTRL5_EN_STL | DRV8434S_CTRL5_STL_REP);
 }
 
 bool drv8434s_disable_stall_detection(drv8434s_t *dev)
 {
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL5,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL5,
                                DRV8434S_CTRL5_EN_STL, 0);
 }
 
@@ -384,11 +341,11 @@ bool drv8434s_set_stall_threshold(drv8434s_t *dev, uint16_t threshold)
 
     // Low 8 bits → CTRL6 (STALL_TH[7:0])
     uint8_t low = (uint8_t)(threshold & 0xFF);
-    if (!drv8434s_write_register(dev, DRV8434S_REG_CTRL6, low))
+    if (!drv8434s_write_reg(dev, DRV8434S_REG_CTRL6, low))
         return false;
 
     // High 4 bits → CTRL7 bits [3:0] (STALL_TH[11:8])
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL7,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL7,
                                DRV8434S_CTRL7_STALL_TH_HI_MASK,
                                (uint8_t)((threshold >> 8) & 0x0F));
 }
@@ -398,7 +355,7 @@ bool drv8434s_start_stall_learning(drv8434s_t *dev)
     // Set STL_LRN bit in CTRL5 to start the learning process.
     // The device will briefly stall the motor and update STALL_TH
     // automatically.  STL_LRN is self-clearing.
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL5,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL5,
                                DRV8434S_CTRL5_STL_LRN,
                                DRV8434S_CTRL5_STL_LRN);
 }
@@ -408,7 +365,7 @@ bool drv8434s_is_stall_learned(drv8434s_t *dev)
     if (!dev)
         return false;
     uint8_t diag2 = 0;
-    if (!drv8434s_reg_read(dev, DRV8434S_REG_DIAG2, &diag2))
+    if (!drv8434s_read_reg(dev, DRV8434S_REG_DIAG2, &diag2))
         return false;
     return (diag2 & DRV8434S_DIAG2_STL_LRN_OK) != 0;
 }
@@ -419,13 +376,13 @@ bool drv8434s_is_stall_learned(drv8434s_t *dev)
 
 bool drv8434s_read_fault(drv8434s_t *dev, uint8_t *faults)
 {
-    return drv8434s_reg_read(dev, DRV8434S_REG_FAULT, faults);
+    return drv8434s_read_reg(dev, DRV8434S_REG_FAULT, faults);
 }
 
 bool drv8434s_clear_faults(drv8434s_t *dev)
 {
     // CLR_FLT is CTRL4 bit 7
-    return drv8434s_reg_modify(dev, DRV8434S_REG_CTRL4,
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL4,
                                DRV8434S_CTRL4_CLR_FLT,
                                DRV8434S_CTRL4_CLR_FLT);
 }
@@ -433,7 +390,7 @@ bool drv8434s_clear_faults(drv8434s_t *dev)
 bool drv8434s_read_torque_count(drv8434s_t *dev, uint8_t *trq_count)
 {
     // TRQ_COUNT [7:0] is in CTRL8 (0x0A)
-    return drv8434s_reg_read(dev, DRV8434S_REG_CTRL8, trq_count);
+    return drv8434s_read_reg(dev, DRV8434S_REG_CTRL8, trq_count);
 }
 
 bool drv8434s_read_all_regs(drv8434s_t *dev, uint8_t regs[DRV8434S_NUM_REGS])
@@ -443,7 +400,7 @@ bool drv8434s_read_all_regs(drv8434s_t *dev, uint8_t regs[DRV8434S_NUM_REGS])
 
     for (uint8_t r = 0; r < DRV8434S_NUM_REGS; ++r)
     {
-        if (!drv8434s_reg_read(dev, r, &regs[r]))
+        if (!drv8434s_read_reg(dev, r, &regs[r]))
             return false;
     }
     return true;
@@ -456,11 +413,11 @@ bool drv8434s_diagnose_fault(drv8434s_t *dev, drv8434s_fault_info_t *info)
 
     memset(info, 0, sizeof(*info));
 
-    if (!drv8434s_reg_read(dev, DRV8434S_REG_FAULT, &info->fault))
+    if (!drv8434s_read_reg(dev, DRV8434S_REG_FAULT, &info->fault))
         return false;
-    if (!drv8434s_reg_read(dev, DRV8434S_REG_DIAG1, &info->diag1))
+    if (!drv8434s_read_reg(dev, DRV8434S_REG_DIAG1, &info->diag1))
         return false;
-    if (!drv8434s_reg_read(dev, DRV8434S_REG_DIAG2, &info->diag2))
+    if (!drv8434s_read_reg(dev, DRV8434S_REG_DIAG2, &info->diag2))
         return false;
 
     info->is_faulted = (info->fault & DRV8434S_FAULT_FAULT) != 0;
@@ -520,7 +477,7 @@ drv8434s_recover_result_t drv8434s_recover_from_fault(
             if (addr == DRV8434S_REG_CTRL4)
                 val &= (uint8_t)~DRV8434S_CTRL4_CLR_FLT;
 
-            drv8434s_write_register(dev, addr, val);
+            drv8434s_write_reg(dev, addr, val);
         }
 
         // Re-read fault state after hardware reset + restore.

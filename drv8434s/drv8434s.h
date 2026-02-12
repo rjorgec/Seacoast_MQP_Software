@@ -221,25 +221,21 @@ extern "C"
     bool drv8434s_probe_cmd(drv8434s_t *dev, const uint8_t *tx, size_t tx_len,
                             uint8_t *rx, size_t rx_len);
 
-    // Read a register using [reg][dummy…] SPI protocol.
-    bool drv8434s_read_register(drv8434s_t *dev, uint8_t reg,
-                                uint8_t *out, size_t out_len);
-
     // ═══════════════════════════════════════════════════════════════════════
     //  Register-level API
     // ═══════════════════════════════════════════════════════════════════════
 
     // Write a single 8-bit value to a register.  Returns true on success.
-    bool drv8434s_write_register(drv8434s_t *dev, uint8_t reg, uint8_t value);
+    bool drv8434s_write_reg(drv8434s_t *dev, uint8_t reg, uint8_t value);
 
     // Read a single register and return its 8-bit value in *value.
     // Unlike the generic drv8434s_read_register(), this uses the proper
     // DRV8434S SPI read protocol (bit 7 = 1).
-    bool drv8434s_reg_read(drv8434s_t *dev, uint8_t reg, uint8_t *value);
+    bool drv8434s_read_reg(drv8434s_t *dev, uint8_t reg, uint8_t *value);
 
     // Read-modify-write: reads current value, clears bits in mask, ORs in
     // (value & mask), then writes back.  Returns true on success.
-    bool drv8434s_reg_modify(drv8434s_t *dev, uint8_t reg,
+    bool drv8434s_modify_reg(drv8434s_t *dev, uint8_t reg,
                              uint8_t mask, uint8_t value);
 
     // ═══════════════════════════════════════════════════════════════════════
