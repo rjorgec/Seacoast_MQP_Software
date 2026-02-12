@@ -48,15 +48,15 @@ static void on_start(lv_event_t *e)
     ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
 }
 
-static void on_clean(lv_event_t *e)
-{
-    (void)e;
-    ctrl_cmd_t cmd = { .type = CTRL_CMD_CLEAN };
+// static void on_clean(lv_event_t *e) //dont need a clean lol
+// {
+//     (void)e;
+//     ctrl_cmd_t cmd = { .type = CTRL_CMD_CLEAN };
 
-    bool ok = control_send(&cmd);
-    set_status(ok ? "CLEAN sent" : "CLEAN failed");
-    ESP_LOGI(TAG, "Clean pressed (send=%d)", (int)ok);
-}
+//     bool ok = control_send(&cmd);
+//     set_status(ok ? "CLEAN sent" : "CLEAN failed");
+//     ESP_LOGI(TAG, "Clean pressed (send=%d)", (int)ok);
+// }
 
 static void on_tare(lv_event_t *e)
 {
@@ -141,18 +141,17 @@ void ui_show_home(void)
     static lv_coord_t row_dsc[] = { LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
     lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
 
-    // Create buttons
     lv_obj_t *b_start   = make_big_btn(cont, "Start",   on_start);
-    lv_obj_t *b_clean   = make_big_btn(cont, "Clean",   on_clean);
+    lv_obj_t *b_stop    = make_big_btn(cont, "Stop",    on_stop);
     lv_obj_t *b_tare    = make_big_btn(cont, "Tare",    on_tare);
     lv_obj_t *b_recipes = make_big_btn(cont, "Recipes", on_recipes);
 
-    // Place them in the grid (row, col)
     lv_obj_set_grid_cell(b_start,   LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_clean,   LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_stop,    LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
     lv_obj_set_grid_cell(b_tare,    LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
     lv_obj_set_grid_cell(b_recipes, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
-}
+
+    }
 
 //dosing screens tub
 void ui_show_dosing(void)

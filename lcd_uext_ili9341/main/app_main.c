@@ -36,8 +36,8 @@ void app_main(void)
     // ESP_ERROR_CHECK(web_server_start());  
     pico_link_cfg_t link = {
     .uart_num = UART_NUM_1,
-        .tx_gpio = 4,     // pick free pins
-        .rx_gpio = 5,
+        .tx_gpio = 5,     // pick free pins
+        .rx_gpio = 4,
         .baud = 115200,
         .on_rx = pico_rx_cb
     };

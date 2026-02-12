@@ -49,12 +49,22 @@ typedef struct __attribute__((packed)) {
     uint16_t len;
 } proto_hdr_t;
 
+// typedef struct __attribute__((packed)) {
+//     uint16_t speed;
+//     uint16_t low_th;
+//     uint16_t high_th;
+//     uint32_t interval_ms;
+// } pl_drv8163_start_mon_t;
+
 typedef struct __attribute__((packed)) {
-    uint16_t speed;
+    uint8_t  dir;          // 0=fwd, 1=rev
+    uint8_t  _rsvd;         // keep 16-bit alignment
+    uint16_t speed;        // 0..4095
     uint16_t low_th;
     uint16_t high_th;
     uint32_t interval_ms;
 } pl_drv8163_start_mon_t;
+
 
 typedef struct __attribute__((packed)) {
     uint8_t enable;
