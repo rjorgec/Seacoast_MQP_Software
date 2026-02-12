@@ -139,7 +139,9 @@ static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t 
     s_drv8163.config.current_high_threshold = p->high_th;
     s_drv8163.config.current_check_interval_ms = p->interval_ms;
 
-    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_FORWARD, p->speed);
+    drv8163_motor_state_t st = (p->dir == 0) ? DRV8163_MOTOR_FORWARD : DRV8163_MOTOR_REVERSE; //new
+    (void)drv8163_set_motor_control(&s_drv8163, st, p->speed);
+
 
     if (s_drv8163.monitoring_enabled)
     {

@@ -7,6 +7,7 @@
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "motor_hal.h"
 
 static const char *TAG = "ui_screens";
 
@@ -15,6 +16,12 @@ static const char *TAG = "ui_screens";
 #else
 #define LVGL_ACTIVE_SCREEN() lv_scr_act()
 #endif
+
+
+#define JOG_SPEED          2500u
+#define JOG_LOW_TH         0u
+#define JOG_HIGH_TH        4095u
+#define JOG_INTERVAL_MS    50u
 
 static lv_obj_t *lbl_status = NULL;
 
@@ -47,6 +54,39 @@ static void on_start(lv_event_t *e)
     set_status(ok ? "START sent" : "START failed");
     ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
 }
+
+static void on_fwd(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_FWD,
+                                                   JOG_SPEED,
+                                                   JOG_LOW_TH,
+                                                   JOG_HIGH_TH,
+                                                   JOG_INTERVAL_MS);
+    set_status(err == ESP_OK ? "LINACT: FWD" : "LINACT: FWD FAILED");
+    ESP_LOGI(TAG, "FWD pressed (%s)", esp_err_to_name(err));
+}
+
+static void on_rev(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_REV,
+                                                   JOG_SPEED,
+                                                   JOG_LOW_TH,
+                                                   JOG_HIGH_TH,
+                                                   JOG_INTERVAL_MS);
+    set_status(err == ESP_OK ? "LINACT: REV" : "LINACT: REV FAILED");
+    ESP_LOGI(TAG, "REV pressed (%s)", esp_err_to_name(err));
+}
+
+static void on_stop_linact(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_linact_stop_monitor();
+    set_status(err == ESP_OK ? "LINACT: STOP" : "LINACT: STOP FAILED");
+    ESP_LOGI(TAG, "STOP pressed (%s)", esp_err_to_name(err));
+}
+
 
 // static void on_clean(lv_event_t *e) //dont need a clean lol
 // {
@@ -141,15 +181,16 @@ void ui_show_home(void)
     static lv_coord_t row_dsc[] = { LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
     lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
 
-    lv_obj_t *b_start   = make_big_btn(cont, "Start",   on_start);
-    lv_obj_t *b_stop    = make_big_btn(cont, "Stop",    on_stop);
-    lv_obj_t *b_tare    = make_big_btn(cont, "Tare",    on_tare);
-    lv_obj_t *b_recipes = make_big_btn(cont, "Recipes", on_recipes);
+    lv_obj_t *b_fwd    = make_big_btn(cont, "Forward",  on_fwd);
+    lv_obj_t *b_rev    = make_big_btn(cont, "Backward", on_rev);
+    lv_obj_t *b_stop   = make_big_btn(cont, "Stop",     on_stop_linact);
+    lv_obj_t *b_tare   = make_big_btn(cont, "Tare",     on_tare);  
 
-    lv_obj_set_grid_cell(b_start,   LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_stop,    LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_tare,    LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_set_grid_cell(b_recipes, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
+    lv_obj_set_grid_cell(b_fwd,  LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_rev,  LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_stop, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
+    lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
+
 
     }
 
