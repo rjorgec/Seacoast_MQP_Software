@@ -1,6 +1,6 @@
 #include "touch_cal.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include <nvs.h>
+#include <nvs_flash.h> 
 #include "esp_log.h"
 
 static const char *TAG = "touch_cal";

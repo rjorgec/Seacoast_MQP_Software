@@ -53,7 +53,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
         return ESP_OK;
     }
     if (total > 64 * 1024) {
-        httpd_resp_send_err(req, HTTPD_413_PAYLOAD_TOO_LARGE, "Too large (max 64KB)");
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "Too large (max 64KB)");
         return ESP_OK;
     }
 

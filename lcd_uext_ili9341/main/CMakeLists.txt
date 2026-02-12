@@ -5,20 +5,13 @@ idf_component_register(
         "ui.c"
         "ui_screens.c"
         "touch_ns2009.c"
+        "touch_cal.c"
         "control.c"
         "dosing.c"
         "loadcell.c"
         "flap.c"
-        "touch_cal.c"
-        "wifi_ap.c"
-        "web_server.c"
-        "recipes.c"
     INCLUDE_DIRS "."
-    REQUIRES
-        nvs_flash
-        esp_wifi
-        esp_netif
-        esp_event
-        esp_http_server
-        spiffs
+    PRIV_REQUIRES esp_timer
+    PRIV_REQUIRES nvs_flash
+    PRIV_REQUIRES motor_hal
 )
