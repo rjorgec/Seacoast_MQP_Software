@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "ui_screens.h"   //for ui_status_set
+#include "flap.h"
 
 static const char *TAG = "control";
 static QueueHandle_t s_q;
@@ -97,6 +98,11 @@ static void control_task(void *arg)
 {
     (void)arg;
 
+    
+    esp_err_t err = flap_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "flap_init failed: %s", esp_err_to_name(err));
+    }
 
     ESP_ERROR_CHECK(dosing_init(&s_dose));
     //must tick!
