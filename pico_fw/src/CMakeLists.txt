@@ -22,21 +22,29 @@ project(UART_TEST LANGUAGES C CXX)
 
 pico_sdk_init()
 
-add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8163/drv8163.c ../shared/cobs.c ../shared/proto_crc.c)
+add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8163/drv8163.c ../../shared/proto/cobs.c ../../shared/proto/proto_crc.c)
 
-# 1. Move up from 'src' to 'Project_Root'
 get_filename_component(BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
 
-# 2. Reference 'drivers' inside 'Project_Root'
-set(EXTERNAL_HEADERS_DIR "${BASE_DIR}")
+# Get the project root directory (parent of pico_fw)
+get_filename_component(PROJECT_ROOT "${BASE_DIR}" DIRECTORY)
 
-# 3. Apply to target
-target_include_directories(${PROJECT_NAME} PRIVATE "${EXTERNAL_HEADERS_DIR}")
+# Set up include directories for source dir and shared dir
+set(EXTERNAL_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(SHARED_DIR "${PROJECT_ROOT}/shared")
+
+# Apply to target
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "${EXTERNAL_HEADERS_DIR}"
+    "${BASE_DIR}"
+    "${SHARED_DIR}"
+)
 
 target_link_libraries(${PROJECT_NAME} pico_stdlib hardware_gpio hardware_pwm hardware_adc hardware_uart)
 
-# Enable USB CDC for printf output
+# Enable USB CDC for printf output, disable UART stdio to avoid conflict with uart_server
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
+pico_enable_stdio_uart(${PROJECT_NAME} 0)
 
 # Generate .uf2 file for easy flashing
 pico_add_extra_outputs(${PROJECT_NAME})

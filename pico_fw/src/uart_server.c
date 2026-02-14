@@ -11,8 +11,8 @@
 
 #include "board_pins.h"
 #include "drivers/drv8163/drv8163.h"
-#include "shared/proto.h"
-#include "shared/cobs.h"
+#include "proto/proto.h"
+#include "proto/cobs.h"
 
 #define UART_RX_RING_SIZE 512u
 #define UART_ENCODED_FRAME_MAX 256u
@@ -139,9 +139,8 @@ static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t 
     s_drv8163.config.current_high_threshold = p->high_th;
     s_drv8163.config.current_check_interval_ms = p->interval_ms;
 
-    drv8163_motor_state_t st = (p->dir == 0) ? DRV8163_MOTOR_FORWARD : DRV8163_MOTOR_REVERSE; //new
+    drv8163_motor_state_t st = (p->dir == 0) ? DRV8163_MOTOR_FORWARD : DRV8163_MOTOR_REVERSE; // new
     (void)drv8163_set_motor_control(&s_drv8163, st, p->speed);
-
 
     if (s_drv8163.monitoring_enabled)
     {
@@ -150,7 +149,6 @@ static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t 
 
     if (!drv8163_start_current_monitoring(&s_drv8163))
     {
-        printf("ADC %u\n", s_drv8163.last_current_adc.average);
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
