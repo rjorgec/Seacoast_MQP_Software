@@ -34,6 +34,23 @@ typedef enum {
     MSG_NACK                    = 0x81,
 } msg_type_t;
 
+/*
+typddef enum{
+    Close flaps
+    Cut innoculant
+    Dose
+    Abort
+
+    Tare
+    Get weight
+
+    Accept bag
+    Open bag
+    Close bag
+    Dispense bag
+}commands*/
+
+
 typedef enum {
     NACK_BAD_FRAME   = 1,
     NACK_BAD_CRC     = 2,
