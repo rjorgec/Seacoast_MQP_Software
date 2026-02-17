@@ -11,8 +11,13 @@
 
 #include "board_pins.h"
 #include "drivers/drv8163/drv8163.h"
-#include "proto/proto.h"
-#include "proto/cobs.h"
+
+#include "extern/pico-scale/include/hx711_scale_adaptor.h"
+#include "extern/pico-scale/include/scale.h"
+#include "extern/pico-scale/extern/hx711-pico-c/include/common.h"
+
+#include "shared/proto/proto.h"
+#include "shared/proto/cobs.h"
 
 #define UART_RX_RING_SIZE 512u
 #define UART_ENCODED_FRAME_MAX 256u
@@ -36,6 +41,13 @@ static bool s_drv8163_ready;
 
 static uart_inst_t *s_uart;
 static bool s_uart_ready;
+
+static hx711_t s_hx711;
+static bool s_hx711_ready;
+static hx711_scale_adaptor_t s_hxsa;
+static scale_t s_scale;
+static scale_options_t s_scale_opt;
+static int32_t s_scale_valbuff[1000];
 
 static uart_inst_t *uart_from_id(void)
 {
@@ -169,6 +181,72 @@ static void handle_drv8163_stop(uint16_t seq)
     send_ack(seq);
 }
 
+static void handle_hx711_tare(uint16_t seq)
+{
+    if (!s_hx711_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    s_scale_opt.strat = strategy_type_time;
+    s_scale_opt.timeout = 1000000; // 1 second timeout
+
+    if (scale_zero(&s_scale, &s_scale_opt))
+    {
+        printf("HX711: Scale zeroed successfully\n");
+        send_ack(seq);
+    }
+    else
+    {
+        printf("HX711: Scale failed to zero\n");
+        send_nack(seq, NACK_UNKNOWN);
+    }
+}
+
+static void handle_hx711_read(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len != (uint16_t)sizeof(pl_hx711_measure_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+
+    if (!s_hx711_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    const pl_hx711_measure_t *p = (const pl_hx711_measure_t *)payload;
+    
+    // Configure measurement options
+    s_scale_opt.strat = strategy_type_time;
+    s_scale_opt.timeout = p->interval_us;
+
+    mass_t mass = {0};
+    if (scale_weight(&s_scale, &mass, &s_scale_opt))
+    {
+        char str[MASS_TO_STRING_BUFF_SIZE];
+        mass_to_string(&mass, str);
+        printf("HX711: Weight = %s\n", str);
+        
+        // Send mass data back in response payload
+        pl_hx711_mass_t response = {
+            .mass_ug = (int32_t)mass.ug,
+            .unit = (uint8_t)mass.unit,
+            ._rsvd = {0, 0, 0}
+        };
+        
+        (void)uart_send_frame(MSG_HX711_MEASURE, seq, &response, (uint16_t)sizeof(response));
+    }
+    else
+    {
+        printf("HX711: Failed to read weight\n");
+        send_nack(seq, NACK_UNKNOWN);
+    }
+}
+
 static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
 {
     if (decoded_len < sizeof(proto_hdr_t) + 2u)
@@ -224,6 +302,16 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
     case MSG_MOTOR_DRV8163_STOP_MON:
         printf("Stop\n");
         handle_drv8163_stop(hdr.seq);
+        break;
+
+    case MSG_HX711_TARE:
+        printf("HX711 Tare\n");
+        handle_hx711_tare(hdr.seq);
+        break;
+
+    case MSG_HX711_MEASURE:
+        printf("HX711 Measure\n");
+        handle_hx711_read(hdr.seq, payload, hdr.len);
         break;
 
     default:
@@ -289,6 +377,59 @@ static void init_drv8163(void)
     s_drv8163_ready = true;
 }
 
+static void init_hx711(void)
+{
+    s_hx711_ready = false;
+
+    if (HX711_CLK_GPIO < 0 || HX711_DATA_GPIO < 0)
+    {
+        printf("uart_server: HX711 pins not set in board_pins.h; HX711 RPC disabled\n");
+        return;
+    }
+
+    // Configuration constants (can be calibrated later)
+    const mass_unit_t unit = mass_g;
+    const int32_t refUnit = 432;
+    const int32_t offset = -367539;
+
+    // Initialize default scale options
+    scale_options_get_default(&s_scale_opt);
+
+    // Set up the read buffer for the scale
+    s_scale_opt.buffer = s_scale_valbuff;
+    s_scale_opt.bufflen = sizeof(s_scale_valbuff) / sizeof(s_scale_valbuff[0]);
+
+    // Initialize HX711 configuration
+    hx711_config_t hxcfg = {0};
+    hx711_get_default_config(&hxcfg);
+    hxcfg.clock_pin = (uint)HX711_CLK_GPIO;
+    hxcfg.data_pin = (uint)HX711_DATA_GPIO;
+
+    // Initialize the HX711 hardware
+    hx711_init(&s_hx711, &hxcfg);
+    hx711_power_up(&s_hx711, hx711_gain_128);
+    hx711_wait_settle(hx711_rate_80);
+
+    // Initialize the HX711 scale adaptor
+    if (!hx711_scale_adaptor_init(&s_hxsa, &s_hx711))
+    {
+        printf("uart_server: HX711 scale adaptor init failed\n");
+        return;
+    }
+
+    // Initialize the scale
+    scale_init(
+        &s_scale,
+        hx711_scale_adaptor_get_base(&s_hxsa),
+        unit,
+        refUnit,
+        offset);
+
+    s_hx711_ready = true;
+    printf("uart_server: HX711 initialized (CLK=%d DATA=%d)\n",
+           HX711_CLK_GPIO, HX711_DATA_GPIO);
+}
+
 void uart_server_init(void)
 {
     memset(&s_rx_ring, 0, sizeof(s_rx_ring));
@@ -317,6 +458,7 @@ void uart_server_init(void)
     }
 
     init_drv8163();
+    init_hx711();
 }
 
 void uart_server_poll(void)

@@ -166,6 +166,8 @@ static void drv8163_apply_motor_control(drv8163_t *dev)
 {
     drv8163_platform_t *pdata = (drv8163_platform_t *)dev->platform_data;
 
+    printf("Motor direction: %u, speed %u\n", dev->current_state, dev->current_speed);
+
     switch (dev->current_state)
     {
     case DRV8163_MOTOR_STOP:

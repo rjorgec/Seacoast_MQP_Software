@@ -31,16 +31,18 @@ get_filename_component(PROJECT_ROOT "${BASE_DIR}" DIRECTORY)
 
 # Set up include directories for source dir and shared dir
 set(EXTERNAL_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
-set(SHARED_DIR "${PROJECT_ROOT}/shared")
 
 # Apply to target
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${EXTERNAL_HEADERS_DIR}"
     "${BASE_DIR}"
-    "${SHARED_DIR}"
+    "${PROJECT_ROOT}"
 )
 
-target_link_libraries(${PROJECT_NAME} pico_stdlib hardware_gpio hardware_pwm hardware_adc hardware_uart)
+# Add pico-scale library from extern directory
+add_subdirectory(../../extern/pico-scale ${CMAKE_BINARY_DIR}/pico-scale)
+
+target_link_libraries(${PROJECT_NAME} pico_stdlib pico_stdio hardware_gpio hardware_pwm hardware_adc hardware_uart hardware_pio pico-scale)
 
 # Enable USB CDC for printf output, disable UART stdio to avoid conflict with uart_server
 pico_enable_stdio_usb(${PROJECT_NAME} 1)

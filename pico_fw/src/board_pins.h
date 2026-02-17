@@ -73,6 +73,24 @@
 #endif
 
 // =========================
+// HX711 scale pins
+// =========================
+// Required mapping decisions for real hardware bring-up:
+// - HX711_CLK_GPIO: Clock pin
+// - HX711_DATA_GPIO: Data pin
+
+#ifndef HX711_CLK_GPIO
+#define HX711_CLK_GPIO 13
+#endif
+
+#ifndef HX711_DATA_GPIO
+#define HX711_DATA_GPIO 14
+#endif
+
+#ifndef HX711_DEFAULT_RATE_US
+#define HX711_DEFAULT_RATE_US 250000
+#endif
+// =========================
 // Optional compile-time guards
 // =========================
 // Turn these on once you're ready to require real pin selection.
