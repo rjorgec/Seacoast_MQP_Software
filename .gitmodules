@@ -1,0 +1,3 @@
+[submodule "extern/pico-scale"]
+	path = extern/pico-scale
+	url = https://github.com/endail/pico-scale
