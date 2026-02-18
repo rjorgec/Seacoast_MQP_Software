@@ -365,6 +365,256 @@ extern "C"
     drv8434s_recover_result_t drv8434s_recover_from_fault(
         drv8434s_t *dev, drv8434s_fault_info_t *info, unsigned reset_ms);
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  SPI Daisy-Chain API  (Section 7.5.1.3 of DRV8434S datasheet)
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // When multiple DRV8434S devices are wired in series (MOSI→SDI_1→SDO_1→
+    // SDI_2→SDO_2→…→SDO_N→MISO), a single CS assertion transfers one frame
+    // that addresses all devices simultaneously.
+    //
+    // TX frame (2 + 2·N bytes):
+    //   [HDR1][HDR2][A_N][A_{N-1}]…[A_1][D_N][D_{N-1}]…[D_1]
+    //
+    // RX frame (2 + 2·N bytes, received in parallel with TX):
+    //   [S_N][S_{N-1}]…[S_1][HDR1][HDR2][R_N][R_{N-1}]…[R_1]
+    //
+    // HDR1 = 10[N5:N0]  – "10" prefix, lower 6 bits = device count
+    // HDR2 = 10xxxxxx   – "10" prefix, lower bits are don't-care
+    // S_k  = 11[fault]  – "11" prefix, lower 6 bits = fault flags for device k
+    // A_k / D_k         – same 2-byte format as single-device mode
+    // R_k               – register data returned by device k
+    //
+    // Device indices in this API are 0-based, where 0 is the device whose
+    // SDI is connected directly to the MCU MOSI.
+
+    // Maximum devices per chain (datasheet limit = 63; practical compile-time cap).
+#define DRV8434S_CHAIN_MAX_DEVICES 8u
+
+    // Maximum TX/RX buffer size for a fully-populated chain.
+#define DRV8434S_CHAIN_MAX_FRAME (2u + 2u * DRV8434S_CHAIN_MAX_DEVICES)
+
+    // Header byte bit patterns.
+#define DRV8434S_CHAIN_HDR_PREFIX 0x80u // bits[7:6] = "10"
+#define DRV8434S_CHAIN_HDR_N_MASK 0x3Fu // bits[5:0] = device count (in HDR1)
+
+    // Status byte bit patterns.
+#define DRV8434S_CHAIN_STAT_PREFIX 0xC0u // bits[7:6] = "11"
+#define DRV8434S_CHAIN_STAT_MASK 0x3Fu   // bits[5:0] = fault flags
+
+    // ── Daisy-chain types ────────────────────────────────────────────────────
+
+    // Configuration shared by all devices in one daisy chain.
+    typedef struct
+    {
+        void *user_ctx;               // Passed to every callback
+        drv8434s_spi_xfer_t spi_xfer; // Full-duplex SPI; one call covers all devices
+        drv8434s_cs_control_t cs;     // Single CS that spans the whole chain frame
+        drv8434s_delay_ms_t delay_ms; // Optional ms delay (can be NULL)
+        drv8434s_delay_us_t delay_us; // Optional µs delay (recommended; used for
+                                      // CS hold time and step edge timing)
+        uint8_t n_devices;            // Devices in chain (1 – DRV8434S_CHAIN_MAX_DEVICES)
+    } drv8434s_chain_config_t;
+
+    // Per-device fault status decoded from the RX status bytes.
+    typedef struct
+    {
+        uint8_t raw;     // Raw status byte from the chain frame
+        bool is_faulted; // True if any fault bit (bits[5:0]) is set
+    } drv8434s_chain_dev_status_t;
+
+    // Chain context.  Owns per-device register shadow caches.
+    typedef struct
+    {
+        drv8434s_chain_config_t cfg;
+        uint8_t reg_cache[DRV8434S_CHAIN_MAX_DEVICES][DRV8434S_NUM_REGS];
+    } drv8434s_chain_t;
+
+    // ── Daisy-chain lifecycle ────────────────────────────────────────────────
+
+    // Initialise a chain context from cfg.  Returns false if cfg is invalid
+    // or n_devices is out of range (0 or > DRV8434S_CHAIN_MAX_DEVICES).
+    bool drv8434s_chain_init(drv8434s_chain_t *chain,
+                             const drv8434s_chain_config_t *cfg);
+
+    // ── Per-device register access (targeted – all others receive NOP) ───────
+    //
+    // NOP = read FAULT register; harmless side effect, no state change.
+    // status_out: optional array of n_devices entries; receives the status
+    // byte for every device captured during the frame.  Pass NULL to ignore.
+
+    // Write one register on device dev_idx; all others get a NOP.
+    bool drv8434s_chain_write_reg(drv8434s_chain_t *chain,
+                                  uint8_t dev_idx, uint8_t reg, uint8_t value,
+                                  drv8434s_chain_dev_status_t *status_out);
+
+    // Read one register from device dev_idx; all others get a NOP.
+    bool drv8434s_chain_read_reg(drv8434s_chain_t *chain,
+                                 uint8_t dev_idx, uint8_t reg, uint8_t *value,
+                                 drv8434s_chain_dev_status_t *status_out);
+
+    // Read-modify-write one register on device dev_idx.
+    bool drv8434s_chain_modify_reg(drv8434s_chain_t *chain,
+                                   uint8_t dev_idx, uint8_t reg,
+                                   uint8_t mask, uint8_t value,
+                                   drv8434s_chain_dev_status_t *status_out);
+
+    // ── Broadcast register access (one frame, all devices) ───────────────────
+
+    // Write the same register address with per-device values in one frame.
+    // values[k] is written to device k (0-based).
+    bool drv8434s_chain_write_all(drv8434s_chain_t *chain,
+                                  uint8_t reg, const uint8_t *values,
+                                  drv8434s_chain_dev_status_t *status_out);
+
+    // Read the same register from every device in one frame.
+    // values_out[k] receives the report byte for device k (0-based).
+    bool drv8434s_chain_read_all(drv8434s_chain_t *chain,
+                                 uint8_t reg, uint8_t *values_out,
+                                 drv8434s_chain_dev_status_t *status_out);
+
+    // ── Broadcast motor-control helpers ──────────────────────────────────────
+
+    // Issue one SPI step to every device simultaneously (single chain frame).
+    // Writes STEP bit in CTRL3 for all devices, then restores the cache to
+    // STEP=0 so the next call always produces a clean 0→1 rising edge.
+    // Requires SPI step mode to have been enabled (drv8434s_chain_set_spi_step_mode_all).
+    bool drv8434s_chain_step_all(drv8434s_chain_t *chain,
+                                 drv8434s_chain_dev_status_t *status_out);
+
+    // Enable motor outputs on every device (sets EN_OUT in CTRL2 for all).
+    bool drv8434s_chain_enable_all(drv8434s_chain_t *chain,
+                                   drv8434s_chain_dev_status_t *status_out);
+
+    // Disable motor outputs on every device (clears EN_OUT in CTRL2 for all).
+    bool drv8434s_chain_disable_all(drv8434s_chain_t *chain,
+                                    drv8434s_chain_dev_status_t *status_out);
+
+    // Clear latched faults on every device (sets CLR_FLT in CTRL4 for all).
+    bool drv8434s_chain_clear_faults_all(drv8434s_chain_t *chain,
+                                         drv8434s_chain_dev_status_t *status_out);
+
+    // Set direction for every device.  reverse=false → forward, true → reverse.
+    // Requires SPI_DIR mode (drv8434s_chain_set_spi_step_mode_all).
+    bool drv8434s_chain_set_dir_all(drv8434s_chain_t *chain, bool reverse,
+                                    drv8434s_chain_dev_status_t *status_out);
+
+    // Set microstep resolution for every device simultaneously.
+    bool drv8434s_chain_set_microstep_all(drv8434s_chain_t *chain,
+                                          drv8434s_microstep_t mode,
+                                          drv8434s_chain_dev_status_t *status_out);
+
+    // Enable SPI step/direction mode for every device (sets SPI_STEP and
+    // SPI_DIR in CTRL3 for all).  Must be called before chain_step_all /
+    // chain_set_dir_all will have any effect.
+    bool drv8434s_chain_set_spi_step_mode_all(drv8434s_chain_t *chain,
+                                              drv8434s_chain_dev_status_t *status_out);
+
+    // ── Per-device motor-control helpers ─────────────────────────────────────
+    //
+    // These target a single device in the chain; all other devices in the
+    // same SPI frame receive a NOP (read FAULT).
+
+    // Enable motor outputs on a single device (sets EN_OUT in CTRL2).
+    bool drv8434s_chain_enable(drv8434s_chain_t *chain, uint8_t dev_idx,
+                               drv8434s_chain_dev_status_t *status_out);
+
+    // Disable motor outputs on a single device (clears EN_OUT in CTRL2).
+    bool drv8434s_chain_disable(drv8434s_chain_t *chain, uint8_t dev_idx,
+                                drv8434s_chain_dev_status_t *status_out);
+
+    // Issue a single SPI step to one device.  STEP bit is self-clearing;
+    // the shadow cache is updated so the next call produces a clean edge.
+    // Requires SPI step mode on that device (drv8434s_chain_set_spi_step_mode).
+    bool drv8434s_chain_step(drv8434s_chain_t *chain, uint8_t dev_idx,
+                             drv8434s_chain_dev_status_t *status_out);
+
+    // Set direction for a single device.  reverse=false → forward, true → reverse.
+    // Requires SPI_DIR mode on that device.
+    bool drv8434s_chain_set_dir(drv8434s_chain_t *chain, uint8_t dev_idx,
+                                bool reverse,
+                                drv8434s_chain_dev_status_t *status_out);
+
+    // Set microstep resolution for a single device (CTRL3 bits [3:0]).
+    bool drv8434s_chain_set_microstep(drv8434s_chain_t *chain, uint8_t dev_idx,
+                                      drv8434s_microstep_t mode,
+                                      drv8434s_chain_dev_status_t *status_out);
+
+    // Set torque / full-scale current DAC for a single device (CTRL1 bits [6:3]).
+    // trq range 0–15: 0 = 100% full-scale, 15 = 25%.
+    bool drv8434s_chain_set_torque(drv8434s_chain_t *chain, uint8_t dev_idx,
+                                   uint8_t trq,
+                                   drv8434s_chain_dev_status_t *status_out);
+
+    // Enable SPI step/direction mode for a single device (sets SPI_STEP and
+    // SPI_DIR in CTRL3).  Must be called before chain_step / chain_set_dir
+    // will affect the device.
+    bool drv8434s_chain_set_spi_step_mode(drv8434s_chain_t *chain,
+                                          uint8_t dev_idx,
+                                          drv8434s_chain_dev_status_t *status_out);
+
+    // Read the 12-bit torque count (TRQ_COUNT) from a single device.
+    // Combines CTRL8 (low 8 bits) and CTRL9 bits [3:0] (high 4 bits).
+    bool drv8434s_chain_read_torque_count(drv8434s_chain_t *chain,
+                                          uint8_t dev_idx,
+                                          uint16_t *torque_out,
+                                          drv8434s_chain_dev_status_t *status_out);
+
+    // Clear latched faults on a single device (sets CLR_FLT in CTRL4).
+    bool drv8434s_chain_clear_faults(drv8434s_chain_t *chain, uint8_t dev_idx,
+                                     drv8434s_chain_dev_status_t *status_out);
+
+    // ── Motion result & high-level rotate helper ────────────────────────────
+    //
+    // drv8434s_chain_rotate() steps a single motor towards a target position
+    // (step count), stopping early if the torque count exceeds a threshold.
+    // This provides closed-loop position/torque control for dispensing,
+    // homing, or similar applications.
+
+    // Stop reason codes returned in drv8434s_motion_result_t.
+    typedef enum
+    {
+        DRV8434S_MOTION_OK = 0,       // Reached target position
+        DRV8434S_MOTION_TORQUE_LIMIT, // Stopped: torque threshold exceeded
+        DRV8434S_MOTION_FAULT,        // Stopped: device fault detected
+        DRV8434S_MOTION_SPI_ERROR,    // Stopped: SPI communication failure
+    } drv8434s_motion_stop_reason_t;
+
+    // Result structure populated by drv8434s_chain_rotate().
+    typedef struct
+    {
+        int32_t steps_requested;              // Echo of the requested step count
+        int32_t steps_achieved;               // Actual steps completed (signed: +fwd, -rev)
+        uint16_t last_torque_count;           // Last TRQ_COUNT reading
+        drv8434s_motion_stop_reason_t reason; // Why the motion ended
+    } drv8434s_motion_result_t;
+
+    // Rotate a single motor in the chain up to |target_steps| steps.
+    //
+    // The motor steps in the direction indicated by the sign of target_steps
+    // (positive = forward, negative = reverse).  After each step the torque
+    // count is sampled; if it meets or exceeds torque_limit the motion stops
+    // early.  Set torque_limit to 0 to disable the torque check (pure
+    // position move).
+    //
+    // step_delay_us controls the time between successive steps and therefore
+    // the motor speed.
+    //
+    // @param chain         Chain context (must be initialised).
+    // @param dev_idx       0-based device index in the chain.
+    // @param target_steps  Signed step count (+forward / −reverse).
+    // @param torque_limit  12-bit torque threshold (0 = disabled).
+    // @param step_delay_us Microseconds between steps (motor speed).
+    // @param result        Receives motion outcome; must not be NULL.
+    // @return true on success (motion completed or stopped gracefully),
+    //         false on parameter error.
+    bool drv8434s_chain_rotate(drv8434s_chain_t *chain,
+                               uint8_t dev_idx,
+                               int32_t target_steps,
+                               uint16_t torque_limit,
+                               unsigned step_delay_us,
+                               drv8434s_motion_result_t *result);
+
 #ifdef __cplusplus
 }
 #endif

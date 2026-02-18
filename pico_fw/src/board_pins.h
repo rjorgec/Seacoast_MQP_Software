@@ -80,7 +80,7 @@
 // - HX711_DATA_GPIO: Data pin
 
 #ifndef HX711_CLK_GPIO
-#define HX711_CLK_GPIO 13
+#define HX711_CLK_GPIO 15
 #endif
 
 #ifndef HX711_DATA_GPIO
@@ -90,6 +90,47 @@
 #ifndef HX711_DEFAULT_RATE_US
 #define HX711_DEFAULT_RATE_US 250000
 #endif
+
+// =========================
+// DRV8434S stepper SPI
+// =========================
+// All DRV8434S devices in the daisy chain share the same MOSI/MISO/SCK and
+// a single CS line.  Adjust pin numbers and DRV8434S_N_DEVICES to match your
+// PCB layout.  Set DRV8434S_CS_GPIO to -1 (and SPI pins to -1) to disable
+// the stepper subsystem at compile time.
+
+#ifndef DRV8434S_SPI_ID
+#define DRV8434S_SPI_ID 0 // 0 = spi0, 1 = spi1
+#endif
+
+#ifndef DRV8434S_SPI_BAUD
+#define DRV8434S_SPI_BAUD 10000000 // 10 MHz (device supports up to 10 MHz)
+#endif
+
+#ifndef DRV8434S_SCK_GPIO
+#define DRV8434S_SCK_GPIO 2
+#endif
+
+#ifndef DRV8434S_MOSI_GPIO
+#define DRV8434S_MOSI_GPIO 3
+#endif
+
+#ifndef DRV8434S_MISO_GPIO
+#define DRV8434S_MISO_GPIO 4
+#endif
+
+// Single shared chip-select for the entire daisy chain.
+#ifndef DRV8434S_CS_GPIO
+#define DRV8434S_CS_GPIO 5
+#endif
+
+// Number of DRV8434S devices wired in series.
+// 1 = single device (still uses the daisy-chain framing, which is valid).
+// Set to 0 to disable the stepper subsystem entirely.
+#ifndef DRV8434S_N_DEVICES
+#define DRV8434S_N_DEVICES 3
+#endif
+
 // =========================
 // Optional compile-time guards
 // =========================

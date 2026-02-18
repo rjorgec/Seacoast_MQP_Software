@@ -7,10 +7,13 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "hardware/gpio.h"
+#include "hardware/spi.h"
 #include "hardware/uart.h"
 
 #include "board_pins.h"
 #include "drivers/drv8163/drv8163.h"
+#include "drivers/drv8434s/drv8434s.h"
 
 #include "extern/pico-scale/include/hx711_scale_adaptor.h"
 #include "extern/pico-scale/include/scale.h"
@@ -39,6 +42,9 @@ static bool s_frame_overflow;
 static drv8163_t s_drv8163;
 static bool s_drv8163_ready;
 
+static drv8434s_chain_t s_stepper_chain;
+static bool s_stepper_ready;
+
 static uart_inst_t *s_uart;
 static bool s_uart_ready;
 
@@ -52,6 +58,39 @@ static int32_t s_scale_valbuff[1000];
 static uart_inst_t *uart_from_id(void)
 {
     return (PICO_UART_ID == 0) ? uart0 : uart1;
+}
+
+static spi_inst_t *stepper_spi_from_id(void)
+{
+    return (DRV8434S_SPI_ID == 0) ? spi0 : spi1;
+}
+
+// ── DRV8434S SPI callbacks ───────────────────────────────────────────────────
+
+static int stepper_spi_xfer(void *ctx, const uint8_t *tx, uint8_t *rx, size_t len)
+{
+    spi_inst_t *spi = (spi_inst_t *)ctx;
+    spi_write_read_blocking(spi, tx, rx, len);
+    return 0;
+}
+
+static void stepper_cs(void *ctx, bool asserted)
+{
+    (void)ctx;
+    // DRV8434S CS is active-low: assert = drive low, deassert = drive high.
+    gpio_put((uint)DRV8434S_CS_GPIO, asserted ? 0u : 1u);
+}
+
+static void stepper_delay_us(void *ctx, unsigned us)
+{
+    (void)ctx;
+    sleep_us(us);
+}
+
+static void stepper_delay_ms(void *ctx, unsigned ms)
+{
+    (void)ctx;
+    sleep_ms(ms);
 }
 
 static bool rx_ring_push(uint8_t b)
@@ -129,6 +168,81 @@ static void send_nack(uint16_t seq, nack_code_t code)
 {
     pl_nack_t nack = {.code = (uint8_t)code};
     (void)uart_send_frame(MSG_NACK, seq, &nack, (uint16_t)sizeof(nack));
+}
+
+// ── DRV8434S stepper handlers ────────────────────────────────────────────────
+
+static void handle_stepper_enable(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len != (uint16_t)sizeof(pl_stepper_enable_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+
+    if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    const pl_stepper_enable_t *p = (const pl_stepper_enable_t *)payload;
+    bool ok;
+    if (p->enable)
+    {
+        ok = drv8434s_chain_enable_all(&s_stepper_chain, NULL);
+        printf("Stepper: enable all → %s\n", ok ? "ok" : "fail");
+    }
+    else
+    {
+        ok = drv8434s_chain_disable_all(&s_stepper_chain, NULL);
+        printf("Stepper: disable all → %s\n", ok ? "ok" : "fail");
+    }
+
+    ok ? send_ack(seq) : send_nack(seq, NACK_UNKNOWN);
+}
+
+static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len != (uint16_t)sizeof(pl_stepper_stepjob_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+
+    if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    const pl_stepper_stepjob_t *p = (const pl_stepper_stepjob_t *)payload;
+
+    // Set direction for all devices in one chain frame.
+    if (!drv8434s_chain_set_dir_all(&s_stepper_chain, p->dir != 0u, NULL))
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    // Step all devices the requested number of times, with the requested
+    // inter-step delay.  This is a blocking busy-wait loop; the Pico has no
+    // RTOS here, so it occupies the CPU for the duration of the move.x
+    printf("Stepper: %lu steps dir=%u delay=%lu us\n",
+           (unsigned long)p->steps,
+           (unsigned)p->dir,
+           (unsigned long)p->step_delay_us);
+
+    drv8434s_motion_result_t result;
+
+    if (!drv8434s_chain_rotate(&s_stepper_chain, 0, p->dir == 0 ? p->steps : -p->steps, 0, p->step_delay_us, &result))
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+    printf("%i steps of %i, with final torque %u, failed for %u\n", result.steps_achieved, result.steps_requested, result.last_torque_count, result.reason);
+
+    send_ack(seq);
 }
 
 static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t len)
@@ -219,7 +333,7 @@ static void handle_hx711_read(uint16_t seq, const uint8_t *payload, uint16_t len
     }
 
     const pl_hx711_measure_t *p = (const pl_hx711_measure_t *)payload;
-    
+
     // Configure measurement options
     s_scale_opt.strat = strategy_type_time;
     s_scale_opt.timeout = p->interval_us;
@@ -230,14 +344,13 @@ static void handle_hx711_read(uint16_t seq, const uint8_t *payload, uint16_t len
         char str[MASS_TO_STRING_BUFF_SIZE];
         mass_to_string(&mass, str);
         printf("HX711: Weight = %s\n", str);
-        
+
         // Send mass data back in response payload
         pl_hx711_mass_t response = {
             .mass_ug = (int32_t)mass.ug,
             .unit = (uint8_t)mass.unit,
-            ._rsvd = {0, 0, 0}
-        };
-        
+            ._rsvd = {0, 0, 0}};
+
         (void)uart_send_frame(MSG_HX711_MEASURE, seq, &response, (uint16_t)sizeof(response));
     }
     else
@@ -302,6 +415,16 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
     case MSG_MOTOR_DRV8163_STOP_MON:
         printf("Stop\n");
         handle_drv8163_stop(hdr.seq);
+        break;
+
+    case MSG_MOTOR_STEPPER_ENABLE:
+        printf("Stepper Enable\n");
+        handle_stepper_enable(hdr.seq, payload, hdr.len);
+        break;
+
+    case MSG_MOTOR_STEPPER_STEPJOB:
+        printf("Stepper StepJob\n");
+        handle_stepper_stepjob(hdr.seq, payload, hdr.len);
         break;
 
     case MSG_HX711_TARE:
@@ -375,6 +498,70 @@ static void init_drv8163(void)
     }
 
     s_drv8163_ready = true;
+}
+
+static void init_drv8434s_chain(void)
+{
+    s_stepper_ready = false;
+
+#if DRV8434S_N_DEVICES == 0
+    printf("uart_server: DRV8434S_N_DEVICES=0; stepper RPC disabled\n");
+    return;
+#else
+    if (DRV8434S_SCK_GPIO < 0 || DRV8434S_MOSI_GPIO < 0 ||
+        DRV8434S_MISO_GPIO < 0 || DRV8434S_CS_GPIO < 0)
+    {
+        printf("uart_server: DRV8434S SPI pins not set in board_pins.h; stepper RPC disabled\n");
+        return;
+    }
+
+    // Initialise SPI hardware.
+    // DRV8434S requires SPI Mode 1 (CPOL=0, CPHA=1), MSB-first, 8-bit frames.
+    spi_inst_t *spi = stepper_spi_from_id();
+    spi_init(spi, (uint)DRV8434S_SPI_BAUD);
+    spi_set_format(spi, 8, SPI_CPOL_0, SPI_CPHA_1, SPI_MSB_FIRST);
+
+    gpio_set_function((uint)DRV8434S_SCK_GPIO, GPIO_FUNC_SPI);
+    gpio_set_function((uint)DRV8434S_MOSI_GPIO, GPIO_FUNC_SPI);
+    gpio_set_function((uint)DRV8434S_MISO_GPIO, GPIO_FUNC_SPI);
+
+    // CS is software-controlled (active-low); start deasserted (high).
+    gpio_init((uint)DRV8434S_CS_GPIO);
+    gpio_set_dir((uint)DRV8434S_CS_GPIO, GPIO_OUT);
+    gpio_put((uint)DRV8434S_CS_GPIO, 1u);
+
+    // Initialise the chain context.
+    drv8434s_chain_config_t cfg = {
+        .user_ctx = spi,
+        .spi_xfer = stepper_spi_xfer,
+        .cs = stepper_cs,
+        .delay_ms = stepper_delay_ms,
+        .delay_us = stepper_delay_us,
+        .n_devices = (uint8_t)DRV8434S_N_DEVICES,
+    };
+
+    if (!drv8434s_chain_init(&s_stepper_chain, &cfg))
+    {
+        printf("uart_server: DRV8434S chain init failed\n");
+        return;
+    }
+
+    // Enable SPI step/direction mode for all devices so STEP and DIR bits
+    // in CTRL3 are the active controls rather than the hardware pins.
+    if (!drv8434s_chain_set_spi_step_mode_all(&s_stepper_chain, NULL))
+    {
+        printf("uart_server: DRV8434S set SPI step mode failed\n");
+        return;
+    }
+
+    s_stepper_ready = true;
+    printf("uart_server: DRV8434S chain ready (SPI%u, %d device(s), "
+           "SCK=%d MOSI=%d MISO=%d CS=%d)\n",
+           (unsigned)DRV8434S_SPI_ID,
+           DRV8434S_N_DEVICES,
+           DRV8434S_SCK_GPIO, DRV8434S_MOSI_GPIO,
+           DRV8434S_MISO_GPIO, DRV8434S_CS_GPIO);
+#endif
 }
 
 static void init_hx711(void)
@@ -459,6 +646,7 @@ void uart_server_init(void)
 
     init_drv8163();
     init_hx711();
+    init_drv8434s_chain();
 }
 
 void uart_server_poll(void)

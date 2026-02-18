@@ -22,7 +22,7 @@ project(UART_TEST LANGUAGES C CXX)
 
 pico_sdk_init()
 
-add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8163/drv8163.c ../../shared/proto/cobs.c ../../shared/proto/proto_crc.c)
+add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8163/drv8163.c ../../shared/proto/cobs.c ../../shared/proto/proto_crc.c ../drivers/drv8434s/drv8434s.c)
 
 get_filename_component(BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
 
@@ -42,7 +42,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # Add pico-scale library from extern directory
 add_subdirectory(../../extern/pico-scale ${CMAKE_BINARY_DIR}/pico-scale)
 
-target_link_libraries(${PROJECT_NAME} pico_stdlib pico_stdio hardware_gpio hardware_pwm hardware_adc hardware_uart hardware_pio pico-scale)
+target_link_libraries(${PROJECT_NAME} pico_stdlib pico_stdio hardware_gpio hardware_pwm hardware_adc hardware_uart hardware_pio pico-scale hardware_spi)
 
 # Enable USB CDC for printf output, disable UART stdio to avoid conflict with uart_server
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
