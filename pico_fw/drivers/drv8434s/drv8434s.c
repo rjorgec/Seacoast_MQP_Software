@@ -387,6 +387,28 @@ bool drv8434s_clear_faults(drv8434s_t *dev)
                                DRV8434S_CTRL4_CLR_FLT);
 }
 
+bool drv8434s_set_fault_config(drv8434s_t *dev, uint8_t flags)
+{
+    if (!dev)
+        return false;
+
+    // CTRL4 bits [3:0] map directly from flags bits [3:0]:
+    //   bit 0 = OTW_REP, bit 1 = OTSD_MODE, bit 2 = OCP_MODE, bit 3 = EN_OL
+    uint8_t ctrl4_mask = DRV8434S_CTRL4_OTW_REP | DRV8434S_CTRL4_OTSD_MODE |
+                         DRV8434S_CTRL4_OCP_MODE | DRV8434S_CTRL4_EN_OL;
+    uint8_t ctrl4_val = flags & ctrl4_mask;
+
+    if (!drv8434s_modify_reg(dev, DRV8434S_REG_CTRL4, ctrl4_mask, ctrl4_val))
+        return false;
+
+    // CTRL5 STL_REP (bit 3) ← flags bit 4 (DRV8434S_FAULT_CFG_STL_REP)
+    uint8_t stl_rep = (flags & DRV8434S_FAULT_CFG_STL_REP)
+                          ? DRV8434S_CTRL5_STL_REP
+                          : 0;
+    return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL5,
+                               DRV8434S_CTRL5_STL_REP, stl_rep);
+}
+
 bool drv8434s_read_torque_count(drv8434s_t *dev, uint8_t *trq_count)
 {
     // TRQ_COUNT [7:0] is in CTRL8 (0x0A)
@@ -769,126 +791,6 @@ bool drv8434s_chain_read_all(drv8434s_chain_t *chain,
     return true;
 }
 
-bool drv8434s_chain_step_all(drv8434s_chain_t *chain,
-                             drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain)
-        return false;
-
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t tx[DRV8434S_CHAIN_MAX_FRAME] = {0};
-    uint8_t rx[DRV8434S_CHAIN_MAX_FRAME] = {0};
-    uint8_t addr_bytes[DRV8434S_CHAIN_MAX_DEVICES];
-    uint8_t data_bytes[DRV8434S_CHAIN_MAX_DEVICES];
-
-    uint8_t ridx = DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK;
-    uint8_t addr_val = DRV8434S_SPI_WRITE |
-                       ((DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK) << DRV8434S_ADDR_SHIFT);
-
-    for (uint8_t k = 0; k < N; ++k)
-    {
-        // Strip STEP from the cached base so the device sees a clean 0→1 edge.
-        uint8_t base = chain->reg_cache[k][ridx] & (uint8_t)~DRV8434S_CTRL3_STEP;
-        addr_bytes[k] = addr_val;
-        data_bytes[k] = base | DRV8434S_CTRL3_STEP;
-    }
-
-    chain_fill_tx(chain, addr_bytes, data_bytes, tx);
-    if (chain_xfer(chain, tx, rx) != 0)
-        return false;
-
-    // STEP is self-clearing on the device.  Restore cache to STEP=0 so that
-    // the next drv8434s_chain_step_all() call always produces a rising edge.
-    for (uint8_t k = 0; k < N; ++k)
-        chain->reg_cache[k][ridx] &= (uint8_t)~DRV8434S_CTRL3_STEP;
-
-    chain_parse_rx(chain, rx, status_out, NULL);
-    return true;
-}
-
-bool drv8434s_chain_enable_all(drv8434s_chain_t *chain,
-                               drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain)
-        return false;
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t values[DRV8434S_CHAIN_MAX_DEVICES];
-    for (uint8_t k = 0; k < N; ++k)
-        values[k] = chain->reg_cache[k][DRV8434S_REG_CTRL2 & DRV8434S_ADDR_MASK] | DRV8434S_CTRL2_EN_OUT;
-    return drv8434s_chain_write_all(chain, DRV8434S_REG_CTRL2, values, status_out);
-}
-
-bool drv8434s_chain_disable_all(drv8434s_chain_t *chain,
-                                drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain)
-        return false;
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t values[DRV8434S_CHAIN_MAX_DEVICES];
-    for (uint8_t k = 0; k < N; ++k)
-        values[k] = chain->reg_cache[k][DRV8434S_REG_CTRL2 & DRV8434S_ADDR_MASK] & (uint8_t)~DRV8434S_CTRL2_EN_OUT;
-    return drv8434s_chain_write_all(chain, DRV8434S_REG_CTRL2, values, status_out);
-}
-
-bool drv8434s_chain_clear_faults_all(drv8434s_chain_t *chain,
-                                     drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain)
-        return false;
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t values[DRV8434S_CHAIN_MAX_DEVICES];
-    for (uint8_t k = 0; k < N; ++k)
-        values[k] = chain->reg_cache[k][DRV8434S_REG_CTRL4 & DRV8434S_ADDR_MASK] | DRV8434S_CTRL4_CLR_FLT;
-    return drv8434s_chain_write_all(chain, DRV8434S_REG_CTRL4, values, status_out);
-}
-
-bool drv8434s_chain_set_dir_all(drv8434s_chain_t *chain, bool reverse,
-                                drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain)
-        return false;
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t ridx = DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK;
-    uint8_t values[DRV8434S_CHAIN_MAX_DEVICES];
-    for (uint8_t k = 0; k < N; ++k)
-    {
-        uint8_t base = chain->reg_cache[k][ridx];
-        values[k] = reverse ? (base | DRV8434S_CTRL3_DIR)
-                            : (base & (uint8_t)~DRV8434S_CTRL3_DIR);
-    }
-    return drv8434s_chain_write_all(chain, DRV8434S_REG_CTRL3, values, status_out);
-}
-
-bool drv8434s_chain_set_microstep_all(drv8434s_chain_t *chain,
-                                      drv8434s_microstep_t mode,
-                                      drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain || (uint8_t)mode > 9u)
-        return false;
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t ridx = DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK;
-    uint8_t values[DRV8434S_CHAIN_MAX_DEVICES];
-    for (uint8_t k = 0; k < N; ++k)
-    {
-        uint8_t base = chain->reg_cache[k][ridx];
-        values[k] = (base & (uint8_t)~DRV8434S_CTRL3_MICROSTEP_MASK) | ((uint8_t)mode << DRV8434S_CTRL3_MICROSTEP_SHIFT);
-    }
-    return drv8434s_chain_write_all(chain, DRV8434S_REG_CTRL3, values, status_out);
-}
-
-bool drv8434s_chain_set_spi_step_mode_all(drv8434s_chain_t *chain,
-                                          drv8434s_chain_dev_status_t *status_out)
-{
-    if (!chain)
-        return false;
-    uint8_t N = chain->cfg.n_devices;
-    uint8_t ridx = DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK;
-    uint8_t values[DRV8434S_CHAIN_MAX_DEVICES];
-    for (uint8_t k = 0; k < N; ++k)
-        values[k] = chain->reg_cache[k][ridx] | DRV8434S_CTRL3_SPI_STEP | DRV8434S_CTRL3_SPI_DIR;
-    return drv8434s_chain_write_all(chain, DRV8434S_REG_CTRL3, values, status_out);
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 //  Per-device chain motor-control helpers
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1024,123 +926,300 @@ bool drv8434s_chain_clear_faults(drv8434s_chain_t *chain, uint8_t dev_idx,
                                      status_out);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  High-level motion helper
-// ═════════════════════════════════════════════════════════════════════════════
-
-// Rolling-average depth for torque readings.  The torque limit is only
-// triggered when the *average* of the last N samples meets the threshold,
-// which rejects single-sample noise spikes.
-#define DRV8434S_TRQ_BUF_SIZE 10u
-
-bool drv8434s_chain_rotate(drv8434s_chain_t *chain,
-                           uint8_t dev_idx,
-                           int32_t target_steps,
-                           uint16_t torque_limit,
-                           unsigned step_delay_us,
-                           drv8434s_motion_result_t *result)
+bool drv8434s_chain_set_fault_config(drv8434s_chain_t *chain,
+                                     uint8_t dev_idx, uint8_t flags,
+                                     drv8434s_chain_dev_status_t *status_out)
 {
-    if (!chain || !result || dev_idx >= chain->cfg.n_devices)
+    if (!chain || dev_idx >= chain->cfg.n_devices)
         return false;
 
-    // ── Initialise result ────────────────────────────────────────────────
-    memset(result, 0, sizeof(*result));
-    result->steps_requested = target_steps;
-    result->reason = DRV8434S_MOTION_OK;
+    // CTRL4 bits [3:0]: OTW_REP, OTSD_MODE, OCP_MODE, EN_OL
+    uint8_t ctrl4_mask = DRV8434S_CTRL4_OTW_REP | DRV8434S_CTRL4_OTSD_MODE |
+                         DRV8434S_CTRL4_OCP_MODE | DRV8434S_CTRL4_EN_OL;
+    uint8_t ctrl4_val = flags & ctrl4_mask;
+
+    if (!drv8434s_chain_modify_reg(chain, dev_idx, DRV8434S_REG_CTRL4,
+                                   ctrl4_mask, ctrl4_val, status_out))
+        return false;
+
+    // CTRL5 STL_REP (bit 3) ← flags bit 4 (DRV8434S_FAULT_CFG_STL_REP)
+    uint8_t stl_rep = (flags & DRV8434S_FAULT_CFG_STL_REP)
+                          ? DRV8434S_CTRL5_STL_REP
+                          : 0;
+    return drv8434s_chain_modify_reg(chain, dev_idx, DRV8434S_REG_CTRL5,
+                                     DRV8434S_CTRL5_STL_REP, stl_rep,
+                                     status_out);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Non-blocking motion engine
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Helper: build a result snapshot from a job's current state.
+static void motion_build_result(const drv8434s_motion_job_t *job,
+                                drv8434s_motion_result_t *result)
+{
+    result->steps_requested = job->steps_requested;
+    result->steps_achieved = job->steps_achieved;
+    result->last_torque_count = job->last_torque_count;
+    result->reason = job->reason;
+}
+
+// Helper: finish a job, invoke done_cb, and check whether the engine can idle.
+static void motion_finish_job(drv8434s_motion_t *motion, uint8_t dev_idx)
+{
+    drv8434s_motion_job_t *job = &motion->jobs[dev_idx];
+    job->active = false;
+
+    if (motion->done_cb)
+    {
+        drv8434s_motion_result_t result;
+        motion_build_result(job, &result);
+        motion->done_cb(motion->done_ctx, dev_idx, &result);
+    }
+}
+
+bool drv8434s_motion_init(drv8434s_motion_t *motion,
+                          drv8434s_chain_t *chain,
+                          drv8434s_motion_done_cb_t done_cb,
+                          void *done_ctx,
+                          uint8_t torque_sample_div)
+{
+    if (!motion || !chain)
+        return false;
+
+    memset(motion, 0, sizeof(*motion));
+    motion->chain = chain;
+    motion->done_cb = done_cb;
+    motion->done_ctx = done_ctx;
+    motion->torque_sample_div = (torque_sample_div == 0) ? 1 : torque_sample_div;
+    return true;
+}
+
+bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
+                           int32_t target_steps, uint16_t torque_limit)
+{
+    if (!motion || !motion->chain || dev_idx >= motion->chain->cfg.n_devices)
+        return false;
+
+    drv8434s_motion_job_t *job = &motion->jobs[dev_idx];
+    if (job->active)
+        return false; // Already running on this device
 
     if (target_steps == 0)
-        return true; // Nothing to do.
+        return true; // Nothing to do
 
-    // ── Set direction based on sign ─────────────────────────────────────
-    bool reverse = (target_steps < 0);
-    int32_t steps_remaining = reverse ? -target_steps : target_steps;
+    memset(job, 0, sizeof(*job));
+    job->active = true;
+    job->reverse = (target_steps < 0);
+    job->steps_requested = target_steps;
+    job->steps_remaining = job->reverse ? -target_steps : target_steps;
+    job->torque_limit = torque_limit;
+    job->reason = DRV8434S_MOTION_OK;
 
-    if (!drv8434s_chain_set_dir(chain, dev_idx, reverse, NULL))
+    // Set direction on the device
+    if (!drv8434s_chain_set_dir(motion->chain, dev_idx, job->reverse, NULL))
     {
-        result->reason = DRV8434S_MOTION_SPI_ERROR;
-        return true;
+        job->active = false;
+        job->reason = DRV8434S_MOTION_SPI_ERROR;
+        return false;
     }
 
-    // ── Torque rolling-average buffer ───────────────────────────────────
-    // Circular buffer of the most recent TRQ_COUNT readings.  The torque
-    // limit check uses the average of all filled entries so that a single
-    // noisy sample cannot trigger a false stop.
-    uint16_t trq_buf[DRV8434S_TRQ_BUF_SIZE];
-    memset(trq_buf, 0, sizeof(trq_buf));
-    uint8_t trq_buf_idx = 0;   // next write position
-    uint8_t trq_buf_count = 0; // entries filled (≤ DRV8434S_TRQ_BUF_SIZE)
-
-    // ── Step loop ───────────────────────────────────────────────────────
-    drv8434s_chain_dev_status_t status[DRV8434S_CHAIN_MAX_DEVICES];
-
-    for (int32_t i = 0; i < steps_remaining; ++i)
-    {
-        // Issue one step
-        if (!drv8434s_chain_step(chain, dev_idx, status))
-        {
-            result->reason = DRV8434S_MOTION_SPI_ERROR;
-            return true;
-        }
-
-        // Track the step (signed)
-        result->steps_achieved += reverse ? -1 : 1;
-
-        // Check per-device fault status from the chain frame
-        if (status[dev_idx].is_faulted)
-        {
-            result->reason = DRV8434S_MOTION_FAULT;
-            // Try to read torque one last time for diagnostics
-            drv8434s_chain_read_torque_count(chain, dev_idx,
-                                             &result->last_torque_count, NULL);
-            return true;
-        }
-
-        // Inter-step delay (controls motor speed)
-        if (step_delay_us > 0)
-            drv_delay_us_chain(chain, step_delay_us);
-
-        // Torque check (if enabled), sampled every 20 steps
-        // if (torque_limit > 0 && i % 20 == 0)
-        if (torque_limit > 0)
-        {
-            uint16_t trq = 0;
-            if (!drv8434s_chain_read_torque_count(chain, dev_idx, &trq, NULL))
-            {
-                result->reason = DRV8434S_MOTION_SPI_ERROR;
-                return true;
-            }
-            result->last_torque_count = trq;
-
-            // Push into rolling buffer
-            trq_buf[trq_buf_idx] = trq;
-            trq_buf_idx = (trq_buf_idx + 1u) % DRV8434S_TRQ_BUF_SIZE;
-            if (trq_buf_count < DRV8434S_TRQ_BUF_SIZE)
-                trq_buf_count++;
-
-            // Compute average of buffered samples
-            uint32_t sum = 0;
-            for (uint8_t b = 0; b < trq_buf_count; ++b)
-                sum += trq_buf[b];
-            uint16_t avg = (uint16_t)(sum / trq_buf_count);
-
-            // TRQ_COUNT represents torque margin until stall (0 = stalled).
-            // Trip when the average falls at or below the limit.
-            if (avg <= torque_limit)
-            {
-                result->reason = DRV8434S_MOTION_TORQUE_LIMIT;
-                return true;
-            }
-        }
-    }
-
-    // ── Reached target position ─────────────────────────────────────────
-    // Sample final torque for caller's information
-    if (torque_limit > 0)
-    {
-        drv8434s_chain_read_torque_count(chain, dev_idx,
-                                         &result->last_torque_count, NULL);
-    }
-
-    result->reason = DRV8434S_MOTION_OK;
     return true;
+}
+
+bool drv8434s_motion_tick(drv8434s_motion_t *motion)
+{
+    if (!motion || !motion->chain)
+        return false;
+
+    drv8434s_chain_t *chain = motion->chain;
+    uint8_t N = chain->cfg.n_devices;
+    uint8_t ridx = DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK;
+
+    // Count active jobs — if none, nothing to do.
+    bool any_active = false;
+    for (uint8_t k = 0; k < N; ++k)
+    {
+        if (motion->jobs[k].active)
+        {
+            any_active = true;
+            break;
+        }
+    }
+    if (!any_active)
+        return true;
+
+    // ── Step all active motors in a single chain frame ──────────────────
+    uint8_t tx[DRV8434S_CHAIN_MAX_FRAME] = {0};
+    uint8_t rx[DRV8434S_CHAIN_MAX_FRAME] = {0};
+    uint8_t addr_bytes[DRV8434S_CHAIN_MAX_DEVICES];
+    uint8_t data_bytes[DRV8434S_CHAIN_MAX_DEVICES];
+
+    uint8_t addr_val = DRV8434S_SPI_WRITE |
+                       ((DRV8434S_REG_CTRL3 & DRV8434S_ADDR_MASK) << DRV8434S_ADDR_SHIFT);
+
+    for (uint8_t k = 0; k < N; ++k)
+    {
+        if (motion->jobs[k].active)
+        {
+            uint8_t base = chain->reg_cache[k][ridx] & (uint8_t)~DRV8434S_CTRL3_STEP;
+            addr_bytes[k] = addr_val;
+            data_bytes[k] = base | DRV8434S_CTRL3_STEP;
+        }
+        else
+        {
+            addr_bytes[k] = CHAIN_NOP_ADDR;
+            data_bytes[k] = CHAIN_NOP_DATA;
+        }
+    }
+
+    chain_fill_tx(chain, addr_bytes, data_bytes, tx);
+    if (chain_xfer(chain, tx, rx) != 0)
+    {
+        // SPI failure: abort all active jobs
+        for (uint8_t k = 0; k < N; ++k)
+        {
+            if (motion->jobs[k].active)
+            {
+                motion->jobs[k].reason = DRV8434S_MOTION_SPI_ERROR;
+                motion_finish_job(motion, k);
+            }
+        }
+        return false;
+    }
+
+    // Restore STEP=0 in cache for active devices (STEP is self-clearing)
+    for (uint8_t k = 0; k < N; ++k)
+    {
+        if (motion->jobs[k].active)
+            chain->reg_cache[k][ridx] &= (uint8_t)~DRV8434S_CTRL3_STEP;
+    }
+
+    // Parse status bytes for fault checking
+    drv8434s_chain_dev_status_t status[DRV8434S_CHAIN_MAX_DEVICES];
+    chain_parse_rx(chain, rx, status, NULL);
+
+    // ── Update each active job ──────────────────────────────────────────
+    // Collect indices to finish after the loop to avoid modifying while iterating
+    uint8_t finish_list[DRV8434S_CHAIN_MAX_DEVICES];
+    uint8_t finish_count = 0;
+
+    for (uint8_t k = 0; k < N; ++k)
+    {
+        drv8434s_motion_job_t *job = &motion->jobs[k];
+        if (!job->active)
+            continue;
+
+        job->steps_achieved += job->reverse ? -1 : 1;
+        job->steps_remaining--;
+
+        if (status[k].is_faulted)
+        {
+            job->reason = DRV8434S_MOTION_FAULT;
+            finish_list[finish_count++] = k;
+        }
+        else if (job->steps_remaining <= 0)
+        {
+            job->reason = DRV8434S_MOTION_OK;
+            finish_list[finish_count++] = k;
+        }
+    }
+
+    // ── Torque sampling (periodic) ──────────────────────────────────────
+    motion->torque_tick_count++;
+    bool do_torque = (motion->torque_tick_count >= motion->torque_sample_div);
+    if (do_torque)
+        motion->torque_tick_count = 0;
+
+    if (do_torque)
+    {
+        for (uint8_t k = 0; k < N; ++k)
+        {
+            drv8434s_motion_job_t *job = &motion->jobs[k];
+            if (!job->active || job->torque_limit == 0)
+                continue;
+
+            // Skip if already scheduled to finish
+            bool already_done = false;
+            for (uint8_t f = 0; f < finish_count; ++f)
+            {
+                if (finish_list[f] == k)
+                {
+                    already_done = true;
+                    break;
+                }
+            }
+            if (already_done)
+                continue;
+
+            uint16_t trq = 0;
+            if (!drv8434s_chain_read_torque_count(chain, k, &trq, NULL))
+            {
+                job->reason = DRV8434S_MOTION_SPI_ERROR;
+                finish_list[finish_count++] = k;
+                continue;
+            }
+            job->last_torque_count = trq;
+
+            // Push into rolling-average buffer
+            job->trq_buf[job->trq_buf_idx] = trq;
+            job->trq_buf_idx = (job->trq_buf_idx + 1u) % DRV8434S_MOTION_TRQ_BUF_SIZE;
+            if (job->trq_buf_count < DRV8434S_MOTION_TRQ_BUF_SIZE)
+                job->trq_buf_count++;
+
+            // Compute average
+            uint32_t sum = 0;
+            for (uint8_t b = 0; b < job->trq_buf_count; ++b)
+                sum += job->trq_buf[b];
+            uint16_t avg = (uint16_t)(sum / job->trq_buf_count);
+
+            // TRQ_COUNT = torque margin until stall (0 = stalled).
+            // Trip when average falls at or below the limit.
+            if (avg <= job->torque_limit)
+            {
+                job->reason = DRV8434S_MOTION_TORQUE_LIMIT;
+                finish_list[finish_count++] = k;
+            }
+        }
+    }
+
+    // ── Fire completion callbacks ────────────────────────────────────────
+    for (uint8_t f = 0; f < finish_count; ++f)
+        motion_finish_job(motion, finish_list[f]);
+
+    return true;
+}
+
+bool drv8434s_motion_cancel(drv8434s_motion_t *motion, uint8_t dev_idx,
+                            drv8434s_motion_result_t *result)
+{
+    if (!motion || !motion->chain || dev_idx >= motion->chain->cfg.n_devices)
+        return false;
+
+    drv8434s_motion_job_t *job = &motion->jobs[dev_idx];
+    if (!job->active)
+        return false;
+
+    job->reason = DRV8434S_MOTION_CANCELLED;
+    job->active = false;
+
+    if (result)
+        motion_build_result(job, result);
+
+    // done_cb is NOT invoked for cancellations (caller already knows).
+    return true;
+}
+
+bool drv8434s_motion_is_busy(const drv8434s_motion_t *motion)
+{
+    if (!motion || !motion->chain)
+        return false;
+
+    for (uint8_t k = 0; k < motion->chain->cfg.n_devices; ++k)
+    {
+        if (motion->jobs[k].active)
+            return true;
+    }
+    return false;
 }

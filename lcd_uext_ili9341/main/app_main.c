@@ -23,8 +23,25 @@
 
 static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t len)
 {
-    // Forward to UI screens handler for weight display
-    ui_screens_pico_rx_handler(type, seq, pl, len);
+    switch (type)
+    {
+    case MSG_MOTION_DONE:
+        if (len >= sizeof(pl_motion_done_t))
+        {
+            ui_ops_on_motion_done((const pl_motion_done_t *)pl);
+        }
+        break;
+    case MSG_VACUUM_STATUS:
+        if (len >= sizeof(pl_vacuum_status_t))
+        {
+            ui_ops_on_vacuum_status((const pl_vacuum_status_t *)pl);
+        }
+        break;
+    default:
+        /* Forward to UI screens handler for weight display */
+        ui_screens_pico_rx_handler(type, seq, pl, len);
+        break;
+    }
 }
 static touch_ns2009_t g_touch;
 

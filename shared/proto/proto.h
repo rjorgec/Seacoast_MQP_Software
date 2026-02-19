@@ -35,6 +35,22 @@ extern "C"
         MSG_CTRL_STOP = 0x32,
         MSG_CTRL_PAUSE = 0x33,
 
+        /* ---- State-based command messages (0x40–0x5F) ---- */
+        MSG_FLAPS_OPEN = 0x40,     /* ESP→Pico: open both flaps to open-circuit endpoint */
+        MSG_FLAPS_CLOSE = 0x41,    /* ESP→Pico: close flaps up to torque threshold */
+        MSG_ARM_MOVE = 0x42,       /* ESP→Pico: move arm stepper to named position */
+        MSG_RACK_MOVE = 0x43,      /* ESP→Pico: move rack stepper to named position */
+        MSG_TURNTABLE_GOTO = 0x44, /* ESP→Pico: move turntable to named position */
+        MSG_TURNTABLE_HOME = 0x45, /* ESP→Pico: home turntable (zero position counter) */
+        MSG_HOTWIRE_SET = 0x46,    /* ESP→Pico: enable/disable hot wire PWM */
+        MSG_VACUUM_SET = 0x47,     /* ESP→Pico: turn vacuum pump on/off */
+        /** MSG_VACUUM2_SET — uses the REVERSE channel (IN2/GP7) of the hotwire
+         *  DRV8163; mutually exclusive with hotwire ON. */
+        MSG_VACUUM2_SET = 0x48, /* ESP→Pico: turn second vacuum pump on/off */
+        /* ---- Unsolicited status messages (0x60–0x6F) ---- */
+        MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
+        MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
+
         MSG_ACK = 0x80,
         MSG_NACK = 0x81,
     } msg_type_t;
@@ -120,6 +136,125 @@ extern "C"
     } pl_nack_t;
 
     uint16_t proto_crc16_ccitt(const uint8_t *data, uint32_t len);
+
+    /* ------------------------------------------------------------------ */
+    /*  Supporting enumerations for state-based commands                   */
+    /* ------------------------------------------------------------------ */
+
+    /** Identifies which subsystem a MSG_MOTION_DONE refers to */
+    typedef enum
+    {
+        SUBSYS_FLAPS = 0,
+        SUBSYS_ARM = 1,
+        SUBSYS_RACK = 2,
+        SUBSYS_TURNTABLE = 3,
+        SUBSYS_HOTWIRE = 4,
+        SUBSYS_VACUUM = 5,
+    } subsystem_id_t;
+
+    /** Result code carried in MSG_MOTION_DONE */
+    typedef enum
+    {
+        MOTION_OK = 0,      /* reached target position / state */
+        MOTION_STALLED = 1, /* stall detected before target */
+        MOTION_TIMEOUT = 2, /* motion did not complete within deadline */
+        MOTION_FAULT = 3,   /* driver fault (nFAULT asserted) */
+    } motion_result_t;
+
+    /** Named positions for the arm stepper (DRV8434S device 0) */
+    typedef enum
+    {
+        ARM_POS_PRESS = 0, /* press against attachment point */
+        ARM_POS_1 = 1,     /* absolute position 1 */
+        ARM_POS_2 = 2,     /* absolute position 2 */
+    } arm_pos_t;
+
+    /** Named positions for the rack stepper (DRV8434S device 1) */
+    typedef enum
+    {
+        RACK_POS_HOME = 0,   /* drive to physical end-stop and zero */
+        RACK_POS_EXTEND = 1, /* move to extend position */
+        RACK_POS_PRESS = 2,  /* move to press-into-arm position */
+    } rack_pos_t;
+
+    /** Named positions for the turntable stepper (DRV8434S device 2) */
+    typedef enum
+    {
+        TURNTABLE_POS_A = 0,
+        TURNTABLE_POS_B = 1,
+        TURNTABLE_POS_C = 2,
+        TURNTABLE_POS_D = 3,
+    } turntable_pos_t;
+
+    /** Vacuum pump status codes (carried in MSG_VACUUM_STATUS) */
+    typedef enum
+    {
+        VACUUM_OK = 0,
+        VACUUM_BLOCKED = 1,
+        VACUUM_OFF = 2,
+    } vacuum_status_code_t;
+
+    /* ------------------------------------------------------------------ */
+    /*  Payload structs for state-based messages                           */
+    /*  All structs are packed; max total payload <= 128 bytes             */
+    /* ------------------------------------------------------------------ */
+
+    /** MSG_FLAPS_OPEN / MSG_FLAPS_CLOSE -- no variable payload needed;
+     *  thresholds come from board_pins.h constants on the Pico side.
+     *  Use proto_hdr_t with len=0 for both. */
+
+    /** MSG_ARM_MOVE payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t position; /**< arm_pos_t cast to uint8_t */
+    } pl_arm_move_t;
+
+    /** MSG_RACK_MOVE payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t position; /**< rack_pos_t cast to uint8_t */
+    } pl_rack_move_t;
+
+    /** MSG_TURNTABLE_GOTO payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t position; /**< turntable_pos_t cast to uint8_t */
+    } pl_turntable_goto_t;
+
+    /** MSG_HOTWIRE_SET payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t enable; /**< 1 = on, 0 = off */
+    } pl_hotwire_set_t;
+
+    /** MSG_VACUUM_SET payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t enable; /**< 1 = on, 0 = off */
+    } pl_vacuum_set_t;
+
+    /** MSG_VACUUM2_SET payload (1 byte) — second vacuum pump via hotwire DRV8163 reverse channel */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t enable; /**< 1 = on, 0 = off */
+    } pl_vacuum2_set_t;
+
+    /** MSG_MOTION_DONE payload (8 bytes) -- unsolicited Pico->ESP */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t subsystem;  /**< subsystem_id_t */
+        uint8_t result;     /**< motion_result_t */
+        uint8_t _rsvd[2];   /**< reserved, set to 0 */
+        int32_t steps_done; /**< signed step count actually executed */
+    } pl_motion_done_t;
+
+    /** MSG_VACUUM_STATUS payload (4 bytes) -- unsolicited Pico->ESP */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t status; /**< vacuum_status_code_t */
+        uint8_t _rsvd;  /**< reserved */
+        uint16_t rpm;   /**< measured RPM (0 if pump off) */
+    } pl_vacuum_status_t;
 
 #ifdef __cplusplus
 }

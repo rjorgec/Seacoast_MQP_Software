@@ -25,21 +25,16 @@ static const char *TAG = "ui_screens";
 #define JOG_HIGH_TH 200u
 #define JOG_INTERVAL_MS 5u
 
-static lv_obj_t *lbl_status = NULL;
-static lv_obj_t *lbl_weight = NULL;
+/* Shared file-scope labels — re-assigned by every ui_show_* call */
+static lv_obj_t *lbl_status = NULL; /* updated by ui_status_set() / set_status() */
+static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without it */
 static float s_last_weight_g = 0.0f;
 
-// ── Stepper test screen state ────────────────────────────────────────────────
-#define STEPPER_N_DEVICES 3u
-#define STEPPER_DELAY_US 20000u // 10 ms inter-step delay
-#define STEPPER_STEPS_MIN 100u
-#define STEPPER_STEPS_MAX 2000u
-#define STEPPER_STEPS_INC 100u
+/* Operations screen async-update labels — NULL when not on that screen */
+static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
+static lv_obj_t *s_ops_lbl_vacuum = NULL; /* vacuum pump status + RPM */
 
-static lv_obj_t *s_step_dev_ind[STEPPER_N_DEVICES]; // per-device indicator boxes
-static lv_obj_t *s_step_lbl_steps = NULL;           // "Steps: NNN" label
-static bool s_step_enabled = false;                 // tracks last enable state
-static uint32_t s_step_count = 100u;                // step count for next job
+/* ── Status helpers ─────────────────────────────────────────────────────── */
 
 void ui_status_set(const char *s)
 {
@@ -56,21 +51,7 @@ static void set_status(const char *s)
     ui_status_set(s);
 }
 
-// ---- Button callbacks ----
-
-static void on_start(lv_event_t *e)
-{
-    (void)e;
-    ctrl_cmd_t cmd = {
-        .type = CTRL_CMD_START,
-        .target_g = 50.0f, // TODO make it editable
-        .recipe_id = 0,
-    };
-
-    bool ok = control_send(&cmd);
-    set_status(ok ? "START sent" : "START failed");
-    ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
-}
+/* ── Home-screen button callbacks ────────────────────────────────────────── */
 
 static void on_fwd(lv_event_t *e)
 {
@@ -96,19 +77,11 @@ static void on_rev(lv_event_t *e)
     ESP_LOGI(TAG, "REV pressed (%s)", esp_err_to_name(err));
 }
 
-static void on_stop_linact(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_linact_stop_monitor();
-    set_status(err == ESP_OK ? "LINACT: STOP" : "LINACT: STOP FAILED");
-    ESP_LOGI(TAG, "STOP pressed (%s)", esp_err_to_name(err));
-}
-
 static void on_dose(lv_event_t *e)
 {
     (void)e;
     ui_show_dosing();
-    ESP_LOGI(TAG, "DOSE presses");
+    ESP_LOGI(TAG, "DOSE pressed");
 }
 
 static void on_home(lv_event_t *e)
@@ -118,38 +91,24 @@ static void on_home(lv_event_t *e)
     ESP_LOGI(TAG, "HOME pressed");
 }
 
-static void on_stepper_page(lv_event_t *e)
+static void on_ops_page(lv_event_t *e)
 {
     (void)e;
-    ui_show_stepper();
-    ESP_LOGI(TAG, "Stepper Test pressed");
+    ui_show_operations();
+    ESP_LOGI(TAG, "Operations pressed");
 }
-
-// static void on_clean(lv_event_t *e) //dont need a clean lol
-// {
-//     (void)e;
-//     ctrl_cmd_t cmd = { .type = CTRL_CMD_CLEAN };
-
-//     bool ok = control_send(&cmd);
-//     set_status(ok ? "CLEAN sent" : "CLEAN failed");
-//     ESP_LOGI(TAG, "Clean pressed (send=%d)", (int)ok);
-// }
 
 static void on_tare(lv_event_t *e)
 {
     (void)e;
-
-    // Send MSG_HX711_TARE request to Pico via UART
     uint8_t nack_code = 0;
     esp_err_t err = pico_link_send_rpc(MSG_HX711_TARE,
-                                       NULL,
-                                       0,
-                                       1000, // 1 second timeout
+                                       NULL, 0,
+                                       1000, /* 1 s timeout */
                                        &nack_code);
-
     if (err == ESP_OK)
     {
-        s_last_weight_g = 0.0f; // Reset displayed weight
+        s_last_weight_g = 0.0f;
         set_status("TARE successful");
         ESP_LOGI(TAG, "HX711 Tare successful");
     }
@@ -164,19 +123,49 @@ static void on_tare(lv_event_t *e)
     }
 }
 
-static void on_recipes(lv_event_t *e)
+static void on_read_weight(lv_event_t *e)
 {
     (void)e;
-    // TODO
-    set_status("RECIPES (TODO)");
-    ESP_LOGI(TAG, "Recipes pressed");
+    pl_hx711_measure_t measure_payload = {
+        .interval_us = 1000000 /* 1 s interval */
+    };
+    uint16_t seq = 0;
+    esp_err_t err = pico_link_send(MSG_HX711_MEASURE,
+                                   &measure_payload,
+                                   sizeof(measure_payload),
+                                   &seq);
+    if (err == ESP_OK)
+    {
+        set_status("Weight request sent...");
+        ESP_LOGI(TAG, "Weight request sent (seq=%u)", seq);
+    }
+    else
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Weight req failed: %s",
+                 esp_err_to_name(err));
+        set_status(buf);
+        ESP_LOGW(TAG, "Weight request failed (%s)", esp_err_to_name(err));
+    }
+}
+
+static void on_start(lv_event_t *e)
+{
+    (void)e;
+    ctrl_cmd_t cmd = {
+        .type = CTRL_CMD_START,
+        .target_g = 50.0f,
+        .recipe_id = 0,
+    };
+    bool ok = control_send(&cmd);
+    set_status(ok ? "START sent" : "START failed");
+    ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
 }
 
 static void on_pause(lv_event_t *e)
 {
     (void)e;
     ctrl_cmd_t cmd = {.type = CTRL_CMD_PAUSE};
-
     bool ok = control_send(&cmd);
     set_status(ok ? "PAUSE sent" : "PAUSE failed");
     ESP_LOGI(TAG, "Pause pressed (send=%d)", (int)ok);
@@ -186,43 +175,177 @@ static void on_stop(lv_event_t *e)
 {
     (void)e;
     ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
-
     bool ok = control_send(&cmd);
     set_status(ok ? "STOP sent" : "STOP failed");
     ESP_LOGI(TAG, "Stop pressed (send=%d)", (int)ok);
 }
 
-static void on_read_weight(lv_event_t *e)
+static void on_stop_linact(lv_event_t *e)
 {
     (void)e;
-
-    // Send MSG_HX711_MEASURE request to Pico via UART
-    pl_hx711_measure_t measure_payload = {
-        .interval_us = 1000000 // 1 second interval for measurement
-    };
-
-    uint16_t seq = 0;
-    esp_err_t err = pico_link_send(MSG_HX711_MEASURE,
-                                   &measure_payload,
-                                   sizeof(measure_payload),
-                                   &seq);
-
-    if (err == ESP_OK)
-    {
-        set_status("Weight request sent...");
-        ESP_LOGI(TAG, "Weight request sent (seq=%u)", seq);
-    }
-    else
-    {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Weight req failed: %s", esp_err_to_name(err));
-        set_status(buf);
-        ESP_LOGW(TAG, "Weight request failed (%s)", esp_err_to_name(err));
-    }
+    esp_err_t err = motor_linact_stop_monitor();
+    set_status(err == ESP_OK ? "LINACT: STOP" : "LINACT: STOP FAILED");
+    ESP_LOGI(TAG, "STOP pressed (%s)", esp_err_to_name(err));
 }
 
-// Callback for receiving weight data from Pico (exposed for app_main)
-void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq, const uint8_t *payload, uint16_t len)
+/* ── Operations-screen button callbacks ──────────────────────────────────── */
+
+static void on_flap_open(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_flap_open();
+    set_status(err == ESP_OK ? "Flaps: opening..." : "Flap open: FAILED");
+    ESP_LOGI(TAG, "Flap open (%s)", esp_err_to_name(err));
+}
+
+static void on_flap_close(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_flap_close();
+    set_status(err == ESP_OK ? "Flaps: closing..." : "Flap close: FAILED");
+    ESP_LOGI(TAG, "Flap close (%s)", esp_err_to_name(err));
+}
+
+static void on_arm_press(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_arm_move((uint8_t)ARM_POS_PRESS);
+    set_status(err == ESP_OK ? "Arm: to PRESS..." : "Arm press: FAILED");
+    ESP_LOGI(TAG, "Arm press (%s)", esp_err_to_name(err));
+}
+
+static void on_arm_pos1(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_arm_move((uint8_t)ARM_POS_1);
+    set_status(err == ESP_OK ? "Arm: to POS1..." : "Arm pos1: FAILED");
+    ESP_LOGI(TAG, "Arm pos1 (%s)", esp_err_to_name(err));
+}
+
+static void on_arm_pos2(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_arm_move((uint8_t)ARM_POS_2);
+    set_status(err == ESP_OK ? "Arm: to POS2..." : "Arm pos2: FAILED");
+    ESP_LOGI(TAG, "Arm pos2 (%s)", esp_err_to_name(err));
+}
+
+static void on_rack_home(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_rack_move((uint8_t)RACK_POS_HOME);
+    set_status(err == ESP_OK ? "Rack: homing..." : "Rack home: FAILED");
+    ESP_LOGI(TAG, "Rack home (%s)", esp_err_to_name(err));
+}
+
+static void on_rack_extend(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_rack_move((uint8_t)RACK_POS_EXTEND);
+    set_status(err == ESP_OK ? "Rack: extending..." : "Rack extend: FAILED");
+    ESP_LOGI(TAG, "Rack extend (%s)", esp_err_to_name(err));
+}
+
+static void on_rack_press(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_rack_move((uint8_t)RACK_POS_PRESS);
+    set_status(err == ESP_OK ? "Rack: to PRESS..." : "Rack press: FAILED");
+    ESP_LOGI(TAG, "Rack press (%s)", esp_err_to_name(err));
+}
+
+static void on_turntable_home(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_turntable_home();
+    set_status(err == ESP_OK ? "Tbl: homing..." : "Tbl home: FAILED");
+    ESP_LOGI(TAG, "Turntable home (%s)", esp_err_to_name(err));
+}
+
+static void on_turntable_a(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_A);
+    set_status(err == ESP_OK ? "Tbl: to A..." : "Tbl A: FAILED");
+    ESP_LOGI(TAG, "Turntable A (%s)", esp_err_to_name(err));
+}
+
+static void on_turntable_b(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_B);
+    set_status(err == ESP_OK ? "Tbl: to B..." : "Tbl B: FAILED");
+    ESP_LOGI(TAG, "Turntable B (%s)", esp_err_to_name(err));
+}
+
+static void on_turntable_c(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_C);
+    set_status(err == ESP_OK ? "Tbl: to C..." : "Tbl C: FAILED");
+    ESP_LOGI(TAG, "Turntable C (%s)", esp_err_to_name(err));
+}
+
+static void on_turntable_d(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_D);
+    set_status(err == ESP_OK ? "Tbl: to D..." : "Tbl D: FAILED");
+    ESP_LOGI(TAG, "Turntable D (%s)", esp_err_to_name(err));
+}
+
+static void on_hotwire_on(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_hotwire_set(true);
+    set_status(err == ESP_OK ? "Wire: ON" : "Wire ON: FAILED");
+    ESP_LOGI(TAG, "Hotwire on (%s)", esp_err_to_name(err));
+}
+
+static void on_hotwire_off(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_hotwire_set(false);
+    set_status(err == ESP_OK ? "Wire: OFF" : "Wire OFF: FAILED");
+    ESP_LOGI(TAG, "Hotwire off (%s)", esp_err_to_name(err));
+}
+
+static void on_vacuum_on(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_vacuum_set(true);
+    set_status(err == ESP_OK ? "Vac: ON" : "Vac ON: FAILED");
+    ESP_LOGI(TAG, "Vacuum on (%s)", esp_err_to_name(err));
+}
+
+static void on_vacuum_off(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_vacuum_set(false);
+    set_status(err == ESP_OK ? "Vac: OFF" : "Vac OFF: FAILED");
+    ESP_LOGI(TAG, "Vacuum off (%s)", esp_err_to_name(err));
+}
+
+static void on_vacuum2_on(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "Vacuum2 ON");
+    esp_err_t err = motor_vacuum2_set(true);
+    set_status(err == ESP_OK ? "Vac2: ON" : "Vac2 ON failed");
+}
+
+static void on_vacuum2_off(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "Vacuum2 OFF");
+    esp_err_t err = motor_vacuum2_set(false);
+    set_status(err == ESP_OK ? "Vac2: OFF" : "Vac2 OFF failed");
+}
+
+/* ── Pico RX handler (HX711 weight display) ──────────────────────────────── */
+
+void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
+                                const uint8_t *payload, uint16_t len)
 {
     (void)seq;
 
@@ -231,167 +354,129 @@ void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq, const uint8_t *p
         pl_hx711_mass_t mass_data;
         memcpy(&mass_data, payload, sizeof(mass_data));
 
-        // Convert micrograms to grams
         float weight_g = (float)mass_data.mass_ug / 1000000.0f;
         s_last_weight_g = weight_g;
+        ESP_LOGI(TAG, "Received weight: %.3f g (unit=%u)", weight_g,
+                 mass_data.unit);
 
-        ESP_LOGI(TAG, "Received weight: %.3f g (unit=%u)", weight_g, mass_data.unit);
-
-        // Update weight label if it exists
         if (lbl_weight)
         {
             char weight_str[32];
-            snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g", weight_g);
-
+            snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g",
+                     weight_g);
             lvgl_port_lock(0);
             lv_label_set_text(lbl_weight, weight_str);
             lvgl_port_unlock();
         }
 
-        // Update status
         char status_buf[64];
         snprintf(status_buf, sizeof(status_buf), "Weight: %.2f g", weight_g);
         set_status(status_buf);
     }
 }
 
-// ── Stepper screen helpers & callbacks ──────────────────────────────────────
+/* ── Operations screen — async motion / vacuum handlers ──────────────────── */
 
-static void stepper_refresh_indicators(void)
+void ui_ops_on_motion_done(const pl_motion_done_t *pl)
 {
-    for (int i = 0; i < STEPPER_N_DEVICES; ++i)
-    {
-        if (!s_step_dev_ind[i])
-            continue;
-        // Green = outputs enabled, dark grey = disabled / unknown
-        lv_color_t c = s_step_enabled ? lv_color_hex(0x00AA44)
-                                      : lv_color_hex(0x444444);
-        lv_obj_set_style_bg_color(s_step_dev_ind[i], c, 0);
-    }
-}
-
-static void stepper_refresh_steps_label(void)
-{
-    if (!s_step_lbl_steps)
+    if (!pl || !s_ops_lbl_status)
         return;
-    char buf[24];
-    snprintf(buf, sizeof(buf), "Steps: %lu", (unsigned long)s_step_count);
-    lv_label_set_text(s_step_lbl_steps, buf);
-}
 
-static void on_step_enable_all(lv_event_t *e)
-{
-    (void)e;
-    pl_stepper_enable_t pl = {.enable = 1};
-    uint8_t nack = 0;
-    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_STEPPER_ENABLE,
-                                       &pl, sizeof(pl), 500, &nack);
-    if (err == ESP_OK)
+    const char *sub_name;
+    switch ((subsystem_id_t)pl->subsystem)
     {
-        s_step_enabled = true;
-        stepper_refresh_indicators();
-        set_status("Steppers: ENABLED");
-        ESP_LOGI(TAG, "Stepper enable all: ok");
+    case SUBSYS_FLAPS:
+        sub_name = "Flaps";
+        break;
+    case SUBSYS_ARM:
+        sub_name = "Arm";
+        break;
+    case SUBSYS_RACK:
+        sub_name = "Rack";
+        break;
+    case SUBSYS_TURNTABLE:
+        sub_name = "Turntable";
+        break;
+    case SUBSYS_HOTWIRE:
+        sub_name = "HotWire";
+        break;
+    case SUBSYS_VACUUM:
+        sub_name = "Vacuum";
+        break;
+    default:
+        sub_name = "Unknown";
+        break;
     }
-    else
+
+    const char *res_name;
+    switch ((motion_result_t)pl->result)
     {
-        char buf[56];
-        snprintf(buf, sizeof(buf), "Enable failed: %s (nack=%u)",
-                 esp_err_to_name(err), nack);
-        set_status(buf);
-        ESP_LOGW(TAG, "Stepper enable all: %s nack=%u",
-                 esp_err_to_name(err), nack);
+    case MOTION_OK:
+        res_name = "OK";
+        break;
+    case MOTION_STALLED:
+        res_name = "STALLED";
+        break;
+    case MOTION_TIMEOUT:
+        res_name = "TIMEOUT";
+        break;
+    case MOTION_FAULT:
+        res_name = "FAULT";
+        break;
+    default:
+        res_name = "?";
+        break;
     }
+
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%s: %s", sub_name, res_name);
+
+    lvgl_port_lock(0);
+    lv_label_set_text(s_ops_lbl_status, buf);
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Motion done: %s (steps=%ld)", buf, (long)pl->steps_done);
 }
 
-static void on_step_disable_all(lv_event_t *e)
+void ui_ops_on_vacuum_status(const pl_vacuum_status_t *pl)
 {
-    (void)e;
-    pl_stepper_enable_t pl = {.enable = 0};
-    uint8_t nack = 0;
-    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_STEPPER_ENABLE,
-                                       &pl, sizeof(pl), 500, &nack);
-    if (err == ESP_OK)
+    if (!pl || !s_ops_lbl_vacuum)
+        return;
+
+    char buf[40];
+    lv_color_t col;
+
+    switch ((vacuum_status_code_t)pl->status)
     {
-        s_step_enabled = false;
-        stepper_refresh_indicators();
-        set_status("Steppers: DISABLED");
-        ESP_LOGI(TAG, "Stepper disable all: ok");
+    case VACUUM_OK:
+        snprintf(buf, sizeof(buf), "Vac: OK %u RPM", (unsigned)pl->rpm);
+        col = lv_color_hex(0x00AA44); /* green */
+        break;
+    case VACUUM_BLOCKED:
+        snprintf(buf, sizeof(buf), "Vac: BLOCKED! %u RPM",
+                 (unsigned)pl->rpm);
+        col = lv_color_hex(0xCC2200); /* red */
+        break;
+    case VACUUM_OFF:
+    default:
+        snprintf(buf, sizeof(buf), "Vac: OFF");
+        col = lv_color_hex(0xFFFFFF); /* default white */
+        break;
     }
-    else
-    {
-        char buf[56];
-        snprintf(buf, sizeof(buf), "Disable failed: %s (nack=%u)",
-                 esp_err_to_name(err), nack);
-        set_status(buf);
-        ESP_LOGW(TAG, "Stepper disable all: %s nack=%u",
-                 esp_err_to_name(err), nack);
-    }
+
+    lvgl_port_lock(0);
+    lv_label_set_text(s_ops_lbl_vacuum, buf);
+    lv_obj_set_style_text_color(s_ops_lbl_vacuum, col, 0);
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Vacuum status: %s", buf);
 }
 
-static void do_step_job(uint8_t dir)
-{
-    pl_stepper_stepjob_t pl = {
-        .dir = dir,
-        .steps = s_step_count,
-        .step_delay_us = STEPPER_DELAY_US,
-    };
-    // Timeout = (steps × delay_µs / 1000) ms + 2 s overhead
-    uint32_t timeout_ms = (uint32_t)((s_step_count * STEPPER_DELAY_US) / 1000u) + 2000u;
-    uint8_t nack = 0;
-    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_STEPPER_STEPJOB,
-                                       &pl, sizeof(pl), timeout_ms, &nack);
-    if (err == ESP_OK)
-    {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%s %lu steps done",
-                 dir == 0 ? "FWD" : "REV", (unsigned long)s_step_count);
-        set_status(buf);
-        ESP_LOGI(TAG, "Step job %s %lu steps: ok",
-                 dir == 0 ? "FWD" : "REV", (unsigned long)s_step_count);
-    }
-    else
-    {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s failed: %s (nack=%u)",
-                 dir == 0 ? "FWD" : "REV",
-                 esp_err_to_name(err), nack);
-        set_status(buf);
-        ESP_LOGW(TAG, "Step job failed: %s nack=%u",
-                 esp_err_to_name(err), nack);
-    }
-}
+/* ── UI helpers ──────────────────────────────────────────────────────────── */
 
-static void on_step_fwd(lv_event_t *e)
-{
-    (void)e;
-    do_step_job(0);
-}
-static void on_step_rev(lv_event_t *e)
-{
-    (void)e;
-    do_step_job(1);
-}
-
-static void on_step_minus(lv_event_t *e)
-{
-    (void)e;
-    if (s_step_count > STEPPER_STEPS_MIN)
-        s_step_count -= STEPPER_STEPS_INC;
-    stepper_refresh_steps_label();
-}
-
-static void on_step_plus(lv_event_t *e)
-{
-    (void)e;
-    if (s_step_count < STEPPER_STEPS_MAX)
-        s_step_count += STEPPER_STEPS_INC;
-    stepper_refresh_steps_label();
-}
-
-// ---- UI helpers ----
-
-static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *txt, lv_event_cb_t cb)
+/** Create a full-featured grid button (for Home screen grid layout). */
+static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *txt,
+                              lv_event_cb_t cb)
 {
     lv_obj_t *btn = lv_btn_create(parent);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
@@ -403,175 +488,196 @@ static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *txt, lv_event_cb_t c
     return btn;
 }
 
+/**
+ * Create a button at an explicit absolute position within the screen's
+ * padded content area. Uses LV_ALIGN_TOP_LEFT + (x, y) offsets.
+ */
+static lv_obj_t *make_btn(lv_obj_t *scr, const char *txt,
+                          lv_coord_t x, lv_coord_t y,
+                          lv_coord_t w, lv_coord_t h,
+                          lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(scr);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, txt);
+    lv_obj_center(lbl);
+
+    return btn;
+}
+
+/* ── Screen builders ─────────────────────────────────────────────────────── */
+
 void ui_show_home(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
 
-    // fix scrolling
+    /* Nullify ops-screen labels so async handlers don't touch freed widgets */
+    s_ops_lbl_status = NULL;
+    s_ops_lbl_vacuum = NULL;
+
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
 
-    // status strip
+    /* Status strip */
     lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "IDLE • Seacoast Inoculator");
+    lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    // 2-column × 3-row button grid (row 2 = full-width Stepper Test button)
+    /* 2-column × 3-row button grid */
     lv_obj_t *cont = lv_obj_create(scr);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-
     lv_obj_set_size(cont, 300, 210);
     lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, 0);
 
     lv_obj_set_style_pad_all(cont, 6, 0);
     lv_obj_set_style_pad_row(cont, 6, 0);
     lv_obj_set_style_pad_column(cont, 6, 0);
-
     lv_obj_set_layout(cont, LV_LAYOUT_GRID);
 
-    static lv_coord_t col_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t col_dsc[] = {
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t row_dsc[] = {
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
 
     lv_obj_t *b_fwd = make_big_btn(cont, "Forward", on_fwd);
     lv_obj_t *b_rev = make_big_btn(cont, "Backward", on_rev);
     lv_obj_t *b_dose = make_big_btn(cont, "Dose", on_dose);
     lv_obj_t *b_tare = make_big_btn(cont, "Tare", on_tare);
-    lv_obj_t *b_step = make_big_btn(cont, "Stepper Test", on_stepper_page);
+    lv_obj_t *b_ops = make_big_btn(cont, "Operations", on_ops_page);
 
-    lv_obj_set_grid_cell(b_fwd, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_rev, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_dose, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
-    // Stepper Test spans both columns in row 2 for a wide, easy touch target
-    lv_obj_set_grid_cell(b_step, LV_GRID_ALIGN_STRETCH, 0, 2, LV_GRID_ALIGN_STRETCH, 2, 1);
+    lv_obj_set_grid_cell(b_fwd, LV_GRID_ALIGN_STRETCH, 0, 1,
+                         LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_rev, LV_GRID_ALIGN_STRETCH, 1, 1,
+                         LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_set_grid_cell(b_dose, LV_GRID_ALIGN_STRETCH, 0, 1,
+                         LV_GRID_ALIGN_STRETCH, 1, 1);
+    lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 1, 1,
+                         LV_GRID_ALIGN_STRETCH, 1, 1);
+    /* Operations spans both columns in row 2 for a wide, easy touch target */
+    lv_obj_set_grid_cell(b_ops, LV_GRID_ALIGN_STRETCH, 0, 2,
+                         LV_GRID_ALIGN_STRETCH, 2, 1);
 }
 
-void ui_show_stepper(void)
+/*
+ * Operations Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  0  "Operations"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
+ *  y= 22  [Flap Open  148×24]  4  [Flap Close  148×24]
+ *  y= 50  [Arm Press  96×24]  4  [Arm Pos 1  96×24]  4  [Arm Pos 2  96×24]
+ *  y= 78  [Rack Home  96×24]  4  [Rack Ext   96×24]  4  [Rack Press 96×24]
+ *  y=106  [TblHome 56×24] 4 [TblA 56×24] 4 [TblB 56×24] 4 [TblC 56×24] 4 [TblD 56×24]
+ *  y=134  [Wire ON  148×24]  4  [Wire OFF  148×24]
+ *  y=162  [Vac ON   148×24]  4  [Vac OFF   148×24]
+ *  y=188  s_ops_lbl_status  (motion-done text)
+ *  y=204  s_ops_lbl_vacuum  (vacuum status text)
+ *
+ *  Button-row widths:
+ *    2-btn: 148+4+148 = 300 px
+ *    3-btn: 96+4+96+4+96 = 296 px
+ *    5-btn: 56×5 + 4×4 = 296 px   (positions: x = 0, 60, 120, 180, 240)
+ */
+void ui_show_operations(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
 
-    // Invalidate weight label (not shown on this screen)
+    /* Weight label not present on this screen */
     lbl_weight = NULL;
 
-    // ── Status label (top) ───────────────────────────────────────────────────
-    lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "Stepper Test \xE2\x80\x94 3 Devices");
-    lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
+    /* ── Title label ──────────────────────────────────────────────────────── */
+    lv_obj_t *lbl_title = lv_label_create(scr);
+    lv_label_set_text(lbl_title, "Operations");
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, 0, 2);
 
-    // ── Device indicator boxes (row below status) ─────────────────────────
-    // Three colored boxes: grey = disabled/unknown, green = enabled.
-    // Width per box: (300 - 2*4) / 3 = 97 px; gap = 4 px between boxes.
-    static const char *dev_names[STEPPER_N_DEVICES] = {"D0", "D1", "D2"};
-    for (int i = 0; i < STEPPER_N_DEVICES; ++i)
-    {
-        lv_obj_t *box = lv_obj_create(scr);
-        lv_obj_set_size(box, 97, 28);
-        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_pad_all(box, 2, 0);
-        lv_obj_align(box, LV_ALIGN_TOP_LEFT, i * 101, 22);
-        s_step_dev_ind[i] = box;
+    /* ── Home nav button (top-right) ──────────────────────────────────────── */
+    lv_obj_t *btn_nav_home = lv_btn_create(scr);
+    lv_obj_set_size(btn_nav_home, 60, 20);
+    lv_obj_align(btn_nav_home, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_nav_home, on_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l_nav_home = lv_label_create(btn_nav_home);
+    lv_label_set_text(l_nav_home, "Home");
+    lv_obj_center(l_nav_home);
 
-        lv_obj_t *lbl = lv_label_create(box);
-        lv_label_set_text(lbl, dev_names[i]);
-        lv_obj_center(lbl);
-    }
-    stepper_refresh_indicators();
+    /* ── Row 1: Flaps  (y=22, h=24) ──────────────────────────────────────── */
+    make_btn(scr, "Flaps Open", 0, 22, 148, 24, on_flap_open);
+    make_btn(scr, "Flaps Close", 152, 22, 148, 24, on_flap_close);
 
-    // ── Enable / Disable buttons ─────────────────────────────────────────────
-    // Two 148-px buttons side-by-side, 4-px gap (148+4+148=300).
-    lv_obj_t *btn_en = lv_btn_create(scr);
-    lv_obj_set_size(btn_en, 148, 40);
-    lv_obj_align(btn_en, LV_ALIGN_TOP_LEFT, 0, 58);
-    lv_obj_add_event_cb(btn_en, on_step_enable_all, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_en = lv_label_create(btn_en);
-    lv_label_set_text(l_en, "Enable All");
-    lv_obj_center(l_en);
+    /* ── Row 2: Arm  (y=50, h=24) ────────────────────────────────────────── */
+    make_btn(scr, "Arm Press", 0, 50, 96, 24, on_arm_press);
+    make_btn(scr, "Arm Pos 1", 100, 50, 96, 24, on_arm_pos1);
+    make_btn(scr, "Arm Pos 2", 200, 50, 96, 24, on_arm_pos2);
 
-    lv_obj_t *btn_dis = lv_btn_create(scr);
-    lv_obj_set_size(btn_dis, 148, 40);
-    lv_obj_align(btn_dis, LV_ALIGN_TOP_RIGHT, 0, 58);
-    lv_obj_add_event_cb(btn_dis, on_step_disable_all, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_dis = lv_label_create(btn_dis);
-    lv_label_set_text(l_dis, "Disable All");
-    lv_obj_center(l_dis);
+    /* ── Row 3: Rack  (y=78, h=24) ───────────────────────────────────────── */
+    make_btn(scr, "Rack Home", 0, 78, 96, 24, on_rack_home);
+    make_btn(scr, "Rack Extend", 100, 78, 96, 24, on_rack_extend);
+    make_btn(scr, "Rack Press", 200, 78, 96, 24, on_rack_press);
 
-    // ── FWD / REV step buttons ────────────────────────────────────────────────
-    lv_obj_t *btn_fwd = lv_btn_create(scr);
-    lv_obj_set_size(btn_fwd, 148, 40);
-    lv_obj_align(btn_fwd, LV_ALIGN_TOP_LEFT, 0, 102);
-    lv_obj_add_event_cb(btn_fwd, on_step_fwd, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_fwd = lv_label_create(btn_fwd);
-    lv_label_set_text(l_fwd, LV_SYMBOL_LEFT " FWD");
-    lv_obj_center(l_fwd);
+    /* ── Row 4: Turntable  (y=106, h=24)  5 × 56 px + 4 × 4 px = 296 px ── */
+    make_btn(scr, "Tbl Home", 0, 106, 56, 24, on_turntable_home);
+    make_btn(scr, "Tbl A", 60, 106, 56, 24, on_turntable_a);
+    make_btn(scr, "Tbl B", 120, 106, 56, 24, on_turntable_b);
+    make_btn(scr, "Tbl C", 180, 106, 56, 24, on_turntable_c);
+    make_btn(scr, "Tbl D", 240, 106, 56, 24, on_turntable_d);
 
-    lv_obj_t *btn_rev = lv_btn_create(scr);
-    lv_obj_set_size(btn_rev, 148, 40);
-    lv_obj_align(btn_rev, LV_ALIGN_TOP_RIGHT, 0, 102);
-    lv_obj_add_event_cb(btn_rev, on_step_rev, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_rev = lv_label_create(btn_rev);
-    lv_label_set_text(l_rev, "REV " LV_SYMBOL_RIGHT);
-    lv_obj_center(l_rev);
+    /* ── Row 5: Hot Wire  (y=134, h=24) ──────────────────────────────────── */
+    make_btn(scr, "Wire ON", 0, 134, 148, 24, on_hotwire_on);
+    make_btn(scr, "Wire OFF", 152, 134, 148, 24, on_hotwire_off);
 
-    // ── Step-count row:  [-]  [Steps: NNN]  [+] ──────────────────────────────
-    lv_obj_t *btn_minus = lv_btn_create(scr);
-    lv_obj_set_size(btn_minus, 60, 36);
-    lv_obj_align(btn_minus, LV_ALIGN_TOP_LEFT, 0, 146);
-    lv_obj_add_event_cb(btn_minus, on_step_minus, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_minus = lv_label_create(btn_minus);
-    lv_label_set_text(l_minus, LV_SYMBOL_MINUS);
-    lv_obj_center(l_minus);
+    /* ── Row 6: Vacuum  (y=162, h=24)  4 × 72 px + 3 × 4 px = 300 px ────── */
+    make_btn(scr, "Vac ON", 0, 162, 72, 24, on_vacuum_on);
+    make_btn(scr, "Vac OFF", 76, 162, 72, 24, on_vacuum_off);
+    make_btn(scr, "Vac2 ON", 152, 162, 72, 24, on_vacuum2_on);
+    make_btn(scr, "Vac2 OFF", 228, 162, 72, 24, on_vacuum2_off);
 
-    s_step_lbl_steps = lv_label_create(scr);
-    stepper_refresh_steps_label();
-    lv_obj_align(s_step_lbl_steps, LV_ALIGN_TOP_MID, 0, 154); // vertically centred in the row
+    /* ── Status labels  (y=188, y=204) ───────────────────────────────────── */
+    s_ops_lbl_status = lv_label_create(scr);
+    lv_label_set_text(s_ops_lbl_status, "Status: --");
+    lv_obj_set_style_text_font(s_ops_lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_ops_lbl_status, LV_ALIGN_TOP_LEFT, 0, 188);
 
-    lv_obj_t *btn_plus = lv_btn_create(scr);
-    lv_obj_set_size(btn_plus, 60, 36);
-    lv_obj_align(btn_plus, LV_ALIGN_TOP_RIGHT, 0, 146);
-    lv_obj_add_event_cb(btn_plus, on_step_plus, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_plus = lv_label_create(btn_plus);
-    lv_label_set_text(l_plus, LV_SYMBOL_PLUS);
-    lv_obj_center(l_plus);
+    s_ops_lbl_vacuum = lv_label_create(scr);
+    lv_label_set_text(s_ops_lbl_vacuum, "Vac: --");
+    lv_obj_set_style_text_font(s_ops_lbl_vacuum, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_ops_lbl_vacuum, LV_ALIGN_TOP_LEFT, 0, 204);
 
-    // ── Delay info label ─────────────────────────────────────────────────────
-    lv_obj_t *lbl_delay = lv_label_create(scr);
-    char dbuf[32];
-    snprintf(dbuf, sizeof(dbuf), "Delay: %u \xCE\xBCs/step", STEPPER_DELAY_US);
-    lv_label_set_text(lbl_delay, dbuf);
-    lv_obj_set_style_text_font(lbl_delay, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl_delay, LV_ALIGN_TOP_MID, 0, 186);
-
-    // ── Home button (bottom) ─────────────────────────────────────────────────
-    lv_obj_t *btn_home = lv_btn_create(scr);
-    lv_obj_set_size(btn_home, 300, 36);
-    lv_obj_align(btn_home, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_add_event_cb(btn_home, on_home, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l_home = lv_label_create(btn_home);
-    lv_label_set_text(l_home, "Home");
-    lv_obj_center(l_home);
+    /*
+     * Point lbl_status at s_ops_lbl_status so that set_status() (called by
+     * button callbacks) updates the same label that ui_ops_on_motion_done()
+     * uses for async notifications.
+     */
+    lbl_status = s_ops_lbl_status;
 }
 
-// dosing screens tub
+/* ── Dosing screen (unchanged) ──────────────────────────────────────────── */
+
 void ui_show_dosing(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Nullify ops-screen labels so async handlers don't touch freed widgets */
+    s_ops_lbl_status = NULL;
+    s_ops_lbl_vacuum = NULL;
+
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
 
     lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "DOSING…");
+    lv_label_set_text(lbl_status, "DOSING\xe2\x80\xa6");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    // Weight display label
     lbl_weight = lv_label_create(scr);
     char weight_str[32];
-    snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g", s_last_weight_g);
+    snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g",
+             s_last_weight_g);
     lv_label_set_text(lbl_weight, weight_str);
     lv_obj_align(lbl_weight, LV_ALIGN_CENTER, 0, -20);
     lv_obj_set_style_text_font(lbl_weight, &lv_font_montserrat_14, 0);
@@ -587,7 +693,8 @@ void ui_show_dosing(void)
     lv_obj_t *btn_read_weight = lv_btn_create(scr);
     lv_obj_set_size(btn_read_weight, 140, 70);
     lv_obj_align(btn_read_weight, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_obj_add_event_cb(btn_read_weight, on_read_weight, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn_read_weight, on_read_weight, LV_EVENT_CLICKED,
+                        NULL);
     lv_obj_t *ls = lv_label_create(btn_read_weight);
     lv_label_set_text(ls, "Read Weight");
     lv_obj_center(ls);

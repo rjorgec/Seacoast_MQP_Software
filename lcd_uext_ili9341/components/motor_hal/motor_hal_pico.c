@@ -96,3 +96,160 @@ esp_err_t motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_dela
     (void)step_delay_us;
     return ESP_ERR_NOT_SUPPORTED;
 }
+
+/* ------------------------------------------------------------------ */
+/*  State-based actuator commands (state machine, not atomic steps)    */
+/* ------------------------------------------------------------------ */
+
+esp_err_t motor_flap_open(void)
+{
+    /* MSG_FLAPS_OPEN has no payload (len=0) */
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_FLAPS_OPEN,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "flap_open rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_flap_close(void)
+{
+    /* MSG_FLAPS_CLOSE has no payload (len=0) */
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_FLAPS_CLOSE,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "flap_close rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_arm_move(uint8_t pos)
+{
+    pl_arm_move_t pl = {.position = pos};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_ARM_MOVE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "arm_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_rack_move(uint8_t pos)
+{
+    pl_rack_move_t pl = {.position = pos};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_RACK_MOVE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "rack_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_turntable_goto(uint8_t pos)
+{
+    pl_turntable_goto_t pl = {.position = pos};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_TURNTABLE_GOTO,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "turntable_goto rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_turntable_home(void)
+{
+    /* MSG_TURNTABLE_HOME has no payload (len=0) */
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_TURNTABLE_HOME,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "turntable_home rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_hotwire_set(bool enable)
+{
+    pl_hotwire_set_t pl = {.enable = enable ? 1u : 0u};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_HOTWIRE_SET,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "hotwire_set rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_vacuum_set(bool enable)
+{
+    pl_vacuum_set_t pl = {.enable = enable ? 1u : 0u};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_VACUUM_SET,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "vacuum_set rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_vacuum2_set(bool enable)
+{
+    pl_vacuum2_set_t pl = {.enable = enable ? 1u : 0u};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_VACUUM2_SET,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "vacuum2_set rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}

@@ -336,6 +336,31 @@ extern "C"
     // Clear latched faults by writing CLR_FLT in CTRL4.
     bool drv8434s_clear_faults(drv8434s_t *dev);
 
+    // ── Fault configuration flags (for drv8434s_set_fault_config) ───────────
+    //
+    // These flags control which fault sources are enabled and how they are
+    // reported on the nFAULT pin.  Bits [3:0] map to CTRL4 bits [3:0];
+    // bit 4 maps to CTRL5 STL_REP.
+    //
+    // Pass a bitwise-OR of the desired flags to drv8434s_set_fault_config()
+    // or drv8434s_chain_set_fault_config().  Bits that are *not* set will
+    // be cleared in the corresponding register fields.
+
+#define DRV8434S_FAULT_CFG_OTW_REP (1u << 0)   // Report over-temp warning on nFAULT
+#define DRV8434S_FAULT_CFG_OTSD_AUTO (1u << 1) // OTS auto-retry (vs latched)
+#define DRV8434S_FAULT_CFG_OCP_AUTO (1u << 2)  // OCP auto-retry (vs latched)
+#define DRV8434S_FAULT_CFG_EN_OL (1u << 3)     // Enable open-load detection
+#define DRV8434S_FAULT_CFG_STL_REP (1u << 4)   // Report stall on nFAULT
+
+    // Configure which faults are enabled / reported on nFAULT.
+    //
+    // flags is a bitwise-OR of DRV8434S_FAULT_CFG_* values.  Bits that are
+    // not set will disable the corresponding fault source or report.
+    //
+    // Affects CTRL4 bits [3:0] (EN_OL, OCP_MODE, OTSD_MODE, OTW_REP) and
+    // CTRL5 bit 3 (STL_REP).
+    bool drv8434s_set_fault_config(drv8434s_t *dev, uint8_t flags);
+
     // Read the instantaneous torque-DAC count from CTRL8 (TRQ_COUNT).
     bool drv8434s_read_torque_count(drv8434s_t *dev, uint8_t *trq_count);
 
@@ -473,43 +498,6 @@ extern "C"
                                  uint8_t reg, uint8_t *values_out,
                                  drv8434s_chain_dev_status_t *status_out);
 
-    // ── Broadcast motor-control helpers ──────────────────────────────────────
-
-    // Issue one SPI step to every device simultaneously (single chain frame).
-    // Writes STEP bit in CTRL3 for all devices, then restores the cache to
-    // STEP=0 so the next call always produces a clean 0→1 rising edge.
-    // Requires SPI step mode to have been enabled (drv8434s_chain_set_spi_step_mode_all).
-    bool drv8434s_chain_step_all(drv8434s_chain_t *chain,
-                                 drv8434s_chain_dev_status_t *status_out);
-
-    // Enable motor outputs on every device (sets EN_OUT in CTRL2 for all).
-    bool drv8434s_chain_enable_all(drv8434s_chain_t *chain,
-                                   drv8434s_chain_dev_status_t *status_out);
-
-    // Disable motor outputs on every device (clears EN_OUT in CTRL2 for all).
-    bool drv8434s_chain_disable_all(drv8434s_chain_t *chain,
-                                    drv8434s_chain_dev_status_t *status_out);
-
-    // Clear latched faults on every device (sets CLR_FLT in CTRL4 for all).
-    bool drv8434s_chain_clear_faults_all(drv8434s_chain_t *chain,
-                                         drv8434s_chain_dev_status_t *status_out);
-
-    // Set direction for every device.  reverse=false → forward, true → reverse.
-    // Requires SPI_DIR mode (drv8434s_chain_set_spi_step_mode_all).
-    bool drv8434s_chain_set_dir_all(drv8434s_chain_t *chain, bool reverse,
-                                    drv8434s_chain_dev_status_t *status_out);
-
-    // Set microstep resolution for every device simultaneously.
-    bool drv8434s_chain_set_microstep_all(drv8434s_chain_t *chain,
-                                          drv8434s_microstep_t mode,
-                                          drv8434s_chain_dev_status_t *status_out);
-
-    // Enable SPI step/direction mode for every device (sets SPI_STEP and
-    // SPI_DIR in CTRL3 for all).  Must be called before chain_step_all /
-    // chain_set_dir_all will have any effect.
-    bool drv8434s_chain_set_spi_step_mode_all(drv8434s_chain_t *chain,
-                                              drv8434s_chain_dev_status_t *status_out);
-
     // ── Per-device motor-control helpers ─────────────────────────────────────
     //
     // These target a single device in the chain; all other devices in the
@@ -564,23 +552,38 @@ extern "C"
     bool drv8434s_chain_clear_faults(drv8434s_chain_t *chain, uint8_t dev_idx,
                                      drv8434s_chain_dev_status_t *status_out);
 
-    // ── Motion result & high-level rotate helper ────────────────────────────
-    //
-    // drv8434s_chain_rotate() steps a single motor towards a target position
-    // (step count), stopping early if the torque count exceeds a threshold.
-    // This provides closed-loop position/torque control for dispensing,
-    // homing, or similar applications.
+    // Configure which faults are enabled / reported on nFAULT for a single
+    // device in the chain.  flags is a bitwise-OR of DRV8434S_FAULT_CFG_*
+    // values (see single-device drv8434s_set_fault_config for details).
+    bool drv8434s_chain_set_fault_config(drv8434s_chain_t *chain,
+                                         uint8_t dev_idx, uint8_t flags,
+                                         drv8434s_chain_dev_status_t *status_out);
 
-    // Stop reason codes returned in drv8434s_motion_result_t.
+    // ── Non-blocking motion engine ──────────────────────────────────────────
+    //
+    // The motion engine manages concurrent stepping of multiple motors in a
+    // daisy chain.  Each device has independent motion state (target, torque
+    // limit, step count).  A single drv8434s_motion_tick() call advances all
+    // active motors in ONE SPI chain frame, making it efficient and suitable
+    // for timer-interrupt contexts (e.g. Pico SDK add_repeating_timer_us).
+    //
+    // Usage:
+    //   1. drv8434s_motion_init()  — bind to a chain, set done callback
+    //   2. drv8434s_motion_start() — queue a motion on a device (non-blocking)
+    //   3. Timer calls drv8434s_motion_tick() at the desired step rate
+    //   4. done_cb fires when each motor completes or faults
+
+    // Stop reason codes.
     typedef enum
     {
         DRV8434S_MOTION_OK = 0,       // Reached target position
         DRV8434S_MOTION_TORQUE_LIMIT, // Stopped: torque threshold exceeded
         DRV8434S_MOTION_FAULT,        // Stopped: device fault detected
         DRV8434S_MOTION_SPI_ERROR,    // Stopped: SPI communication failure
+        DRV8434S_MOTION_CANCELLED,    // Stopped: cancelled by caller
     } drv8434s_motion_stop_reason_t;
 
-    // Result structure populated by drv8434s_chain_rotate().
+    // Result structure populated when a motion job completes.
     typedef struct
     {
         int32_t steps_requested;              // Echo of the requested step count
@@ -589,31 +592,73 @@ extern "C"
         drv8434s_motion_stop_reason_t reason; // Why the motion ended
     } drv8434s_motion_result_t;
 
-    // Rotate a single motor in the chain up to |target_steps| steps.
-    //
-    // The motor steps in the direction indicated by the sign of target_steps
-    // (positive = forward, negative = reverse).  After each step the torque
-    // count is sampled; if it meets or exceeds torque_limit the motion stops
-    // early.  Set torque_limit to 0 to disable the torque check (pure
-    // position move).
-    //
-    // step_delay_us controls the time between successive steps and therefore
-    // the motor speed.
-    //
-    // @param chain         Chain context (must be initialised).
-    // @param dev_idx       0-based device index in the chain.
-    // @param target_steps  Signed step count (+forward / −reverse).
-    // @param torque_limit  12-bit torque threshold (0 = disabled).
-    // @param step_delay_us Microseconds between steps (motor speed).
-    // @param result        Receives motion outcome; must not be NULL.
-    // @return true on success (motion completed or stopped gracefully),
-    //         false on parameter error.
-    bool drv8434s_chain_rotate(drv8434s_chain_t *chain,
-                               uint8_t dev_idx,
-                               int32_t target_steps,
-                               uint16_t torque_limit,
-                               unsigned step_delay_us,
-                               drv8434s_motion_result_t *result);
+    // Completion callback — invoked from drv8434s_motion_tick() context when
+    // a motor finishes (reached target, torque limit, fault, or cancel).
+    typedef void (*drv8434s_motion_done_cb_t)(void *ctx, uint8_t dev_idx,
+                                              const drv8434s_motion_result_t *result);
+
+    // Rolling-average depth for per-job torque readings.
+#define DRV8434S_MOTION_TRQ_BUF_SIZE 10u
+
+    // Per-device motion job state.  Managed internally by the motion engine.
+    typedef struct
+    {
+        int32_t steps_remaining; // Absolute count, decrements each tick
+        int32_t steps_achieved;  // Signed accumulator
+        int32_t steps_requested; // Original signed request
+        uint16_t torque_limit;   // 0 = disabled
+        uint16_t last_torque_count;
+        drv8434s_motion_stop_reason_t reason;
+        bool active;
+        bool reverse;
+        // Torque rolling-average buffer
+        uint16_t trq_buf[DRV8434S_MOTION_TRQ_BUF_SIZE];
+        uint8_t trq_buf_idx;
+        uint8_t trq_buf_count;
+    } drv8434s_motion_job_t;
+
+    // Motion engine context.  Owns per-device job state for one chain.
+    typedef struct
+    {
+        drv8434s_chain_t *chain;
+        drv8434s_motion_done_cb_t done_cb;
+        void *done_ctx;
+        uint8_t torque_sample_div; // Sample torque every N ticks (0 or 1 = every tick)
+        uint8_t torque_tick_count; // Internal counter
+        drv8434s_motion_job_t jobs[DRV8434S_CHAIN_MAX_DEVICES];
+    } drv8434s_motion_t;
+
+    // Initialise the motion engine, binding it to a chain context.
+    // done_cb is called (from tick context) when any motor completes.
+    // done_cb and done_ctx may be NULL if polling is preferred.
+    // torque_sample_div controls how often torque is read (1 = every tick,
+    // 10 = every 10th tick); 0 is treated as 1.
+    bool drv8434s_motion_init(drv8434s_motion_t *motion,
+                              drv8434s_chain_t *chain,
+                              drv8434s_motion_done_cb_t done_cb,
+                              void *done_ctx,
+                              uint8_t torque_sample_div);
+
+    // Start a non-blocking motion on device dev_idx.
+    // target_steps > 0 → forward, < 0 → reverse, 0 → no-op.
+    // torque_limit: trip threshold for TRQ_COUNT rolling average (0 = disabled).
+    // Returns false if dev_idx is invalid or the device is already moving.
+    // The caller must start a periodic timer that calls drv8434s_motion_tick().
+    bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
+                               int32_t target_steps, uint16_t torque_limit);
+
+    // Advance all active motors by one step in a single SPI chain frame.
+    // Call this from a repeating timer callback at the desired step rate.
+    // Returns false only on catastrophic SPI failure (all active jobs aborted).
+    bool drv8434s_motion_tick(drv8434s_motion_t *motion);
+
+    // Cancel motion on a specific device.  Populates *result if non-NULL.
+    // The done_cb is NOT invoked for cancellations.
+    bool drv8434s_motion_cancel(drv8434s_motion_t *motion, uint8_t dev_idx,
+                                drv8434s_motion_result_t *result);
+
+    // Returns true if any device has an active motion job.
+    bool drv8434s_motion_is_busy(const drv8434s_motion_t *motion);
 
 #ifdef __cplusplus
 }
