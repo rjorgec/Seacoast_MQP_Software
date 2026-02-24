@@ -46,7 +46,9 @@ extern "C"
         MSG_VACUUM_SET = 0x47,     /* ESP→Pico: turn vacuum pump on/off */
         /** MSG_VACUUM2_SET — uses the REVERSE channel (IN2/GP7) of the hotwire
          *  DRV8163; mutually exclusive with hotwire ON. */
-        MSG_VACUUM2_SET = 0x48, /* ESP→Pico: turn second vacuum pump on/off */
+        MSG_VACUUM2_SET = 0x48,    /* ESP→Pico: turn second vacuum pump on/off */
+        MSG_DISPENSE_SPAWN = 0x49, /* ESP→Pico: start closed-loop spawn dosing */
+        MSG_SPAWN_STATUS = 0x4A,   /* Pico→ESP: spawn dosing status (unsolicited) */
         /* ---- Unsolicited status messages (0x60–0x6F) ---- */
         MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
         MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
@@ -255,6 +257,38 @@ extern "C"
         uint8_t _rsvd;  /**< reserved */
         uint16_t rpm;   /**< measured RPM (0 if pump off) */
     } pl_vacuum_status_t;
+
+    /** MSG_DISPENSE_SPAWN payload (7 bytes) -- ESP->Pico */
+    typedef struct __attribute__((packed))
+    {
+        uint16_t bag_mass;      /**< mass of bag being inoculated (grams) */
+        uint16_t spawn_mass;    /**< mass of spawn remaining (grams) */
+        uint16_t innoc_percent; /**< spawn percentage of bag weight (x10, e.g. 250 = 25.0%) */
+        uint8_t bag_number;     /**< sequential bag count from this spawn block */
+    } pl_innoculate_bag_t;
+
+    /** Status codes carried in MSG_SPAWN_STATUS */
+    typedef enum
+    {
+        SPAWN_STATUS_RUNNING = 0,
+        SPAWN_STATUS_DONE = 1,
+        SPAWN_STATUS_STALLED = 2,
+        SPAWN_STATUS_AGITATING = 3,
+        SPAWN_STATUS_BAG_EMPTY = 4,
+        SPAWN_STATUS_ERROR = 5,
+        SPAWN_STATUS_FLOW_FAILURE = 6, /**< flaps opened fully with no flow — bag likely empty or jammed */
+    } spawn_status_code_t;
+
+    /** MSG_SPAWN_STATUS payload (14 bytes) -- unsolicited Pico->ESP */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t status;      /**< spawn_status_code_t */
+        uint8_t retries;     /**< current retry count */
+        uint16_t bag_number; /**< copy of bag number from request */
+        uint32_t target_ug;  /**< target dispense mass in micrograms */
+        uint32_t disp_ug;    /**< dispensed mass in micrograms */
+        uint32_t remain_ug;  /**< estimated spawn remaining (if provided) */
+    } pl_spawn_status_t;
 
 #ifdef __cplusplus
 }

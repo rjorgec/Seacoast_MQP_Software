@@ -134,6 +134,400 @@ static uint32_t s_vacuum_last_sample_ms = 0;
 static uint32_t s_vacuum_last_status_ms = 0;
 static vacuum_status_code_t s_vacuum_status = VACUUM_OFF;
 
+/* ── Dosing callback ─────────────────────────────────────────────────────── */
+
+typedef struct
+{
+    bool active;
+    bool agitating;
+    uint8_t retry;
+    uint8_t max_retries;
+    uint16_t bag_number;
+    uint32_t start_mass_ug;
+    uint32_t target_ug;
+    uint32_t dispensed_ug;
+    uint32_t window_start_ug; /* dispensed_ug at start of current 500 ms flow window */
+    uint32_t last_tick_ug;    /* dispensed_ug at the previous tick for nudge delta */
+    uint32_t spawn_remaining_ug;
+    absolute_time_t last_flow_check; /* timestamp of current window start */
+    repeating_timer_t timer;
+    bool nudging;                /* true while a position-nudge pulse is active */
+    absolute_time_t nudge_until; /* absolute time when the current nudge should end */
+} spawn_dose_ctx_t;
+
+static spawn_dose_ctx_t s_spawn;
+
+#define SPAWN_TIMER_PERIOD_MS 100
+#define SPAWN_FLOW_WINDOW_MS 500
+#define SPAWN_TICKS_PER_WINDOW (SPAWN_FLOW_WINDOW_MS / SPAWN_TIMER_PERIOD_MS) /* 5 */
+#define SPAWN_SCALE_READ_US 50000u                                            /* 50 ms per scale read — fast single-shot */
+#define SPAWN_FLOW_MIN_UG 5000u                                               /* minimum mass per window to consider flowing */
+#define SPAWN_FLOW_MAX_UG 20000u                                              /* maximum mass per window (hard ceiling) */
+#define SPAWN_MAX_RETRIES 3
+#define SPAWN_AGITATE_MS 750
+/* Per-tick flow targets (window totals divided by ticks per window) */
+#define SPAWN_TICK_MIN_UG (SPAWN_FLOW_MIN_UG / SPAWN_TICKS_PER_WINDOW) /* 1000 ug */
+#define SPAWN_TICK_MAX_UG (SPAWN_FLOW_MAX_UG / SPAWN_TICKS_PER_WINDOW) /* 4000 ug */
+#define SPAWN_TICK_DEADBAND 300u                                       /* ±300 ug/tick — no nudge needed within this band */
+/* Flap PWM values used during dosing */
+#define SPAWN_OPEN_PWM (FLAP_OPEN_SPEED_PWM / 2)     /* forward nudge PWM */
+#define SPAWN_MIN_PWM (FLAP_OPEN_SPEED_PWM / 6)      /* crack-open PWM used by spawn_set_flaps_open_small */
+#define SPAWN_REVERSE_PWM (FLAP_CLOSE_SPEED_PWM / 2) /* reverse nudge PWM */
+/* Duration of each position nudge — must be shorter than SPAWN_TIMER_PERIOD_MS */
+#define SPAWN_NUDGE_OPEN_MS 30u  /* ms to nudge open per tick */
+#define SPAWN_NUDGE_CLOSE_MS 20u /* ms to nudge closed per tick */
+/* Proportional scaling of the per-tick target rate:
+ *   remaining > target / SPAWN_PROP_UPPER → SPAWN_TICK_MAX_UG target rate
+ *   remaining < target / SPAWN_PROP_LOWER → SPAWN_TICK_MIN_UG target rate
+ *   in between                            → linear interpolation */
+#define SPAWN_PROP_UPPER 2u  /* 50 % of target remaining */
+#define SPAWN_PROP_LOWER 10u /* 10 % of target remaining */
+
+/* ── Spawn dosing helpers ─────────────────────────────────────────────────── */
+
+/**
+ * @brief Shared internal helper: configure both flap drivers for a torque-monitored
+ *        close and engage the flap state machine.  Used by both handle_flap_close()
+ *        and spawn_close_flaps() so the logic is never duplicated.
+ *
+ * @return true if monitoring started successfully, false on driver error.
+ */
+static bool flap_close_internal(void)
+{
+    if (!s_drv8163_ready)
+    {
+        return false;
+    }
+
+    if (s_drv8163.monitoring_enabled)
+    {
+        drv8163_stop_current_monitoring(&s_drv8163);
+    }
+    s_drv8163.config.current_low_threshold = 0u;
+    s_drv8163.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
+    s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_REVERSE,
+                                    (uint16_t)FLAP_CLOSE_SPEED_PWM);
+    if (!drv8163_start_current_monitoring(&s_drv8163))
+    {
+        (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+        return false;
+    }
+
+    if (s_drv8163_flap2_ready)
+    {
+        if (s_drv8163_flap2.monitoring_enabled)
+        {
+            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+        }
+        s_drv8163_flap2.config.current_low_threshold = 0u;
+        s_drv8163_flap2.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
+        s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_REVERSE,
+                                        (uint16_t)FLAP_CLOSE_SPEED_PWM);
+        (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
+    }
+
+    s_flap_state = FLAP_SM_CLOSING;
+    s_flap_start_ms = to_ms_since_boot(get_absolute_time());
+    s_flap1_stopped = false;
+    s_flap2_stopped = (!s_drv8163_flap2_ready);
+    return true;
+}
+
+/**
+ * @brief Stop both flap motors immediately and halt any active current monitoring.
+ *        Called during spawn dosing to immediately arrest motion before transitioning.
+ */
+static void spawn_stop_flaps(void)
+{
+    if (s_drv8163.monitoring_enabled)
+    {
+        drv8163_stop_current_monitoring(&s_drv8163);
+    }
+    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+
+    if (s_drv8163_flap2_ready)
+    {
+        if (s_drv8163_flap2.monitoring_enabled)
+        {
+            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+        }
+        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+    }
+    s_spawn.nudging = false;
+}
+
+/**
+ * @brief Close the flaps after spawn dosing is complete or aborted.
+ *        Stops any ongoing monitoring first, then engages the torque-monitored close.
+ */
+static void spawn_close_flaps(void)
+{
+    spawn_stop_flaps();
+    (void)flap_close_internal();
+}
+
+/**
+ * @brief Set the flap motor(s) to a continuous PWM without engaging the
+ *        torque/undercurrent state machine.  Used for proportional dosing control.
+ *
+ * @param forward  true = open direction, false = close direction.
+ * @param pwm      PWM duty 0..4095.
+ */
+static void spawn_set_flap_pwm(bool forward, uint16_t pwm)
+{
+    drv8163_motor_state_t st = forward ? DRV8163_MOTOR_FORWARD : DRV8163_MOTOR_REVERSE;
+    (void)drv8163_set_motor_control(&s_drv8163, st, pwm);
+    if (s_drv8163_flap2_ready)
+    {
+        (void)drv8163_set_motor_control(&s_drv8163_flap2, st, pwm);
+    }
+}
+
+/**
+ * @brief Open the flaps slightly at minimum PWM and arm undercurrent monitoring so
+ *        that a fully-open condition (no load = open-circuit endpoint) can be detected
+ *        during closed-loop dosing.  Does NOT engage the flap state machine.
+ */
+static void spawn_set_flaps_open_small(void)
+{
+    /* Arm undercurrent monitoring (low threshold) — the callback polls current_status
+     * directly; the flap SM is left IDLE so it does not interfere. */
+    if (s_drv8163.monitoring_enabled)
+    {
+        drv8163_stop_current_monitoring(&s_drv8163);
+    }
+    s_drv8163.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+    s_drv8163.config.current_high_threshold = 4095u; /* never auto-stop on overcurrent */
+    s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_FORWARD,
+                                    (uint16_t)SPAWN_MIN_PWM);
+    (void)drv8163_start_current_monitoring(&s_drv8163);
+
+    if (s_drv8163_flap2_ready)
+    {
+        if (s_drv8163_flap2.monitoring_enabled)
+        {
+            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+        }
+        s_drv8163_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8163_flap2.config.current_high_threshold = 4095u;
+        s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_FORWARD,
+                                        (uint16_t)SPAWN_MIN_PWM);
+        (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
+    }
+
+    /* Leave flap SM in IDLE — spawn callback controls the motor directly. */
+    s_flap_state = FLAP_SM_IDLE;
+}
+
+static void send_spawn_status(spawn_status_code_t status)
+{
+    pl_spawn_status_t pl = {
+        .status = (uint8_t)status,
+        .retries = s_spawn.retry,
+        .bag_number = s_spawn.bag_number,
+        .target_ug = s_spawn.target_ug,
+        .disp_ug = s_spawn.dispensed_ug,
+        .remain_ug = s_spawn.spawn_remaining_ug,
+    };
+
+    (void)uart_send_frame(MSG_SPAWN_STATUS, 0u, &pl, (uint16_t)sizeof(pl));
+}
+
+static void spawn_stop_timer(void)
+{
+    (void)cancel_repeating_timer(&s_spawn.timer);
+    s_spawn.timer.delay_us = 0;
+}
+
+static bool dispense_spawn_callback(struct repeating_timer *t)
+{
+    (void)t;
+    if (!s_spawn.active)
+    {
+        return false;
+    }
+
+    absolute_time_t now = get_absolute_time();
+
+    /* ── Nudge expiry: stop motor when position nudge time has elapsed ──────── */
+    if (s_spawn.nudging &&
+        absolute_time_diff_us(s_spawn.nudge_until, now) >= 0)
+    {
+        /* Stop motor; hold current flap position until next nudge decision */
+        spawn_set_flap_pwm(true, 0u); /* coast = no drive in either direction */
+        (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+        if (s_drv8163_flap2_ready)
+        {
+            (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+        }
+        s_spawn.nudging = false;
+    }
+
+    /* ── Scale read (fast single-shot) ─────────────────────────────────────── */
+    mass_t mass = {0};
+    s_scale_opt.strat = strategy_type_time;
+    s_scale_opt.timeout = SPAWN_SCALE_READ_US;
+
+    if (!scale_weight(&s_scale, &mass, &s_scale_opt))
+    {
+        spawn_stop_flaps();
+        spawn_close_flaps();
+        s_spawn.active = false;
+        send_spawn_status(SPAWN_STATUS_ERROR);
+        return false;
+    }
+
+    uint32_t current_ug = (uint32_t)mass.ug;
+    s_spawn.dispensed_ug = (current_ug > s_spawn.start_mass_ug)
+                               ? (current_ug - s_spawn.start_mass_ug)
+                               : 0u;
+
+    /* ── Flaps fully-open detection ────────────────────────────────────────── *
+     * Undercurrent on the primary driver means no mechanical load — the flap  *
+     * has reached its open-circuit endpoint.  With material present the flap  *
+     * would be loaded; reaching the endpoint means nothing is being dispensed  *
+     * even though the flap is as open as it can get.                           */
+    if (s_drv8163.current_status == DRV8163_CURRENT_UNDERCURRENT)
+    {
+        printf("Spawn: flaps fully open (undercurrent) — flow failure\n");
+        spawn_stop_flaps();
+        spawn_close_flaps();
+        s_spawn.active = false;
+        send_spawn_status(SPAWN_STATUS_FLOW_FAILURE);
+        return false;
+    }
+
+    /* ── Target reached ─────────────────────────────────────────────────────── */
+    if (s_spawn.dispensed_ug >= s_spawn.target_ug)
+    {
+        spawn_stop_flaps();
+        spawn_close_flaps();
+        s_spawn.active = false;
+        send_spawn_status(SPAWN_STATUS_DONE);
+        return false;
+    }
+
+    /* ── Per-tick delta (for nudge calculation) ─────────────────────────────── */
+    uint32_t tick_delta_ug = (s_spawn.dispensed_ug > s_spawn.last_tick_ug)
+                                 ? (s_spawn.dispensed_ug - s_spawn.last_tick_ug)
+                                 : 0u;
+    s_spawn.last_tick_ug = s_spawn.dispensed_ug;
+
+    /* ── 500 ms flow-rate window (agitation / retry logic) ──────────────────── */
+    now = get_absolute_time();
+    if (absolute_time_diff_us(s_spawn.last_flow_check, now) >= (int64_t)(SPAWN_FLOW_WINDOW_MS * 1000))
+    {
+        uint32_t window_delta = (s_spawn.dispensed_ug > s_spawn.window_start_ug)
+                                    ? (s_spawn.dispensed_ug - s_spawn.window_start_ug)
+                                    : 0u;
+
+        if (!s_spawn.agitating && window_delta < SPAWN_FLOW_MIN_UG)
+        {
+            /* Insufficient flow over the window — stop and agitate */
+            spawn_stop_flaps();
+
+            if (s_spawn.retry >= s_spawn.max_retries)
+            {
+                s_spawn.active = false;
+                send_spawn_status(SPAWN_STATUS_BAG_EMPTY);
+                return false;
+            }
+
+            s_spawn.agitating = true;
+            s_spawn.retry++;
+            send_spawn_status(SPAWN_STATUS_AGITATING);
+            /* Hold off the next window check by SPAWN_AGITATE_MS */
+            s_spawn.last_flow_check = delayed_by_ms(now, SPAWN_AGITATE_MS);
+            s_spawn.window_start_ug = s_spawn.dispensed_ug;
+            return true;
+        }
+
+        /* Window completed normally — reset window tracking */
+        s_spawn.window_start_ug = s_spawn.dispensed_ug;
+        s_spawn.last_flow_check = now;
+
+        if (s_spawn.agitating)
+        {
+            /* Agitation period has elapsed — resume dosing */
+            s_spawn.agitating = false;
+            send_spawn_status(SPAWN_STATUS_RUNNING);
+        }
+    }
+
+    /* During agitation hold-off keep the flaps stopped */
+    if (s_spawn.agitating)
+    {
+        return true;
+    }
+
+    /* ── Proportional per-tick target rate ───────────────────────────────────── *
+     *                                                                            *
+     * Scale the desired flow rate by how much is left to dispense.  When far    *
+     * from the target a higher rate is acceptable; as we near the target the     *
+     * rate tapers to SPAWN_TICK_MIN_UG to avoid overshoot.                       *
+     *                                                                            *
+     *   remaining > target / SPAWN_PROP_UPPER → desired = SPAWN_TICK_MAX_UG     *
+     *   remaining < target / SPAWN_PROP_LOWER → desired = SPAWN_TICK_MIN_UG     *
+     *   in between                            → linear interpolation             *
+     * ──────────────────────────────────────────────────────────────────────────── */
+    uint32_t remaining_ug = s_spawn.target_ug - s_spawn.dispensed_ug;
+    uint32_t upper_ug = s_spawn.target_ug / SPAWN_PROP_UPPER;
+    uint32_t lower_ug = s_spawn.target_ug / SPAWN_PROP_LOWER;
+    uint32_t desired_tick_ug;
+
+    if (remaining_ug >= upper_ug)
+    {
+        desired_tick_ug = SPAWN_TICK_MAX_UG;
+    }
+    else if (remaining_ug > lower_ug)
+    {
+        uint32_t range = upper_ug - lower_ug;
+        uint32_t frac = remaining_ug - lower_ug;
+        desired_tick_ug = SPAWN_TICK_MIN_UG +
+                          ((uint32_t)(SPAWN_TICK_MAX_UG - SPAWN_TICK_MIN_UG) * frac) / range;
+    }
+    else
+    {
+        desired_tick_ug = SPAWN_TICK_MIN_UG;
+    }
+
+    /* ── Incremental position nudge ─────────────────────────────────────────── *
+     *                                                                            *
+     * The flap position (not speed) is what controls flow rate.  Rather than    *
+     * driving the motor continuously — which would keep opening the flap more   *
+     * and more — we issue short timed nudges to increment position up or down   *
+     * based on whether actual per-tick flow is below or above the target.        *
+     * Between nudges the motor is stopped, holding flap position.               *
+     * ──────────────────────────────────────────────────────────────────────────── */
+    if (!s_spawn.nudging) /* only issue a new nudge when the previous one has expired */
+    {
+        /* Cast to int32 to handle the signed error correctly */
+        int32_t error_ug = (int32_t)desired_tick_ug - (int32_t)tick_delta_ug;
+
+        if (error_ug > (int32_t)SPAWN_TICK_DEADBAND)
+        {
+            /* Flow below target — open flap a little */
+            spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+            s_spawn.nudge_until = delayed_by_ms(get_absolute_time(), SPAWN_NUDGE_OPEN_MS);
+            s_spawn.nudging = true;
+        }
+        else if (error_ug < -(int32_t)SPAWN_TICK_DEADBAND)
+        {
+            /* Flow above target — close flap a little */
+            spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
+            s_spawn.nudge_until = delayed_by_ms(get_absolute_time(), SPAWN_NUDGE_CLOSE_MS);
+            s_spawn.nudging = true;
+        }
+        /* else: within deadband — hold position (motor already stopped) */
+    }
+
+    return true;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /*  Platform helpers                                                           */
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -836,9 +1230,11 @@ static void handle_hx711_read(uint16_t seq, const uint8_t *payload, uint16_t len
     mass_t mass = {0};
     if (scale_weight(&s_scale, &mass, &s_scale_opt))
     {
+#ifdef TUNING
         char str[MASS_TO_STRING_BUFF_SIZE];
         mass_to_string(&mass, str);
         printf("HX711: Weight = %s\n", str);
+#endif
 
         pl_hx711_mass_t response = {
             .mass_ug = (int32_t)mass.ug,
@@ -918,54 +1314,16 @@ static void handle_flap_open(uint16_t seq)
 /**
  * @brief MSG_FLAPS_CLOSE (0x41) — drive flap DRV8163 reverse; auto-stop on
  *        torque rise (current high = mechanical stop).
+ *        Delegates entirely to flap_close_internal() to avoid code duplication
+ *        with the spawn dosing path.
  */
 static void handle_flap_close(uint16_t seq)
 {
-    if (!s_drv8163_ready)
+    if (!flap_close_internal())
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
-
-    if (s_drv8163.monitoring_enabled)
-    {
-        drv8163_stop_current_monitoring(&s_drv8163);
-    }
-
-    /* Configure: high threshold = torque/stall stop; low threshold disabled. */
-    s_drv8163.config.current_low_threshold = 0u;
-    s_drv8163.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
-    s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-
-    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_REVERSE,
-                                    (uint16_t)FLAP_CLOSE_SPEED_PWM);
-
-    if (!drv8163_start_current_monitoring(&s_drv8163))
-    {
-        (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
-
-    /* Start flap 2 if available */
-    if (s_drv8163_flap2_ready)
-    {
-        if (s_drv8163_flap2.monitoring_enabled)
-        {
-            drv8163_stop_current_monitoring(&s_drv8163_flap2);
-        }
-        s_drv8163_flap2.config.current_low_threshold = 0u;
-        s_drv8163_flap2.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
-        s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_REVERSE,
-                                        (uint16_t)FLAP_CLOSE_SPEED_PWM);
-        (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
-    }
-
-    s_flap_state = FLAP_SM_CLOSING;
-    s_flap_start_ms = to_ms_since_boot(get_absolute_time());
-    s_flap1_stopped = false;
-    s_flap2_stopped = (!s_drv8163_flap2_ready);
     printf("Flap CLOSE started\n");
     send_ack(seq);
 }
@@ -1317,6 +1675,77 @@ static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t le
     }
 
     send_ack(seq);
+}
+
+/**
+ * @brief MSG_DISPENSE_SPAWN (0x49) - run closed loop dispensing procedure.
+ *
+ * The flaps should start closed, while the bag should be weighed and opned
+ * The flaps will begin to open and a innoculation rate is targeted on the way
+ * to a target weight, calculated by percentage of bag weight.
+ */
+static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len < (uint16_t)sizeof(pl_innoculate_bag_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+    if (!s_hx711_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if (s_spawn.active)
+    {
+        /* Stop any prior dosing run */
+        spawn_stop_timer();
+        spawn_close_flaps();
+        s_spawn.active = false;
+    }
+
+    const pl_innoculate_bag_t *pl = (const pl_innoculate_bag_t *)payload;
+
+    /* Take a baseline weight reading */
+    mass_t mass = {0};
+    s_scale_opt.strat = strategy_type_time;
+    s_scale_opt.timeout = 300000; /* 300 ms */
+    if (!scale_weight(&s_scale, &mass, &s_scale_opt))
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    memset(&s_spawn, 0, sizeof(s_spawn));
+    s_spawn.active = true;
+    s_spawn.agitating = false;
+    s_spawn.retry = 0u;
+    s_spawn.max_retries = SPAWN_MAX_RETRIES;
+    s_spawn.bag_number = pl->bag_number;
+    s_spawn.start_mass_ug = (uint32_t)mass.ug;
+    /* innoc_percent is x10 percent (e.g., 250 = 25.0%) */
+    uint64_t target_ug = ((uint64_t)s_spawn.start_mass_ug * (uint64_t)pl->innoc_percent) / 1000ULL;
+    s_spawn.target_ug = (uint32_t)target_ug;
+    s_spawn.dispensed_ug = 0u;
+    s_spawn.window_start_ug = 0u; /* start of first 500 ms flow window */
+    s_spawn.last_tick_ug = 0u;    /* previous-tick baseline for nudge delta */
+    s_spawn.spawn_remaining_ug = ((uint32_t)pl->spawn_mass) * 1000000UL;
+    s_spawn.last_flow_check = get_absolute_time();
+    s_spawn.nudging = false;
+
+    spawn_set_flaps_open_small();
+
+    if (!add_repeating_timer_ms(SPAWN_TIMER_PERIOD_MS, dispense_spawn_callback, NULL, &s_spawn.timer))
+    {
+        spawn_close_flaps();
+        s_spawn.active = false;
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    send_ack(seq);
+    send_spawn_status(SPAWN_STATUS_RUNNING);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */

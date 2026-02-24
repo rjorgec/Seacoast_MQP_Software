@@ -34,6 +34,16 @@ static float s_last_weight_g = 0.0f;
 static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
 static lv_obj_t *s_ops_lbl_vacuum = NULL; /* vacuum pump status + RPM */
 
+/* Dosing screen async-update labels — NULL when not on that screen */
+static lv_obj_t *s_dose_lbl_status = NULL;   /* spawn status string */
+static lv_obj_t *s_dose_lbl_progress = NULL; /* "X.XX g / Y.YY g" */
+static lv_obj_t *s_dose_lbl_retries = NULL;  /* "Retries: N  Bag: N" */
+static lv_obj_t *s_dose_bar = NULL;          /* progress bar 0..1000 */
+static lv_obj_t *s_dose_lbl_innoc = NULL;    /* inoculation % display */
+static uint32_t s_dose_target_ug = 0;
+static uint16_t s_dose_innoc_pct = 200; /* x10 → default 20.0 % */
+static uint8_t s_dose_bag_number = 0;
+
 /* ── Status helpers ─────────────────────────────────────────────────────── */
 
 void ui_status_set(const char *s)
@@ -656,46 +666,258 @@ void ui_show_operations(void)
     lbl_status = s_ops_lbl_status;
 }
 
-/* ── Dosing screen (unchanged) ──────────────────────────────────────────── */
+/* ── Dosing screen callbacks ─────────────────────────────────────────────── */
 
+static void dose_update_innoc_label(void)
+{
+    if (!s_dose_lbl_innoc)
+        return;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "Innoc: %u.%u%%",
+             s_dose_innoc_pct / 10u, s_dose_innoc_pct % 10u);
+    lv_label_set_text(s_dose_lbl_innoc, buf);
+}
+
+static void on_innoc_minus(lv_event_t *e)
+{
+    (void)e;
+    if (s_dose_innoc_pct > 10u)
+        s_dose_innoc_pct -= 10u; /* − 1.0 % */
+    dose_update_innoc_label();
+}
+
+static void on_innoc_plus(lv_event_t *e)
+{
+    (void)e;
+    if (s_dose_innoc_pct < 500u)
+        s_dose_innoc_pct += 10u; /* + 1.0 % */
+    dose_update_innoc_label();
+}
+
+static void on_dose_start(lv_event_t *e)
+{
+    (void)e;
+
+    pl_innoculate_bag_t pl = {
+        .bag_mass = 0,      /* unused by Pico — scale read internally */
+        .spawn_mass = 1000, /* 1 kg remaining (informational) */
+        .innoc_percent = s_dose_innoc_pct,
+        .bag_number = s_dose_bag_number,
+    };
+
+    if (s_dose_lbl_status)
+    {
+        lvgl_port_lock(0);
+        lv_label_set_text(s_dose_lbl_status, "Starting\xe2\x80\xa6");
+        lv_obj_set_style_text_color(s_dose_lbl_status,
+                                    lv_color_hex(0xFFFFFF), 0);
+        lvgl_port_unlock();
+    }
+
+    uint8_t nack = 0;
+    esp_err_t err = pico_link_send_rpc(MSG_DISPENSE_SPAWN,
+                                       &pl, sizeof(pl),
+                                       2000, &nack);
+    if (err == ESP_OK)
+    {
+        s_dose_bag_number++;
+        set_status("Dose running\xe2\x80\xa6");
+        ESP_LOGI(TAG, "MSG_DISPENSE_SPAWN sent (innoc=%u, bag=%u)",
+                 s_dose_innoc_pct, pl.bag_number);
+    }
+    else
+    {
+        set_status("Start FAILED");
+        ESP_LOGW(TAG, "MSG_DISPENSE_SPAWN failed: %s nack=%u",
+                 esp_err_to_name(err), nack);
+    }
+}
+
+static void on_dose_abort(lv_event_t *e)
+{
+    (void)e;
+    /* Close flaps to stop material flow immediately; the Pico's spawn timer
+     * will exhaust its agitation retries and send SPAWN_STATUS_BAG_EMPTY. */
+    esp_err_t err = motor_flap_close();
+    set_status(err == ESP_OK ? "Aborting\xe2\x80\xa6" : "Abort FAILED");
+    ESP_LOGI(TAG, "Dose abort (%s)", esp_err_to_name(err));
+}
+
+/* ── Dosing screen — spawn-status async update ───────────────────────────── */
+
+void ui_dosing_on_spawn_status(const pl_spawn_status_t *pl)
+{
+    if (!pl)
+        return;
+
+    /* Map status code to a human-readable string and display colour. */
+    const char *status_str;
+    lv_color_t col;
+
+    switch ((spawn_status_code_t)pl->status)
+    {
+    case SPAWN_STATUS_RUNNING:
+        status_str = "Running\xe2\x80\xa6";
+        col = lv_color_hex(0xFFFFFF);
+        break;
+    case SPAWN_STATUS_AGITATING:
+        status_str = "Agitating\xe2\x80\xa6";
+        col = lv_color_hex(0xFFAA00); /* amber */
+        break;
+    case SPAWN_STATUS_DONE:
+        status_str = "Done \xe2\x9c\x93";
+        col = lv_color_hex(0x00CC44); /* green */
+        break;
+    case SPAWN_STATUS_BAG_EMPTY:
+        status_str = "Bag empty";
+        col = lv_color_hex(0xFF8800); /* orange */
+        break;
+    case SPAWN_STATUS_FLOW_FAILURE:
+        status_str = "Flow failure!";
+        col = lv_color_hex(0xFF2200); /* red */
+        break;
+    case SPAWN_STATUS_STALLED:
+        status_str = "Stalled";
+        col = lv_color_hex(0xFF8800);
+        break;
+    case SPAWN_STATUS_ERROR:
+    default:
+        status_str = "Error!";
+        col = lv_color_hex(0xFF0000); /* bright red */
+        break;
+    }
+
+    /* Latch target mass for progress bar scaling. */
+    if (pl->target_ug > 0u)
+        s_dose_target_ug = pl->target_ug;
+
+    lvgl_port_lock(0);
+
+    if (s_dose_lbl_status)
+    {
+        lv_label_set_text(s_dose_lbl_status, status_str);
+        lv_obj_set_style_text_color(s_dose_lbl_status, col, 0);
+    }
+
+    if (s_dose_lbl_progress)
+    {
+        char buf[48];
+        float disp_g = (float)pl->disp_ug / 1000000.0f;
+        float target_g = (float)pl->target_ug / 1000000.0f;
+        snprintf(buf, sizeof(buf), "%.2f g  /  %.2f g", disp_g, target_g);
+        lv_label_set_text(s_dose_lbl_progress, buf);
+    }
+
+    if (s_dose_lbl_retries)
+    {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "Retries: %u   Bag: %u",
+                 (unsigned)pl->retries, (unsigned)pl->bag_number);
+        lv_label_set_text(s_dose_lbl_retries, buf);
+    }
+
+    if (s_dose_bar && s_dose_target_ug > 0u)
+    {
+        int32_t pct = (int32_t)(((uint64_t)pl->disp_ug * 1000ULL) /
+                                s_dose_target_ug);
+        if (pct > 1000)
+            pct = 1000;
+        lv_bar_set_value(s_dose_bar, pct, LV_ANIM_OFF);
+    }
+
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "Spawn status: %s  disp=%lu ug  target=%lu ug",
+             status_str, (unsigned long)pl->disp_ug,
+             (unsigned long)pl->target_ug);
+}
+
+/* ── Dosing screen builder ────────────────────────────────────────────────── *
+ *                                                                              *
+ *  Layout  (320 × 240, landscape, pad=10 → 300 × 220 content area):           *
+ *    y=  0  "Spawn Dosing"  title                [Home  60×20  TOP_RIGHT]      *
+ *    y= 25  status label  (colour-coded per spawn_status_code_t)               *
+ *    y= 48  progress label  "X.XX g / Y.YY g"                                 *
+ *    y= 68  retries label   "Retries: N   Bag: N"                              *
+ *    y= 88  progress bar    300 × 18                                           *
+ *    y=115  innoc label 90×24  [−  55×24]  [+  55×24]                         *
+ *    y=152  [Start Dose 145×65]  4  [Abort 145×65]  (to bottom)                *
+ * ─────────────────────────────────────────────────────────────────────────── */
 void ui_show_dosing(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
 
-    /* Nullify ops-screen labels so async handlers don't touch freed widgets */
+    /* Nullify all async-update handles so stale pointer writes can't crash. */
     s_ops_lbl_status = NULL;
     s_ops_lbl_vacuum = NULL;
+    s_dose_lbl_status = NULL;
+    s_dose_lbl_progress = NULL;
+    s_dose_lbl_retries = NULL;
+    s_dose_bar = NULL;
+    s_dose_lbl_innoc = NULL;
+    s_dose_target_ug = 0;
+    lbl_weight = NULL;
 
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
 
-    lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "DOSING\xe2\x80\xa6");
-    lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
+    /* ── Title ───────────────────────────────────────────────────────────── */
+    lv_obj_t *lbl_title = lv_label_create(scr);
+    lv_label_set_text(lbl_title, "Spawn Dosing");
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, 0, 2);
 
-    lbl_weight = lv_label_create(scr);
-    char weight_str[32];
-    snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g",
-             s_last_weight_g);
-    lv_label_set_text(lbl_weight, weight_str);
-    lv_obj_align(lbl_weight, LV_ALIGN_CENTER, 0, -20);
-    lv_obj_set_style_text_font(lbl_weight, &lv_font_montserrat_14, 0);
+    /* ── Home nav (top-right) ────────────────────────────────────────────── */
+    lv_obj_t *btn_nav = lv_btn_create(scr);
+    lv_obj_set_size(btn_nav, 60, 20);
+    lv_obj_align(btn_nav, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_nav, on_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l_nav = lv_label_create(btn_nav);
+    lv_label_set_text(l_nav, "Home");
+    lv_obj_center(l_nav);
 
-    lv_obj_t *btn_home = lv_btn_create(scr);
-    lv_obj_set_size(btn_home, 140, 70);
-    lv_obj_align(btn_home, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-    lv_obj_add_event_cb(btn_home, on_home, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lp = lv_label_create(btn_home);
-    lv_label_set_text(lp, "Home");
-    lv_obj_center(lp);
+    /* ── Status label (y=25) ─────────────────────────────────────────────── */
+    s_dose_lbl_status = lv_label_create(scr);
+    lv_label_set_text(s_dose_lbl_status, "Ready");
+    lv_obj_set_style_text_font(s_dose_lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_dose_lbl_status,
+                                lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(s_dose_lbl_status, LV_ALIGN_TOP_LEFT, 0, 25);
+    /* lbl_status also points here so set_status() updates it from callbacks */
+    lbl_status = s_dose_lbl_status;
 
-    lv_obj_t *btn_read_weight = lv_btn_create(scr);
-    lv_obj_set_size(btn_read_weight, 140, 70);
-    lv_obj_align(btn_read_weight, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_obj_add_event_cb(btn_read_weight, on_read_weight, LV_EVENT_CLICKED,
-                        NULL);
-    lv_obj_t *ls = lv_label_create(btn_read_weight);
-    lv_label_set_text(ls, "Read Weight");
-    lv_obj_center(ls);
+    /* ── Progress label (y=48) ───────────────────────────────────────────── */
+    s_dose_lbl_progress = lv_label_create(scr);
+    lv_label_set_text(s_dose_lbl_progress, "0.00 g  /  -- g");
+    lv_obj_set_style_text_font(s_dose_lbl_progress,
+                               &lv_font_montserrat_14, 0);
+    lv_obj_align(s_dose_lbl_progress, LV_ALIGN_TOP_LEFT, 0, 48);
+
+    /* ── Retries label (y=68) ────────────────────────────────────────────── */
+    s_dose_lbl_retries = lv_label_create(scr);
+    lv_label_set_text(s_dose_lbl_retries, "Retries: 0   Bag: 0");
+    lv_obj_set_style_text_font(s_dose_lbl_retries,
+                               &lv_font_montserrat_14, 0);
+    lv_obj_align(s_dose_lbl_retries, LV_ALIGN_TOP_LEFT, 0, 68);
+
+    /* ── Progress bar (y=88) ─────────────────────────────────────────────── */
+    s_dose_bar = lv_bar_create(scr);
+    lv_obj_set_size(s_dose_bar, 300, 18);
+    lv_obj_align(s_dose_bar, LV_ALIGN_TOP_LEFT, 0, 88);
+    lv_bar_set_range(s_dose_bar, 0, 1000);
+    lv_bar_set_value(s_dose_bar, 0, LV_ANIM_OFF);
+
+    /* ── Inoculation % row (y=115): label + − + buttons ─────────────────── */
+    s_dose_lbl_innoc = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_dose_lbl_innoc,
+                               &lv_font_montserrat_14, 0);
+    lv_obj_align(s_dose_lbl_innoc, LV_ALIGN_TOP_LEFT, 0, 115);
+    dose_update_innoc_label();
+
+    make_btn(scr, " - ", 100, 113, 55, 24, on_innoc_minus);
+    make_btn(scr, " + ", 159, 113, 55, 24, on_innoc_plus);
+
+    /* ── Start / Abort row (y=152) ───────────────────────────────────────── */
+    make_btn(scr, "Start Dose", 0, 152, 145, 65, on_dose_start);
+    make_btn(scr, "Abort", 155, 152, 145, 65, on_dose_abort);
 }

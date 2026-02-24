@@ -13,3 +13,6 @@ void ui_ops_on_motion_done(const pl_motion_done_t *pl);
 
 /** Call from pico_rx_cb when MSG_VACUUM_STATUS is received */
 void ui_ops_on_vacuum_status(const pl_vacuum_status_t *pl);
+
+/** Call from pico_rx_cb when MSG_SPAWN_STATUS is received */
+void ui_dosing_on_spawn_status(const pl_spawn_status_t *pl);

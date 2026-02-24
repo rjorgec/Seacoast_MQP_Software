@@ -37,6 +37,12 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
             ui_ops_on_vacuum_status((const pl_vacuum_status_t *)pl);
         }
         break;
+    case MSG_SPAWN_STATUS:
+        if (len >= sizeof(pl_spawn_status_t))
+        {
+            ui_dosing_on_spawn_status((const pl_spawn_status_t *)pl);
+        }
+        break;
     default:
         /* Forward to UI screens handler for weight display */
         ui_screens_pico_rx_handler(type, seq, pl, len);
