@@ -1130,10 +1130,9 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
     motion->torque_tick_count++;
     bool do_torque = (motion->torque_tick_count >= motion->torque_sample_div);
     if (do_torque)
+    {
         motion->torque_tick_count = 0;
 
-    if (do_torque)
-    {
         for (uint8_t k = 0; k < N; ++k)
         {
             drv8434s_motion_job_t *job = &motion->jobs[k];
@@ -1173,6 +1172,10 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
             for (uint8_t b = 0; b < job->trq_buf_count; ++b)
                 sum += job->trq_buf[b];
             uint16_t avg = (uint16_t)(sum / job->trq_buf_count);
+// Tuning print
+#ifdef TUNING
+            printf("Motor %u with torque %u: [%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]\n", k, avg, job->trq_buf[0], job->trq_buf[1], job->trq_buf[2], job->trq_buf[3], job->trq_buf[4], job->trq_buf[5], job->trq_buf[6], job->trq_buf[7], job->trq_buf[8], job->trq_buf[9]);
+#endif
 
             // TRQ_COUNT = torque margin until stall (0 = stalled).
             // Trip when average falls at or below the limit.
