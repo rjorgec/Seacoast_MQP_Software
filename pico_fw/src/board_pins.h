@@ -203,22 +203,22 @@
 /* ================================================================== */
 
 #ifndef FLAP_OPEN_SPEED_PWM
-#define FLAP_OPEN_SPEED_PWM 4095 /* full speed open */
+#define FLAP_OPEN_SPEED_PWM 2500 /* slow speed open */
 #endif
 #ifndef FLAP_OPEN_CURRENT_DROP_TH
 #define FLAP_OPEN_CURRENT_DROP_TH 50 /* ADC counts -- open-circuit endpoint */
 #endif
 #ifndef FLAP_CLOSE_SPEED_PWM
-#define FLAP_CLOSE_SPEED_PWM 1200 /* reduced speed on close */
+#define FLAP_CLOSE_SPEED_PWM 3000 /* reduced speed on close */
 #endif
 #ifndef FLAP_CLOSE_TORQUE_TH
-#define FLAP_CLOSE_TORQUE_TH 130 /* ADC counts -- stall/torque threshold */
+#define FLAP_CLOSE_TORQUE_TH 145 /* ADC counts -- stall/torque threshold */
 #endif
 #ifndef FLAP_MONITOR_INTERVAL_MS
 #define FLAP_MONITOR_INTERVAL_MS 20
 #endif
 #ifndef FLAP_MOTION_TIMEOUT_MS
-#define FLAP_MOTION_TIMEOUT_MS 8000
+#define FLAP_MOTION_TIMEOUT_MS 15000
 #endif
 
 /* ================================================================== */

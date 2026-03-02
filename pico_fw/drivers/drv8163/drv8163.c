@@ -166,7 +166,7 @@ static void drv8163_apply_motor_control(drv8163_t *dev)
 {
     drv8163_platform_t *pdata = (drv8163_platform_t *)dev->platform_data;
 
-    printf("Motor direction: %u, speed %u\n", dev->current_state, dev->current_speed);
+    // printf("Motor direction: %u, speed %u\n", dev->current_state, dev->current_speed);
 
     switch (dev->current_state)
     {
@@ -281,6 +281,20 @@ bool drv8163_start_current_monitoring(drv8163_t *dev)
 
     dev->monitoring_enabled = true;
     dev->current_status = DRV8163_CURRENT_OK;
+
+    // Pre-seed the rolling ADC average with the current reading so that
+    // stale values from a previous monitoring session don't contaminate the
+    // new session's threshold comparisons.
+    {
+        uint16_t init_val = drv8163_read_current(dev);
+        for (int i = 0; i < ADC_AVERAGES; ++i)
+        {
+            dev->last_current_adc.buffer[i] = init_val;
+        }
+        dev->last_current_adc.sum = (uint16_t)(init_val * ADC_AVERAGES);
+        dev->last_current_adc.average = init_val;
+        dev->last_current_adc.head = 0;
+    }
 
     // Initialize blanking period
     pdata->motor_start_time = to_ms_since_boot(get_absolute_time());

@@ -154,6 +154,7 @@ extern "C"
         SPAWN_STATUS_BAG_EMPTY = 4,
         SPAWN_STATUS_ERROR = 5,
         SPAWN_STATUS_FLOW_FAILURE = 6, /* flaps opened fully with no flow — bag likely empty or jammed */
+        SPAWN_STATUS_ABORTED = 7,      /* dose cancelled by MSG_CTRL_STOP */
     } spawn_status_code_t;
 
     typedef struct __attribute__((packed))
