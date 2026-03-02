@@ -1,0 +1,94 @@
+#pragma once
+#include <stdint.h>
+#include <stdbool.h>
+#include "esp_err.h"
+
+typedef enum
+{
+    MOTOR_DIR_FWD = 0,
+    MOTOR_DIR_REV = 1
+} motor_dir_t;
+
+// DRV8163: your “current monitor task”
+esp_err_t motor_linact_start_monitor_dir(motor_dir_t dir,
+                                         uint16_t speed,
+                                         uint16_t low_th,
+                                         uint16_t high_th,
+                                         uint32_t interval_ms);
+
+esp_err_t motor_linact_stop_monitor(void);
+esp_err_t motor_linact_run(motor_dir_t dir, uint16_t speed);
+esp_err_t motor_linact_stop(void);
+
+// DRV8434S: simple stepping API (upgrade later to queued motion)
+esp_err_t motor_stepper_enable(bool en);
+esp_err_t motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_delay_us);
+
+/* ------------------------------------------------------------------ */
+/*  State-based actuator commands (state machine, not atomic steps)    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief Drive both flaps to their open-circuit endpoint (full extension).
+ *        The Pico auto-stops when current drops (open-circuit endpoint).
+ *        MSG_MOTION_DONE is sent asynchronously by the Pico when done.
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_flap_open(void);
+
+/**
+ * @brief Drive both flaps closed until torque threshold is reached.
+ *        MSG_MOTION_DONE is sent asynchronously by the Pico when done.
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_flap_close(void);
+
+/**
+ * @brief Move the arm stepper to a named position.
+ * @param pos  One of: ARM_POS_PRESS, ARM_POS_1, ARM_POS_2 (arm_pos_t cast to uint8_t)
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_arm_move(uint8_t pos);
+
+/**
+ * @brief Move the rack stepper to a named position.
+ * @param pos  One of: RACK_POS_HOME, RACK_POS_EXTEND, RACK_POS_PRESS (rack_pos_t cast to uint8_t)
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_rack_move(uint8_t pos);
+
+/**
+ * @brief Move the turntable stepper to a named absolute position.
+ * @param pos  One of: TURNTABLE_POS_A..D (turntable_pos_t cast to uint8_t)
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_turntable_goto(uint8_t pos);
+
+/**
+ * @brief Send turntable home command (zero position counter on Pico).
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_turntable_home(void);
+
+/**
+ * @brief Enable or disable the hot wire constant-current PWM.
+ * @param enable  true = on, false = off
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_hotwire_set(bool enable);
+
+/**
+ * @brief Turn the vacuum pump on or off.
+ * @param enable  true = on, false = off
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_vacuum_set(bool enable);
+
+/**
+ * @brief Turn the second vacuum pump on or off.
+ *        Uses the REVERSE channel (IN2/GP7) of the hotwire DRV8163.
+ *        Mutually exclusive with hotwire ON (Pico enforces interlock).
+ * @param enable  true = on, false = off
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_vacuum2_set(bool enable);

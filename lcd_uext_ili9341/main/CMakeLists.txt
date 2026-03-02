@@ -1,13 +1,17 @@
 idf_component_register(
-  SRCS
-    "app_main.c"
-    "display.c"
-    "ui.c"
-    "app_state.c"
-    "control.c"
-    "i2c_scan.c"
-    "touch_ns2009.c"
-    "ui_screens.c"
-    "touch_cal.c"
-  INCLUDE_DIRS "."
+    SRCS
+        "app_main.c"
+        "display.c"
+        "ui.c"
+        "ui_screens.c"
+        "touch_ns2009.c"
+        "touch_cal.c"
+        "control.c"
+        "dosing.c"
+        "loadcell.c"
+        "flap.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES esp_timer
+    PRIV_REQUIRES nvs_flash
+    PRIV_REQUIRES motor_hal
 )
