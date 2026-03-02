@@ -9,7 +9,7 @@ typedef enum
     MOTOR_DIR_REV = 1
 } motor_dir_t;
 
-// DRV8163: your “current monitor task”
+// DRV8263: your “current monitor task”
 esp_err_t motor_linact_start_monitor_dir(motor_dir_t dir,
                                          uint16_t speed,
                                          uint16_t low_th,
@@ -86,9 +86,28 @@ esp_err_t motor_vacuum_set(bool enable);
 
 /**
  * @brief Turn the second vacuum pump on or off.
- *        Uses the REVERSE channel (IN2/GP7) of the hotwire DRV8163.
- *        Mutually exclusive with hotwire ON (Pico enforces interlock).
+ *        Drives the IN2 independent half-bridge output of the DRV8263.
+ *        Can run simultaneously with the hot wire (IN1) — no interlock.
  * @param enable  true = on, false = off
  * @return ESP_OK if the command was ACK'd, error otherwise.
  */
 esp_err_t motor_vacuum2_set(bool enable);
+
+/**
+ * @brief Traverse the hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE).
+ * @param cut  true = cut direction (forward), false = return direction
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ *         Returns ESP_ERR_NOT_SUPPORTED if the device is not wired.
+ *         MSG_MOTION_DONE is sent asynchronously by the Pico when done.
+ */
+esp_err_t motor_hotwire_traverse(bool cut);
+
+/**
+ * @brief Move the bag depth/eject rack (indexer) to a named position.
+ * @param position  indexer_pos_t cast to uint8_t:
+ *                  INDEXER_POS_OPEN=0, INDEXER_POS_CENTER=1, INDEXER_POS_EJECT=2
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ *         Returns ESP_ERR_NOT_SUPPORTED if the device is not wired.
+ *         MSG_MOTION_DONE is sent asynchronously by the Pico when done.
+ */
+esp_err_t motor_indexer_move(uint8_t position);

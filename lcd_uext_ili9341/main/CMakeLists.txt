@@ -10,6 +10,7 @@ idf_component_register(
         "dosing.c"
         "loadcell.c"
         "flap.c"
+        "sys_sequence.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES esp_timer
     PRIV_REQUIRES nvs_flash

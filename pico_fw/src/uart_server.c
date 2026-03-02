@@ -14,7 +14,7 @@
 #include "hardware/uart.h"
 
 #include "board_pins.h"
-#include "drivers/drv8163/drv8163.h"
+#include "drivers/drv8263/drv8263.h"
 #include "drivers/drv8434s/drv8434s.h"
 
 #include "extern/pico-scale/include/hx711_scale_adaptor.h"
@@ -30,8 +30,8 @@
 #define UART_ENCODED_FRAME_MAX 256u
 #define UART_DECODED_FRAME_MAX ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 2u)
 
-/* Default step delay used by the high-level stepper handlers (µs per step). */
-#define STEPPER_DEFAULT_STEP_DELAY_US 1000u
+/* All tuning #defines are in board_pins.h — see STEPPER_DEFAULT_STEP_DELAY_US,
+ * SPAWN_*, AGITATOR_*, HOTWIRE_TRAVERSE_*, INDEXER_* etc. */
 
 /* ── Ring buffer ───────────────────────────────────────────────────────────── */
 
@@ -48,20 +48,20 @@ static uint8_t s_frame_buf[UART_ENCODED_FRAME_MAX];
 static size_t s_frame_len;
 static bool s_frame_overflow;
 
-/* ── DRV8163 — flap (primary) ──────────────────────────────────────────────── */
+/* ── DRV8263 — flap (primary) ──────────────────────────────────────────────── */
 
-static drv8163_t s_drv8163;
-static bool s_drv8163_ready;
+static drv8263_t s_drv8263;
+static bool s_drv8263_ready;
 
-/* ── DRV8163 — flap (second instance) ─────────────────────────────────────── */
+/* ── DRV8263 — flap (second instance) ─────────────────────────────────────── */
 
-static drv8163_t s_drv8163_flap2;
-static bool s_drv8163_flap2_ready = false;
+static drv8263_t s_drv8263_flap2;
+static bool s_drv8263_flap2_ready = false;
 
-/* ── DRV8163 — hot wire (secondary) ───────────────────────────────────────── */
+/* ── DRV8263 — hot wire (secondary) ───────────────────────────────────────── */
 
-static drv8163_t s_drv8163_hotwire;
-static bool s_drv8163_hotwire_ready;
+static drv8263_t s_drv8263_hotwire;
+static bool s_drv8263_hotwire_ready;
 
 /* ── DRV8434S stepper chain & motion engine ────────────────────────────────── */
 
@@ -70,6 +70,7 @@ static drv8434s_motion_t s_motion;
 static struct repeating_timer s_step_timer;
 static bool s_step_timer_active;
 static bool s_stepper_ready;
+static uint32_t s_spi_watchdog_last_ms = 0u; /* timestamp of last idle SPI health check */
 
 /* ── UART ──────────────────────────────────────────────────────────────────── */
 
@@ -85,8 +86,8 @@ static scale_t s_scale;
 static scale_options_t s_scale_opt;
 static int32_t s_scale_valbuff[128]; /* 80 SPS max × ~1 s worst-case read window */
 static mass_unit_t unit = mass_g;
-static int32_t refUnit = -165;   // slope
-static int32_t offset = 8130430; // offset
+static int32_t refUnit = HX711_REF_UNIT;   /* slope — set in board_pins.h */
+static int32_t offset = HX711_ZERO_OFFSET; /* zero offset — set in board_pins.h */
 
 /* ── Flap state machine ────────────────────────────────────────────────────── */
 
@@ -111,6 +112,7 @@ static int32_t s_arm_pos_steps = 0;
 static int32_t s_rack_pos_steps = 0;
 static int32_t s_turntable_pos_steps = 0;
 static bool s_turntable_homed = false;
+static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
 /* ── Per-device pending motion tracking ────────────────────────────────────── */
 
@@ -131,7 +133,6 @@ static stepper_pending_t s_turntable_pending;
 /* ── Vacuum pump state ─────────────────────────────────────────────────────── */
 
 static bool s_vacuum_on = false;
-static bool s_vacuum2_on = false;
 static volatile uint32_t s_vacuum_pulse_count = 0; /* written by GPIO ISR */
 static uint32_t s_vacuum_last_sample_ms = 0;
 static uint32_t s_vacuum_last_status_ms = 0;
@@ -161,33 +162,17 @@ typedef struct
 
 static spawn_dose_ctx_t s_spawn;
 
-#define SPAWN_TIMER_PERIOD_MS 50
-#define SPAWN_FLOW_WINDOW_MS 100
+/* Spawn dosing constants are defined in board_pins.h with #ifndef guards
+ * (SPAWN_TIMER_PERIOD_MS, SPAWN_FLOW_WINDOW_MS, SPAWN_FLOW_NOFLOW_UG, etc.).
+ * Override them via -D flags or by editing board_pins.h before calibration. */
+
+/* Derived spawn constants (computed from board_pins.h primaries) */
 #define SPAWN_TICKS_PER_WINDOW (SPAWN_FLOW_WINDOW_MS / SPAWN_TIMER_PERIOD_MS)
-#define SPAWN_SCALE_READ_SAMPLES 1u   /* Single shot reading */
-#define SPAWN_FLOW_NOFLOW_UG 0500000u /* minimum mass per windoow to consider flowing*/
-#define SPAWN_FLOW_MIN_UG 1000000u    /* mass per window to target when completing dose */
-#define SPAWN_FLOW_MAX_UG 5000000u    /* mass per window to target when starting dose */
-#define SPAWN_MAX_RETRIES 100
-#define SPAWN_AGITATE_MS 2000
-/* Per-tick flow targets (window totals divided by ticks per window) */
-#define SPAWN_TICK_MIN_UG (SPAWN_FLOW_MIN_UG / SPAWN_TICKS_PER_WINDOW) /* 1000 ug */
-#define SPAWN_TICK_MAX_UG (SPAWN_FLOW_MAX_UG / SPAWN_TICKS_PER_WINDOW) /* 4000 ug */
-#define SPAWN_TICK_DEADBAND 0050000u                                   /* ±300 ug/tick — no nudge needed within this band */
-/* Flap PWM values used during dosing */
-#define SPAWN_OPEN_PWM (FLAP_OPEN_SPEED_PWM / 2)     /* forward PWM for startup opening and open nudges */
-#define SPAWN_REVERSE_PWM (FLAP_CLOSE_SPEED_PWM / 2) /* reverse nudge PWM */
-/* Minimum weight increase per 500 ms tick to consider material flowing during startup opening */
-#define SPAWN_STARTUP_FLOW_DETECT_UG 1000000u /* 100 mg */
-/* Duration of each position nudge — must be shorter than SPAWN_TIMER_PERIOD_MS */
-#define SPAWN_NUDGE_OPEN_MS 300u  /* ms to nudge open per tick */
-#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge closed per tick */
-/* Proportional scaling of the per-tick target rate:
- *   remaining > target / SPAWN_PROP_UPPER → SPAWN_TICK_MAX_UG target rate
- *   remaining < target / SPAWN_PROP_LOWER → SPAWN_TICK_MIN_UG target rate
- *   in between                            → linear interpolation */
-#define SPAWN_PROP_UPPER 2u  /* 50 % of target remaining */
-#define SPAWN_PROP_LOWER 10u /* 10 % of target remaining */
+#define SPAWN_TICK_MIN_UG (SPAWN_FLOW_MIN_UG / SPAWN_TICKS_PER_WINDOW)
+#define SPAWN_TICK_MAX_UG (SPAWN_FLOW_MAX_UG / SPAWN_TICKS_PER_WINDOW)
+/* Flap PWM values used during dosing (derived from board_pins.h flap speeds) */
+#define SPAWN_OPEN_PWM (FLAP_OPEN_SPEED_PWM / 2)
+#define SPAWN_REVERSE_PWM (FLAP_CLOSE_SPEED_PWM / 2)
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /*  Frame transmit helpers                                                     */
@@ -284,44 +269,44 @@ static void send_vacuum_status(vacuum_status_code_t status, uint16_t rpm)
  */
 static bool flap_close_internal(void)
 {
-    if (!s_drv8163_ready)
+    if (!s_drv8263_ready)
     {
         return false;
     }
 
-    if (s_drv8163.monitoring_enabled)
+    if (s_drv8263.monitoring_enabled)
     {
-        drv8163_stop_current_monitoring(&s_drv8163);
+        drv8263_stop_current_monitoring(&s_drv8263);
     }
-    s_drv8163.config.current_low_threshold = FLAP_OPEN_CURRENT_DROP_TH;
-    s_drv8163.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
-    s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_REVERSE,
+    s_drv8263.config.current_low_threshold = FLAP_OPEN_CURRENT_DROP_TH;
+    s_drv8263.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
+    s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+    (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_REVERSE,
                                     (uint16_t)FLAP_CLOSE_SPEED_PWM);
-    if (!drv8163_start_current_monitoring(&s_drv8163))
+    if (!drv8263_start_current_monitoring(&s_drv8263))
     {
-        (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+        (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
         return false;
     }
 
-    if (s_drv8163_flap2_ready)
+    if (s_drv8263_flap2_ready)
     {
-        if (s_drv8163_flap2.monitoring_enabled)
+        if (s_drv8263_flap2.monitoring_enabled)
         {
-            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+            drv8263_stop_current_monitoring(&s_drv8263_flap2);
         }
-        s_drv8163_flap2.config.current_low_threshold = FLAP_OPEN_CURRENT_DROP_TH;
-        s_drv8163_flap2.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
-        s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_REVERSE,
+        s_drv8263_flap2.config.current_low_threshold = FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8263_flap2.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
+        s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_REVERSE,
                                         (uint16_t)FLAP_CLOSE_SPEED_PWM);
-        (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
+        (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
     }
 
     s_flap_state = FLAP_SM_CLOSING;
     s_flap_start_ms = to_ms_since_boot(get_absolute_time());
     s_flap1_stopped = false;
-    s_flap2_stopped = (!s_drv8163_flap2_ready);
+    s_flap2_stopped = (!s_drv8263_flap2_ready);
     return true;
 }
 
@@ -331,19 +316,19 @@ static bool flap_close_internal(void)
  */
 static void spawn_stop_flaps(void)
 {
-    if (s_drv8163.monitoring_enabled)
+    if (s_drv8263.monitoring_enabled)
     {
-        drv8163_stop_current_monitoring(&s_drv8163);
+        drv8263_stop_current_monitoring(&s_drv8263);
     }
-    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+    (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
 
-    if (s_drv8163_flap2_ready)
+    if (s_drv8263_flap2_ready)
     {
-        if (s_drv8163_flap2.monitoring_enabled)
+        if (s_drv8263_flap2.monitoring_enabled)
         {
-            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+            drv8263_stop_current_monitoring(&s_drv8263_flap2);
         }
-        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+        (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
     }
     s_spawn.nudging = false;
 }
@@ -367,11 +352,11 @@ static void spawn_close_flaps(void)
  */
 static void spawn_set_flap_pwm(bool forward, uint16_t pwm)
 {
-    drv8163_motor_state_t st = forward ? DRV8163_MOTOR_FORWARD : DRV8163_MOTOR_REVERSE;
-    (void)drv8163_set_motor_control(&s_drv8163, st, pwm);
-    if (s_drv8163_flap2_ready)
+    drv8263_motor_state_t st = forward ? DRV8263_MOTOR_FORWARD : DRV8263_MOTOR_REVERSE;
+    (void)drv8263_set_motor_control(&s_drv8263, st, pwm);
+    if (s_drv8263_flap2_ready)
     {
-        (void)drv8163_set_motor_control(&s_drv8163_flap2, st, pwm);
+        (void)drv8263_set_motor_control(&s_drv8263_flap2, st, pwm);
     }
 }
 
@@ -411,10 +396,10 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
     {
         /* Stop motor; hold current flap position until next nudge decision */
         spawn_set_flap_pwm(true, 0u); /* coast = no drive in either direction */
-        (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
-        if (s_drv8163_flap2_ready)
+        (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+        if (s_drv8263_flap2_ready)
         {
-            (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+            (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
         }
         s_spawn.nudging = false;
     }
@@ -476,10 +461,10 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
      * Guard: when motor is stopped between nudges current is zero regardless   *
      *   of position, so only evaluate when actively driving forward.           */
     bool startup_undercurrent = s_spawn.startup_opening &&
-                                s_drv8163.current_status == DRV8163_CURRENT_UNDERCURRENT &&
+                                s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT &&
                                 tick_delta_ug < SPAWN_STARTUP_FLOW_DETECT_UG;
     bool nudge_undercurrent = s_spawn.nudging &&
-                              s_drv8163.current_status == DRV8163_CURRENT_UNDERCURRENT;
+                              s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT;
     if (startup_undercurrent || nudge_undercurrent)
     {
         printf("Spawn: flaps fully open (undercurrent) — flow failure\n");
@@ -511,17 +496,17 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
         {
             /* Flow confirmed — stop undercurrent monitoring, park motor,
              * reset the flow window, and fall through to the nudge controller. */
-            drv8163_stop_current_monitoring(&s_drv8163);
-            if (s_drv8163_flap2_ready && s_drv8163_flap2.monitoring_enabled)
+            drv8263_stop_current_monitoring(&s_drv8263);
+            if (s_drv8263_flap2_ready && s_drv8263_flap2.monitoring_enabled)
             {
-                drv8163_stop_current_monitoring(&s_drv8163_flap2);
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
             }
             s_spawn.startup_opening = false;
             s_spawn.nudging = false;
-            (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
-            if (s_drv8163_flap2_ready)
+            (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+            if (s_drv8263_flap2_ready)
             {
-                (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+                (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
             }
             /* Reset flow window so the 500 ms budget begins from first flow. */
             s_spawn.last_flow_check = get_absolute_time();
@@ -555,6 +540,29 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
             s_spawn.agitating = true;
             s_spawn.retry++;
             send_spawn_status(SPAWN_STATUS_AGITATING);
+
+            /* Command the agitator eccentric arm stepper if it is wired.
+             * STEPPER_DEV_AGITATOR is defined in board_pins.h once device 3
+             * is added to the DRV8434S chain and DRV8434S_N_DEVICES is bumped. */
+#ifdef STEPPER_DEV_AGITATOR
+            if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
+            {
+                drv8434s_motion_job_t agit_job = {0};
+                agit_job.dev_idx = (uint8_t)STEPPER_DEV_AGITATOR;
+                agit_job.steps = (uint32_t)AGITATOR_KNEAD_STEPS;
+                agit_job.reverse = false;
+                agit_job.step_delay_us = (uint32_t)AGITATOR_STEP_DELAY_US;
+                (void)drv8434s_motion_start(&s_motion, &agit_job);
+                printf("Agitator: started knead motion (%u steps)\n",
+                       (unsigned)AGITATOR_KNEAD_STEPS);
+            }
+            else
+            {
+                printf("Agitator: STEPPER_DEV_AGITATOR not in chain (not wired)\n");
+            }
+#else
+            printf("Agitator: STEPPER_DEV_AGITATOR not defined (see board_pins.h)\n");
+#endif
             /* Hold off the next window check by SPAWN_AGITATE_MS */
             s_spawn.last_flow_check = delayed_by_ms(now, SPAWN_AGITATE_MS);
             s_spawn.window_start_ug = s_spawn.dispensed_ug;
@@ -583,18 +591,18 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
             s_spawn.window_start_ug = s_spawn.dispensed_ug;
             s_spawn.last_tick_ug = s_spawn.dispensed_ug;
 
-            s_drv8163.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-            s_drv8163.config.current_high_threshold = 4095u;
-            s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+            s_drv8263.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+            s_drv8263.config.current_high_threshold = 4095u;
+            s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
             spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-            (void)drv8163_start_current_monitoring(&s_drv8163);
+            (void)drv8263_start_current_monitoring(&s_drv8263);
 
-            if (s_drv8163_flap2_ready)
+            if (s_drv8263_flap2_ready)
             {
-                s_drv8163_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-                s_drv8163_flap2.config.current_high_threshold = 4095u;
-                s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-                (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
+                s_drv8263_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+                s_drv8263_flap2.config.current_high_threshold = 4095u;
+                s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+                (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
             }
 
             send_spawn_status(SPAWN_STATUS_RUNNING);
@@ -796,9 +804,55 @@ static bool ensure_step_timer_running(void)
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
+ * @brief Periodic idle SPI health check for the DRV8434S chain.
+ *
+ * When no motion is active, reads the FAULT register from each device every
+ * DRV8434S_SPI_WATCHDOG_INTERVAL_MS milliseconds.  A read failure logs a
+ * warning.  An active FAULT flag triggers a best-effort clear-faults attempt.
+ * This catches persistent SPI issues early, before the next motion command.
+ */
+static void stepper_spi_watchdog_tick(void)
+{
+    if (!s_stepper_ready)
+        return;
+
+    /* Skip watchdog if any motion is currently in progress */
+    if (s_arm_pending.pending || s_rack_pending.pending || s_turntable_pending.pending)
+    {
+        /* Reset timer so the watchdog runs after motion completes */
+        s_spi_watchdog_last_ms = to_ms_since_boot(get_absolute_time());
+        return;
+    }
+
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if ((now_ms - s_spi_watchdog_last_ms) < (uint32_t)DRV8434S_SPI_WATCHDOG_INTERVAL_MS)
+        return;
+
+    s_spi_watchdog_last_ms = now_ms;
+
+    for (uint8_t k = 0u; k < (uint8_t)DRV8434S_N_DEVICES; ++k)
+    {
+        uint8_t fault_val = 0u;
+        if (!drv8434s_chain_read_reg(&s_stepper_chain, k,
+                                     DRV8434S_REG_FAULT, &fault_val, NULL))
+        {
+            printf("WARN: DRV8434S dev %u SPI watchdog read FAILED\n", (unsigned)k);
+            /* Attempt recovery */
+            (void)drv8434s_chain_clear_faults(&s_stepper_chain, k, NULL);
+        }
+        else if (fault_val != 0u)
+        {
+            printf("WARN: DRV8434S dev %u idle FAULT=0x%02X — clearing\n",
+                   (unsigned)k, (unsigned)fault_val);
+            (void)drv8434s_chain_clear_faults(&s_stepper_chain, k, NULL);
+        }
+    }
+}
+
+/**
  * @brief Flap state-machine tick — detects current threshold crossings.
  *
- * The DRV8163 monitoring timer updates s_drv8163.current_status in ISR
+ * The DRV8263 monitoring timer updates s_drv8263.current_status in ISR
  * context.  We poll it here and fire the MOTION_DONE notification when a
  * threshold crossing or timeout is detected.
  */
@@ -816,19 +870,19 @@ static void flap_sm_tick(void)
     {
         /* Stop each flap individually when it reaches the open-circuit endpoint */
         if (!s_flap1_stopped &&
-            s_drv8163.current_status == DRV8163_CURRENT_UNDERCURRENT)
+            s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT)
         {
-            drv8163_stop_current_monitoring(&s_drv8163);
-            (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+            drv8263_stop_current_monitoring(&s_drv8263);
+            (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
             s_flap1_stopped = true;
             printf("Flap1 OPEN: reached endpoint (current drop)\n");
         }
 
-        if (!s_flap2_stopped && s_drv8163_flap2_ready &&
-            s_drv8163_flap2.current_status == DRV8163_CURRENT_UNDERCURRENT)
+        if (!s_flap2_stopped && s_drv8263_flap2_ready &&
+            s_drv8263_flap2.current_status == DRV8263_CURRENT_UNDERCURRENT)
         {
-            drv8163_stop_current_monitoring(&s_drv8163_flap2);
-            (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+            drv8263_stop_current_monitoring(&s_drv8263_flap2);
+            (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
             s_flap2_stopped = true;
             printf("Flap2 OPEN: reached endpoint (current drop)\n");
         }
@@ -845,13 +899,13 @@ static void flap_sm_tick(void)
             /* Stop any still-running actuators */
             if (!s_flap1_stopped)
             {
-                drv8163_stop_current_monitoring(&s_drv8163);
-                (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+                drv8263_stop_current_monitoring(&s_drv8263);
+                (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
             }
-            if (!s_flap2_stopped && s_drv8163_flap2_ready)
+            if (!s_flap2_stopped && s_drv8263_flap2_ready)
             {
-                drv8163_stop_current_monitoring(&s_drv8163_flap2);
-                (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
+                (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
             }
             printf("Flap OPEN: timeout\n");
             s_flap_state = FLAP_SM_FAULT;
@@ -863,35 +917,35 @@ static void flap_sm_tick(void)
         /* Stop each flap on EITHER endpoint: overcurrent (torque = hard stop)
          * or undercurrent (no load = open-circuit / past end-of-travel).      */
         bool f1_done = !s_flap1_stopped &&
-                       (s_drv8163.current_status == DRV8163_CURRENT_OVERCURRENT ||
-                        s_drv8163.current_status == DRV8163_CURRENT_UNDERCURRENT);
-        bool f2_done = !s_flap2_stopped && s_drv8163_flap2_ready &&
-                       (s_drv8163_flap2.current_status == DRV8163_CURRENT_OVERCURRENT ||
-                        s_drv8163_flap2.current_status == DRV8163_CURRENT_UNDERCURRENT);
+                       (s_drv8263.current_status == DRV8263_CURRENT_OVERCURRENT ||
+                        s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT);
+        bool f2_done = !s_flap2_stopped && s_drv8263_flap2_ready &&
+                       (s_drv8263_flap2.current_status == DRV8263_CURRENT_OVERCURRENT ||
+                        s_drv8263_flap2.current_status == DRV8263_CURRENT_UNDERCURRENT);
 
         /* Either flap reaching its endpoint stops both immediately */
         if (f1_done || f2_done)
         {
             if (!s_flap1_stopped)
             {
-                drv8163_stop_current_monitoring(&s_drv8163);
-                (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+                drv8263_stop_current_monitoring(&s_drv8263);
+                (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
                 s_flap1_stopped = true;
                 printf("Flap1 CLOSE: stopped (%s)\n",
                        f1_done
-                           ? (s_drv8163.current_status == DRV8163_CURRENT_UNDERCURRENT
+                           ? (s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT
                                   ? "undercurrent"
                                   : "torque")
                            : "partner endpoint");
             }
-            if (!s_flap2_stopped && s_drv8163_flap2_ready)
+            if (!s_flap2_stopped && s_drv8263_flap2_ready)
             {
-                drv8163_stop_current_monitoring(&s_drv8163_flap2);
-                (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
+                (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
                 s_flap2_stopped = true;
                 printf("Flap2 CLOSE: stopped (%s)\n",
                        f2_done
-                           ? (s_drv8163_flap2.current_status == DRV8163_CURRENT_UNDERCURRENT
+                           ? (s_drv8263_flap2.current_status == DRV8263_CURRENT_UNDERCURRENT
                                   ? "undercurrent"
                                   : "torque")
                            : "partner endpoint");
@@ -909,13 +963,13 @@ static void flap_sm_tick(void)
         {
             if (!s_flap1_stopped)
             {
-                drv8163_stop_current_monitoring(&s_drv8163);
-                (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+                drv8263_stop_current_monitoring(&s_drv8263);
+                (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
             }
-            if (!s_flap2_stopped && s_drv8163_flap2_ready)
+            if (!s_flap2_stopped && s_drv8263_flap2_ready)
             {
-                drv8163_stop_current_monitoring(&s_drv8163_flap2);
-                (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_STOP, 0u);
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
+                (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
             }
             printf("Flap CLOSE: timeout\n");
             s_flap_state = FLAP_SM_FAULT;
@@ -965,6 +1019,12 @@ static void stepper_completion_tick(void)
                 {
                     result = MOTION_STALLED;
                 }
+                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+                {
+                    /* SPI bus error — distinct from a physical driver fault.
+                     * ESP32 can display "SPI FAULT" vs "STALLED". */
+                    result = MOTION_SPI_FAULT;
+                }
                 else
                 {
                     result = MOTION_FAULT;
@@ -1005,6 +1065,12 @@ static void stepper_completion_tick(void)
                 {
                     result = MOTION_STALLED;
                 }
+                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+                {
+                    /* SPI bus error — distinct from a physical driver fault.
+                     * ESP32 can display "SPI FAULT" vs "STALLED". */
+                    result = MOTION_SPI_FAULT;
+                }
                 else
                 {
                     result = MOTION_FAULT;
@@ -1044,6 +1110,12 @@ static void stepper_completion_tick(void)
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
                     result = MOTION_STALLED;
+                }
+                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+                {
+                    /* SPI bus error — distinct from a physical driver fault.
+                     * ESP32 can display "SPI FAULT" vs "STALLED". */
+                    result = MOTION_SPI_FAULT;
                 }
                 else
                 {
@@ -1187,38 +1259,38 @@ static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
-/*  Existing low-level DRV8163 handlers (unchanged)                            */
+/*  Existing low-level DRV8263 handlers (unchanged)                            */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
-static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t len)
+static void handle_drv8263_start(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
-    if (len != (uint16_t)sizeof(pl_drv8163_start_mon_t))
+    if (len != (uint16_t)sizeof(pl_drv8263_start_mon_t))
     {
         send_nack(seq, NACK_BAD_LEN);
         return;
     }
 
-    if (!s_drv8163_ready)
+    if (!s_drv8263_ready)
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    const pl_drv8163_start_mon_t *p = (const pl_drv8163_start_mon_t *)payload;
+    const pl_drv8263_start_mon_t *p = (const pl_drv8263_start_mon_t *)payload;
 
-    s_drv8163.config.current_low_threshold = p->low_th;
-    s_drv8163.config.current_high_threshold = p->high_th;
-    s_drv8163.config.current_check_interval_ms = p->interval_ms;
+    s_drv8263.config.current_low_threshold = p->low_th;
+    s_drv8263.config.current_high_threshold = p->high_th;
+    s_drv8263.config.current_check_interval_ms = p->interval_ms;
 
-    drv8163_motor_state_t st = (p->dir == 0) ? DRV8163_MOTOR_FORWARD : DRV8163_MOTOR_REVERSE;
-    (void)drv8163_set_motor_control(&s_drv8163, st, p->speed);
+    drv8263_motor_state_t st = (p->dir == 0) ? DRV8263_MOTOR_FORWARD : DRV8263_MOTOR_REVERSE;
+    (void)drv8263_set_motor_control(&s_drv8263, st, p->speed);
 
-    if (s_drv8163.monitoring_enabled)
+    if (s_drv8263.monitoring_enabled)
     {
-        drv8163_stop_current_monitoring(&s_drv8163);
+        drv8263_stop_current_monitoring(&s_drv8263);
     }
 
-    if (!drv8163_start_current_monitoring(&s_drv8163))
+    if (!drv8263_start_current_monitoring(&s_drv8263))
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -1227,16 +1299,16 @@ static void handle_drv8163_start(uint16_t seq, const uint8_t *payload, uint16_t 
     send_ack(seq);
 }
 
-static void handle_drv8163_stop(uint16_t seq)
+static void handle_drv8263_stop(uint16_t seq)
 {
-    if (!s_drv8163_ready)
+    if (!s_drv8263_ready)
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    drv8163_stop_current_monitoring(&s_drv8163);
-    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+    drv8263_stop_current_monitoring(&s_drv8263);
+    (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
     send_ack(seq);
 }
 
@@ -1319,69 +1391,113 @@ static void handle_hx711_read(uint16_t seq, const uint8_t *payload, uint16_t len
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * @brief MSG_FLAPS_OPEN (0x40) — drive flap DRV8163 forward; auto-stop on
+ * @brief MSG_FLAPS_OPEN (0x40) — drive flap DRV8263 forward; auto-stop on
  *        current drop (open-circuit end-of-travel).
  */
 static void handle_flap_open(uint16_t seq)
 {
-    if (!s_drv8163_ready)
+    if (!s_drv8263_ready)
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    /* Stop any in-progress monitoring before reconfiguring. */
-    if (s_drv8163.monitoring_enabled)
+    /* No-op: already open — ACK and send immediate MOTION_DONE(OK). */
+    if (s_flap_state == FLAP_SM_OPEN)
     {
-        drv8163_stop_current_monitoring(&s_drv8163);
+        printf("Flap OPEN: already open (no-op)\n");
+        send_ack(seq);
+        send_motion_done(SUBSYS_FLAPS, MOTION_OK, 0);
+        return;
+    }
+
+    /* FAULT recovery: log and fall through to restart the open sequence. */
+    if (s_flap_state == FLAP_SM_FAULT)
+    {
+        printf("Flap OPEN: clearing fault, restarting open\n");
+        /* Fall through — monitoring stop below will clean up any stale state. */
+    }
+
+    /* Interrupt-in-progress: if closing, stop and reverse direction. */
+    if (s_flap_state == FLAP_SM_CLOSING)
+    {
+        printf("Flap OPEN: interrupting close (reversing to open)\n");
+    }
+
+    /* Stop any in-progress monitoring before reconfiguring. */
+    if (s_drv8263.monitoring_enabled)
+    {
+        drv8263_stop_current_monitoring(&s_drv8263);
     }
 
     /* Configure: low threshold = current-drop stop; high threshold disabled. */
-    s_drv8163.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-    s_drv8163.config.current_high_threshold = 4095u;
-    s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+    s_drv8263.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+    s_drv8263.config.current_high_threshold = 4095u;
+    s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
 
-    (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_FORWARD,
+    (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_FORWARD,
                                     (uint16_t)FLAP_OPEN_SPEED_PWM);
 
-    if (!drv8163_start_current_monitoring(&s_drv8163))
+    if (!drv8263_start_current_monitoring(&s_drv8263))
     {
-        (void)drv8163_set_motor_control(&s_drv8163, DRV8163_MOTOR_STOP, 0u);
+        (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
     /* Start flap 2 if available */
-    if (s_drv8163_flap2_ready)
+    if (s_drv8263_flap2_ready)
     {
-        if (s_drv8163_flap2.monitoring_enabled)
+        if (s_drv8263_flap2.monitoring_enabled)
         {
-            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+            drv8263_stop_current_monitoring(&s_drv8263_flap2);
         }
-        s_drv8163_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-        s_drv8163_flap2.config.current_high_threshold = 4095u;
-        s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_FORWARD,
+        s_drv8263_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8263_flap2.config.current_high_threshold = 4095u;
+        s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_FORWARD,
                                         (uint16_t)FLAP_OPEN_SPEED_PWM);
-        (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
+        (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
     }
 
     s_flap_state = FLAP_SM_OPENING;
     s_flap_start_ms = to_ms_since_boot(get_absolute_time());
     s_flap1_stopped = false;
-    s_flap2_stopped = (!s_drv8163_flap2_ready);
+    s_flap2_stopped = (!s_drv8263_flap2_ready);
     printf("Flap OPEN started\n");
     send_ack(seq);
 }
 
 /**
- * @brief MSG_FLAPS_CLOSE (0x41) — drive flap DRV8163 reverse; auto-stop on
+ * @brief MSG_FLAPS_CLOSE (0x41) — drive flap DRV8263 reverse; auto-stop on
  *        torque rise (current high = mechanical stop).
  *        Delegates entirely to flap_close_internal() to avoid code duplication
  *        with the spawn dosing path.
  */
 static void handle_flap_close(uint16_t seq)
 {
+    /* No-op: already closed — ACK and send immediate MOTION_DONE(OK). */
+    if (s_flap_state == FLAP_SM_CLOSED)
+    {
+        printf("Flap CLOSE: already closed (no-op)\n");
+        send_ack(seq);
+        send_motion_done(SUBSYS_FLAPS, MOTION_OK, 0);
+        return;
+    }
+
+    /* FAULT recovery: log and fall through — flap_close_internal() cleans up. */
+    if (s_flap_state == FLAP_SM_FAULT)
+    {
+        printf("Flap CLOSE: clearing fault, restarting close\n");
+    }
+
+    /* Interrupt-in-progress: if opening, stop and reverse direction. */
+    if (s_flap_state == FLAP_SM_OPENING)
+    {
+        printf("Flap CLOSE: interrupting open (reversing to close)\n");
+        /* flap_close_internal() stops monitoring before starting close. */
+    }
+
     if (!flap_close_internal())
     {
         send_nack(seq, NACK_UNKNOWN);
@@ -1614,7 +1730,7 @@ static void handle_turntable_home(uint16_t seq)
 }
 
 /**
- * @brief MSG_HOTWIRE_SET (0x46) — enable or disable the hot-wire DRV8163.
+ * @brief MSG_HOTWIRE_SET (0x46) — enable or disable the hot-wire DRV8263.
  *
  * Safety interlock: if vacuum2 is currently ON (using the REVERSE channel of
  * the same H-bridge), it is stopped first before enabling the hot wire.
@@ -1627,7 +1743,7 @@ static void handle_hotwire_set(uint16_t seq, const uint8_t *payload, uint16_t le
         return;
     }
 
-    if (!s_drv8163_hotwire_ready)
+    if (!s_drv8263_hotwire_ready)
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -1637,23 +1753,17 @@ static void handle_hotwire_set(uint16_t seq, const uint8_t *payload, uint16_t le
 
     if (p->enable)
     {
-        /* Stop vacuum2 first if it is using the REVERSE channel of this H-bridge. */
-        if (s_vacuum2_on)
-        {
-            (void)drv8163_set_motor_control(&s_drv8163_hotwire, DRV8163_MOTOR_STOP, 0u);
-            s_vacuum2_on = false;
-            printf("Hotwire ON: stopped vacuum2 (mutual exclusion)\n");
-        }
-        /* Forward direction at constant current duty cycle. */
-        (void)drv8163_set_motor_control(&s_drv8163_hotwire,
-                                        DRV8163_MOTOR_FORWARD,
-                                        (uint16_t)HOTWIRE_CURRENT_DUTY);
-        printf("Hotwire ON (duty=%u)\n", (unsigned)HOTWIRE_CURRENT_DUTY);
+        /* DRV8263 independent H-bridge mode: IN1 drives the hot wire.
+         * Current is set by an external Rsense resistor and regulated
+         * internally — no PWM duty cycle tuning required; full on (4095).
+         * IN2 (vacuum pump 2) is unaffected by this call. */
+        (void)drv8263_set_in1(&s_drv8263_hotwire, (uint16_t)HOTWIRE_ENABLE_DUTY);
+        printf("Hotwire ON (IN1, duty=%u)\n", (unsigned)HOTWIRE_ENABLE_DUTY);
     }
     else
     {
-        /* Coast the wire (both outputs low). */
-        (void)drv8163_set_motor_control(&s_drv8163_hotwire, DRV8163_MOTOR_STOP, 0u);
+        /* De-assert IN1 only — vacuum pump 2 (IN2) continues unaffected. */
+        (void)drv8263_set_in1(&s_drv8263_hotwire, 0u);
         printf("Hotwire OFF\n");
     }
 
@@ -1701,9 +1811,9 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
 /**
  * @brief MSG_VACUUM2_SET (0x48) — enable or disable the second vacuum pump.
  *
- * The second vacuum pump is driven via the REVERSE channel (IN2) of the
- * hotwire DRV8163.  It is mutually exclusive with the hot wire (FORWARD
- * channel / IN1).  Enabling vacuum2 always stops the hot wire first.
+ * DRV8263 independent H-bridge mode: IN2 (ctrl_b_pin) drives vacuum pump 2.
+ * This is completely independent of IN1 (hot wire) — both can run simultaneously.
+ * No mutual exclusion is required or applied.
  */
 static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
@@ -1713,7 +1823,7 @@ static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t le
         return;
     }
 
-    if (!s_drv8163_hotwire_ready)
+    if (!s_drv8263_hotwire_ready)
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -1723,21 +1833,156 @@ static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t le
 
     if (pl->enable)
     {
-        /* Stop hotwire first (safety — mutually exclusive with vacuum2). */
-        (void)drv8163_set_motor_control(&s_drv8163_hotwire, DRV8163_MOTOR_STOP, 0u);
-        /* Drive IN2 high via REVERSE mode at full duty to trigger the pump. */
-        (void)drv8163_set_motor_control(&s_drv8163_hotwire, DRV8163_MOTOR_REVERSE, 4095u);
-        s_vacuum2_on = true;
-        printf("Vacuum2 ON (hotwire DRV8163 REVERSE channel)\n");
+        /* Drive IN2 independently at full duty — IN1 (hot wire) is unaffected. */
+        (void)drv8263_set_in2(&s_drv8263_hotwire, 4095u);
+        printf("Vacuum2 ON (DRV8263 IN2, independent)\n");
     }
     else
     {
-        (void)drv8163_set_motor_control(&s_drv8163_hotwire, DRV8163_MOTOR_STOP, 0u);
-        s_vacuum2_on = false;
+        (void)drv8263_set_in2(&s_drv8263_hotwire, 0u);
         printf("Vacuum2 OFF\n");
     }
 
     send_ack(seq);
+}
+
+/**
+ * @brief MSG_HOTWIRE_TRAVERSE (0x4B) — move the hot wire carriage stepper.
+ *
+ * Direction 0 = cut (traverse forward through spawn bag tip).
+ * Direction 1 = return (retract to home position).
+ * Uses DRV8434S STEPPER_DEV_HW_CARRIAGE (device 4 — not wired in current HW).
+ * When device 4 is not in the chain, this handler logs and NACKs.
+ */
+static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len < (uint16_t)sizeof(pl_hotwire_traverse_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+
+#ifndef STEPPER_DEV_HW_CARRIAGE
+    /* Hot wire carriage stepper not yet wired — NACK until device is added. */
+    printf("Hotwire Traverse: STEPPER_DEV_HW_CARRIAGE not defined (device not wired)\n");
+    send_nack(seq, NACK_UNKNOWN);
+    (void)payload;
+    return;
+#else
+    if (!s_stepper_ready || DRV8434S_N_DEVICES <= STEPPER_DEV_HW_CARRIAGE)
+    {
+        printf("Hotwire Traverse: stepper not ready or device not in chain\n");
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
+    int32_t steps = (p->direction == 0u)
+                        ? (int32_t)HOTWIRE_TRAVERSE_STEPS
+                        : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
+
+    drv8434s_motion_job_t job = {0};
+    job.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
+    job.steps = (uint32_t)((steps < 0) ? -steps : steps);
+    job.reverse = (steps < 0);
+    job.step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
+
+    if (!drv8434s_motion_start(&s_motion, &job))
+    {
+        printf("Hotwire Traverse: failed to start motion\n");
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    printf("Hotwire Traverse: dir=%u steps=%u\n",
+           (unsigned)p->direction, (unsigned)job.steps);
+    send_ack(seq);
+    /* Note: MOTION_DONE for STEPPER_DEV_HW_CARRIAGE is not yet wired to
+     * stepper_completion_tick — add a pending tracker when the device is
+     * physically installed and DRV8434S_N_DEVICES is bumped. */
+#endif
+}
+
+/**
+ * @brief MSG_INDEXER_MOVE (0x4C) — move bag depth/eject rack to named position.
+ *
+ * INDEXER_POS_OPEN   — retracted (bag can slide in).
+ * INDEXER_POS_CENTER — extended to bag-centering position.
+ * INDEXER_POS_EJECT  — fully extended to push bag out.
+ * Uses DRV8434S STEPPER_DEV_INDEXER (device 5 — not wired in current HW).
+ */
+static void handle_indexer_move(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len < (uint16_t)sizeof(pl_indexer_move_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+
+#ifndef STEPPER_DEV_INDEXER
+    printf("Indexer Move: STEPPER_DEV_INDEXER not defined (device not wired)\n");
+    send_nack(seq, NACK_UNKNOWN);
+    (void)payload;
+    return;
+#else
+    if (!s_stepper_ready || DRV8434S_N_DEVICES <= STEPPER_DEV_INDEXER)
+    {
+        printf("Indexer Move: stepper not ready or device not in chain\n");
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    const pl_indexer_move_t *p = (const pl_indexer_move_t *)payload;
+    int32_t target_steps;
+
+    switch ((indexer_pos_t)p->position)
+    {
+    case INDEXER_POS_OPEN:
+        target_steps = 0;
+        break;
+    case INDEXER_POS_CENTER:
+        target_steps = (int32_t)INDEXER_STEPS_CENTER;
+        break;
+    case INDEXER_POS_EJECT:
+        target_steps = (int32_t)INDEXER_STEPS_EJECT;
+        break;
+    default:
+        printf("Indexer Move: unknown position %u\n", (unsigned)p->position);
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    int32_t delta = target_steps - s_indexer_pos_steps;
+
+    drv8434s_motion_job_t job = {0};
+    job.dev_idx = (uint8_t)STEPPER_DEV_INDEXER;
+    job.steps = (uint32_t)((delta < 0) ? -delta : delta);
+    job.reverse = (delta < 0);
+    job.step_delay_us = (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US;
+
+    if (job.steps == 0u)
+    {
+        /* Already at target — send immediate MOTION_DONE. */
+        printf("Indexer Move: already at position %u (no-op)\n", (unsigned)p->position);
+        send_ack(seq);
+        send_motion_done(SUBSYS_INDEXER, MOTION_OK, 0);
+        return;
+    }
+
+    if (!drv8434s_motion_start(&s_motion, &job))
+    {
+        printf("Indexer Move: failed to start motion\n");
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    s_indexer_pos_steps = target_steps;
+    printf("Indexer Move: pos=%u steps=%u %s\n",
+           (unsigned)p->position, (unsigned)job.steps,
+           job.reverse ? "REV" : "FWD");
+    send_ack(seq);
+    send_motion_done(SUBSYS_INDEXER, MOTION_OK, (int32_t)job.steps);
+#endif
 }
 
 /**
@@ -1828,28 +2073,28 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
      * If the flap reaches end-of-travel (no load = undercurrent) before any
      * weight change is registered, the startup_opening check treats that as a
      * flow failure.  Monitoring is stopped once flow is confirmed. */
-    if (s_drv8163.monitoring_enabled)
+    if (s_drv8263.monitoring_enabled)
     {
-        drv8163_stop_current_monitoring(&s_drv8163);
+        drv8263_stop_current_monitoring(&s_drv8263);
     }
-    s_drv8163.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-    s_drv8163.config.current_high_threshold = 4095u;
-    s_drv8163.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+    s_drv8263.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+    s_drv8263.config.current_high_threshold = 4095u;
+    s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
     spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-    (void)drv8163_start_current_monitoring(&s_drv8163);
+    (void)drv8263_start_current_monitoring(&s_drv8263);
 
-    if (s_drv8163_flap2_ready)
+    if (s_drv8263_flap2_ready)
     {
-        if (s_drv8163_flap2.monitoring_enabled)
+        if (s_drv8263_flap2.monitoring_enabled)
         {
-            drv8163_stop_current_monitoring(&s_drv8163_flap2);
+            drv8263_stop_current_monitoring(&s_drv8263_flap2);
         }
-        s_drv8163_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-        s_drv8163_flap2.config.current_high_threshold = 4095u;
-        s_drv8163_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-        (void)drv8163_set_motor_control(&s_drv8163_flap2, DRV8163_MOTOR_FORWARD,
+        s_drv8263_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8263_flap2.config.current_high_threshold = 4095u;
+        s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_FORWARD,
                                         (uint16_t)SPAWN_OPEN_PWM);
-        (void)drv8163_start_current_monitoring(&s_drv8163_flap2);
+        (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
     }
 
     if (!add_repeating_timer_ms(SPAWN_TIMER_PERIOD_MS, dispense_spawn_callback, NULL, &s_spawn.timer))
@@ -1917,14 +2162,14 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
         send_ack(hdr.seq);
         break;
 
-    case MSG_MOTOR_DRV8163_START_MON:
-        printf("DRV8163 Start Mon\n");
-        handle_drv8163_start(hdr.seq, payload, hdr.len);
+    case MSG_MOTOR_DRV8263_START_MON:
+        printf("DRV8263 Start Mon\n");
+        handle_drv8263_start(hdr.seq, payload, hdr.len);
         break;
 
-    case MSG_MOTOR_DRV8163_STOP_MON:
-        printf("DRV8163 Stop Mon\n");
-        handle_drv8163_stop(hdr.seq);
+    case MSG_MOTOR_DRV8263_STOP_MON:
+        printf("DRV8263 Stop Mon\n");
+        handle_drv8263_stop(hdr.seq);
         break;
 
     case MSG_MOTOR_STEPPER_ENABLE:
@@ -1994,6 +2239,16 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
         handle_vacuum2_set(hdr.seq, payload, hdr.len);
         break;
 
+    case MSG_HOTWIRE_TRAVERSE:
+        printf("Hotwire Traverse\n");
+        handle_hotwire_traverse(hdr.seq, payload, hdr.len);
+        break;
+
+    case MSG_INDEXER_MOVE:
+        printf("Indexer Move\n");
+        handle_indexer_move(hdr.seq, payload, hdr.len);
+        break;
+
     case MSG_DISPENSE_SPAWN:
         printf("Innoculating\n");
         handle_dispense_spawn(hdr.seq, payload, hdr.len);
@@ -2049,91 +2304,91 @@ static void process_frame(void)
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * @brief Initialise the second flap DRV8163 instance.
+ * @brief Initialise the second flap DRV8263 instance.
  *
  * Uses FLAP2_CTRL_A_PIN / FLAP2_CTRL_B_PIN / FLAP2_ADC_SENSE_PIN /
  * FLAP2_ADC_CHANNEL from board_pins.h.  Shares all threshold constants
  * with the primary flap instance.
  */
-static void init_drv8163_flap2(void)
+static void init_drv8263_flap2(void)
 {
-    s_drv8163_flap2_ready = false;
+    s_drv8263_flap2_ready = false;
 
-    drv8163_config_t cfg = {
+    drv8263_config_t cfg = {
         .user_ctx = NULL,
         .ctrl_a_pin = (uint8_t)FLAP2_CTRL_A_PIN,
         .ctrl_b_pin = (uint8_t)FLAP2_CTRL_B_PIN,
         .sense_pin = (uint8_t)FLAP2_ADC_SENSE_PIN,
         .sense_adc_channel = (uint8_t)FLAP2_ADC_CHANNEL,
-        .current_high_threshold = (uint16_t)DRV8163_DEFAULT_HIGH_TH,
-        .current_low_threshold = (uint16_t)DRV8163_DEFAULT_LOW_TH,
-        .pwm_frequency_hz = (uint32_t)DRV8163_DEFAULT_PWM_HZ,
+        .current_high_threshold = (uint16_t)DRV8263_DEFAULT_HIGH_TH,
+        .current_low_threshold = (uint16_t)DRV8263_DEFAULT_LOW_TH,
+        .pwm_frequency_hz = (uint32_t)DRV8263_DEFAULT_PWM_HZ,
         .current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS,
-        .startup_blanking_ms = (uint32_t)DRV8163_DEFAULT_STARTUP_BLANKING_MS,
+        .startup_blanking_ms = (uint32_t)DRV8263_DEFAULT_STARTUP_BLANKING_MS,
         .current_cb = NULL,
         .delay_ms = NULL,
     };
 
-    if (!drv8163_init(&s_drv8163_flap2, &cfg))
+    if (!drv8263_init(&s_drv8263_flap2, &cfg))
     {
-        printf("uart_server: DRV8163 flap2 init failed\n");
+        printf("uart_server: DRV8263 flap2 init failed\n");
         return;
     }
 
-    s_drv8163_flap2_ready = true;
-    printf("uart_server: DRV8163 flap2 ready (A=%d B=%d ADC_CH=%d)\n",
+    s_drv8263_flap2_ready = true;
+    printf("uart_server: DRV8263 flap2 ready (A=%d B=%d ADC_CH=%d)\n",
            FLAP2_CTRL_A_PIN, FLAP2_CTRL_B_PIN, FLAP2_ADC_CHANNEL);
 }
 
-static void init_drv8163(void)
+static void init_drv8263(void)
 {
-    s_drv8163_ready = false;
+    s_drv8263_ready = false;
 
-    if (DRV8163_CTRL_A_GPIO < 0 || DRV8163_CTRL_B_GPIO < 0 || DRV8163_SENSE_GPIO < 0 ||
-        DRV8163_SENSE_ADC_CH < 0 || DRV8163_SENSE_ADC_CH > 3)
+    if (DRV8263_CTRL_A_GPIO < 0 || DRV8263_CTRL_B_GPIO < 0 || DRV8263_SENSE_GPIO < 0 ||
+        DRV8263_SENSE_ADC_CH < 0 || DRV8263_SENSE_ADC_CH > 3)
     {
-        printf("uart_server: DRV8163 pins/ch not set in board_pins.h; motor RPC disabled\n");
+        printf("uart_server: DRV8263 pins/ch not set in board_pins.h; motor RPC disabled\n");
         return;
     }
 
-    drv8163_config_t cfg = {
+    drv8263_config_t cfg = {
         .user_ctx = NULL,
-        .ctrl_a_pin = (uint8_t)DRV8163_CTRL_A_GPIO,
-        .ctrl_b_pin = (uint8_t)DRV8163_CTRL_B_GPIO,
-        .sense_pin = (uint8_t)DRV8163_SENSE_GPIO,
-        .sense_adc_channel = (uint8_t)DRV8163_SENSE_ADC_CH,
-        .current_high_threshold = DRV8163_DEFAULT_HIGH_TH,
-        .current_low_threshold = DRV8163_DEFAULT_LOW_TH,
-        .pwm_frequency_hz = DRV8163_DEFAULT_PWM_HZ,
-        .current_check_interval_ms = DRV8163_DEFAULT_CHECK_INTERVAL_MS,
-        .startup_blanking_ms = DRV8163_DEFAULT_STARTUP_BLANKING_MS,
+        .ctrl_a_pin = (uint8_t)DRV8263_CTRL_A_GPIO,
+        .ctrl_b_pin = (uint8_t)DRV8263_CTRL_B_GPIO,
+        .sense_pin = (uint8_t)DRV8263_SENSE_GPIO,
+        .sense_adc_channel = (uint8_t)DRV8263_SENSE_ADC_CH,
+        .current_high_threshold = DRV8263_DEFAULT_HIGH_TH,
+        .current_low_threshold = DRV8263_DEFAULT_LOW_TH,
+        .pwm_frequency_hz = DRV8263_DEFAULT_PWM_HZ,
+        .current_check_interval_ms = DRV8263_DEFAULT_CHECK_INTERVAL_MS,
+        .startup_blanking_ms = DRV8263_DEFAULT_STARTUP_BLANKING_MS,
         .current_cb = NULL,
         .delay_ms = NULL,
     };
 
-    if (!drv8163_init(&s_drv8163, &cfg))
+    if (!drv8263_init(&s_drv8263, &cfg))
     {
-        printf("uart_server: DRV8163 init failed\n");
+        printf("uart_server: DRV8263 init failed\n");
         return;
     }
 
-    s_drv8163_ready = true;
-    printf("uart_server: DRV8163 flap1 ready (A=%d B=%d ADC_CH=%d)\n",
-           DRV8163_CTRL_A_GPIO, DRV8163_CTRL_B_GPIO, DRV8163_SENSE_ADC_CH);
+    s_drv8263_ready = true;
+    printf("uart_server: DRV8263 flap1 ready (A=%d B=%d ADC_CH=%d)\n",
+           DRV8263_CTRL_A_GPIO, DRV8263_CTRL_B_GPIO, DRV8263_SENSE_ADC_CH);
 }
 
 /**
- * @brief Initialise the hot-wire DRV8163 instance (secondary H-bridge).
+ * @brief Initialise the hot-wire DRV8263 instance (secondary H-bridge).
  *
  * Hot wire is unidirectional (forward only, constant current duty cycle).
  * The current monitoring thresholds are set wide — we do not use auto-stop
  * for the hot wire; ON/OFF is controlled entirely by MSG_HOTWIRE_SET.
  */
-static void init_drv8163_hotwire(void)
+static void init_drv8263_hotwire(void)
 {
-    s_drv8163_hotwire_ready = false;
+    s_drv8263_hotwire_ready = false;
 
-    drv8163_config_t cfg = {
+    drv8263_config_t cfg = {
         .user_ctx = NULL,
         .ctrl_a_pin = (uint8_t)HOTWIRE_PIN_IN1,
         .ctrl_b_pin = (uint8_t)HOTWIRE_PIN_IN2,
@@ -2143,19 +2398,19 @@ static void init_drv8163_hotwire(void)
         .current_low_threshold = 0u,     /* never auto-stop */
         .pwm_frequency_hz = 20000u,
         .current_check_interval_ms = (uint32_t)HOTWIRE_MONITOR_INTERVAL_MS,
-        .startup_blanking_ms = (uint32_t)DRV8163_DEFAULT_STARTUP_BLANKING_MS,
+        .startup_blanking_ms = (uint32_t)DRV8263_DEFAULT_STARTUP_BLANKING_MS,
         .current_cb = NULL,
         .delay_ms = NULL,
     };
 
-    if (!drv8163_init(&s_drv8163_hotwire, &cfg))
+    if (!drv8263_init(&s_drv8263_hotwire, &cfg))
     {
-        printf("uart_server: DRV8163 hotwire init failed\n");
+        printf("uart_server: DRV8263 hotwire init failed\n");
         return;
     }
 
-    s_drv8163_hotwire_ready = true;
-    printf("uart_server: DRV8163 hotwire ready (IN1=%d IN2=%d ADC_CH=%d)\n",
+    s_drv8263_hotwire_ready = true;
+    printf("uart_server: DRV8263 hotwire ready (IN1=%d IN2=%d ADC_CH=%d)\n",
            HOTWIRE_PIN_IN1, HOTWIRE_PIN_IN2, HOTWIRE_ADC_CHANNEL);
 }
 
@@ -2245,6 +2500,26 @@ static void init_drv8434s_chain(void)
            DRV8434S_N_DEVICES,
            DRV8434S_SCK_GPIO, DRV8434S_MOSI_GPIO,
            DRV8434S_MISO_GPIO, DRV8434S_CS_GPIO);
+
+    /* Per-device SPI health probe: read FAULT register (0x00) from each
+     * device.  A read failure indicates a persistent bus or wiring problem.
+     * Log the result per device so failures are visible at boot. */
+    for (uint8_t k = 0u; k < (uint8_t)DRV8434S_N_DEVICES; ++k)
+    {
+        uint8_t fault_val = 0u;
+        if (drv8434s_chain_read_reg(&s_stepper_chain, k,
+                                    DRV8434S_REG_FAULT, &fault_val, NULL))
+        {
+            printf("uart_server: DRV8434S dev %u SPI probe OK, FAULT=0x%02X%s\n",
+                   (unsigned)k, (unsigned)fault_val,
+                   (fault_val != 0u) ? " (FAULT ACTIVE)" : "");
+        }
+        else
+        {
+            printf("uart_server: DRV8434S dev %u SPI probe FAILED — check wiring\n",
+                   (unsigned)k);
+        }
+    }
 #endif
 }
 
@@ -2334,10 +2609,10 @@ void uart_server_init(void)
     s_arm_pos_steps = 0;
     s_rack_pos_steps = 0;
     s_turntable_pos_steps = 0;
-    /* Auto-home turntable at boot: declare current physical position as step 0,
-     * mirroring how s_arm_pos_steps and s_rack_pos_steps are initialised.
-     * MSG_TURNTABLE_HOME can still be sent later to re-zero if needed. */
-    s_turntable_homed = true;
+    /* Turntable requires explicit homing before any GOTO command is valid.
+     * MSG_TURNTABLE_HOME must be sent first; GOTO commands in UNCALIBRATED
+     * state are NACKed to prevent uncontrolled turntable movement. */
+    s_turntable_homed = false;
 
     s_uart = (PICO_UART_ID == 0) ? uart0 : uart1;
     s_uart_ready = false;
@@ -2361,13 +2636,13 @@ void uart_server_init(void)
     }
 
     /* Existing subsystems */
-    init_drv8163();
-    init_drv8163_flap2();
+    init_drv8263();
+    init_drv8263_flap2();
     init_hx711();
     init_drv8434s_chain();
 
     /* New subsystems */
-    init_drv8163_hotwire();
+    init_drv8263_hotwire();
     init_vacuum();
 }
 
@@ -2382,6 +2657,7 @@ void uart_server_poll(void)
     vacuum_sm_tick();
     flap_sm_tick();
     stepper_completion_tick();
+    stepper_spi_watchdog_tick();
 
     /* ── Drain hardware UART FIFO into the ring buffer ─────────── */
     while (uart_is_readable(s_uart))

@@ -568,16 +568,42 @@ static inline uint8_t chain_frame_len(const drv8434s_chain_t *c)
     return (uint8_t)(2u + 2u * c->cfg.n_devices);
 }
 
+// ── SPI retry configuration ─────────────────────────────────────────────────
+// Transient bus glitches on the DRV8434S daisy-chain can produce SPI errors
+// that do not reflect real driver faults.  A small number of retries with a
+// short inter-attempt delay eliminates the vast majority of false failures
+// without blocking the polling loop for more than ~300 µs total.
+
+#ifndef DRV8434S_CHAIN_SPI_RETRIES
+#define DRV8434S_CHAIN_SPI_RETRIES 3 /* total attempts (1 + 2 retries) */
+#endif
+#ifndef DRV8434S_CHAIN_SPI_RETRY_DELAY_US
+#define DRV8434S_CHAIN_SPI_RETRY_DELAY_US 50 /* µs between attempts */
+#endif
+
 // Assert CS, transfer one full chain frame, deassert CS, apply hold delay.
+// Retries up to DRV8434S_CHAIN_SPI_RETRIES times on transient failure.
 static int chain_xfer(drv8434s_chain_t *chain, const uint8_t *tx, uint8_t *rx)
 {
     uint8_t len = chain_frame_len(chain);
-    chain->cfg.cs(chain->cfg.user_ctx, true);
-    int r = chain->cfg.spi_xfer(chain->cfg.user_ctx, tx, rx, len);
-    chain->cfg.cs(chain->cfg.user_ctx, false);
-    if (chain->cfg.delay_us)
-        chain->cfg.delay_us(chain->cfg.user_ctx, DRV8434S_CS_HOLD_US);
-    return r;
+    int r = -1;
+
+    for (int attempt = 0; attempt < DRV8434S_CHAIN_SPI_RETRIES; ++attempt)
+    {
+        chain->cfg.cs(chain->cfg.user_ctx, true);
+        r = chain->cfg.spi_xfer(chain->cfg.user_ctx, tx, rx, len);
+        chain->cfg.cs(chain->cfg.user_ctx, false);
+        if (chain->cfg.delay_us)
+            chain->cfg.delay_us(chain->cfg.user_ctx, DRV8434S_CS_HOLD_US);
+
+        if (r == 0)
+            return 0; /* success */
+
+        /* Delay before retry — stay within the polling loop budget */
+        if (chain->cfg.delay_us && attempt < (DRV8434S_CHAIN_SPI_RETRIES - 1))
+            chain->cfg.delay_us(chain->cfg.user_ctx, DRV8434S_CHAIN_SPI_RETRY_DELAY_US);
+    }
+    return r; /* all attempts failed */
 }
 
 // Fill a TX buffer from per-device address and data byte arrays.
@@ -1077,14 +1103,24 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
     chain_fill_tx(chain, addr_bytes, data_bytes, tx);
     if (chain_xfer(chain, tx, rx) != 0)
     {
-        // SPI failure: abort all active jobs
+        /* SPI transfer failed after all retries.
+         * Abort active jobs and attempt per-device fault clear so the
+         * chain can be re-used without a full reinit.  A transient glitch
+         * may have set the SPI_ERR flag inside the DRV8434S; clearing it
+         * allows the next motion attempt to succeed. */
         for (uint8_t k = 0; k < N; ++k)
         {
             if (motion->jobs[k].active)
             {
+                printf("DRV8434S: SPI failure on step tick for device %u — "
+                       "aborting job (attempt clear_faults)\n",
+                       (unsigned)k);
                 motion->jobs[k].reason = DRV8434S_MOTION_SPI_ERROR;
                 motion_finish_job(motion, k);
             }
+            /* Best-effort fault clear — ignore failure here since we already
+             * know the bus is having trouble. */
+            (void)drv8434s_chain_clear_faults(chain, k, NULL);
         }
         return false;
     }

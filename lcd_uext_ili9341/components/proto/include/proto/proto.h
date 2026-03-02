@@ -21,8 +21,8 @@ extern "C"
     {
         MSG_PING = 0x01,
 
-        MSG_MOTOR_DRV8163_START_MON = 0x10,
-        MSG_MOTOR_DRV8163_STOP_MON = 0x11,
+        MSG_MOTOR_DRV8263_START_MON = 0x10,
+        MSG_MOTOR_DRV8263_STOP_MON = 0x11,
 
         MSG_MOTOR_STEPPER_ENABLE = 0x20,
         MSG_MOTOR_STEPPER_STEPJOB = 0x21,
@@ -44,11 +44,14 @@ extern "C"
         MSG_TURNTABLE_HOME = 0x45, /* ESP→Pico: home turntable (zero position counter) */
         MSG_HOTWIRE_SET = 0x46,    /* ESP→Pico: enable/disable hot wire PWM */
         MSG_VACUUM_SET = 0x47,     /* ESP→Pico: turn vacuum pump on/off */
-        /** MSG_VACUUM2_SET — uses the REVERSE channel (IN2/GP7) of the hotwire
-         *  DRV8163; mutually exclusive with hotwire ON. */
-        MSG_VACUUM2_SET = 0x48,    /* ESP→Pico: turn second vacuum pump on/off */
-        MSG_DISPENSE_SPAWN = 0x49, /* ESP→Pico: start closed-loop spawn dosing */
-        MSG_SPAWN_STATUS = 0x4A,   /* Pico→ESP: spawn dosing status (unsolicited) */
+        /** MSG_VACUUM2_SET — drives the independent half-bridge output IN2 of
+         *  the hotwire/vacuum2 DRV8263.  NOT mutually exclusive with the hot
+         *  wire (IN1); both outputs can be active simultaneously. */
+        MSG_VACUUM2_SET = 0x48,      /* ESP→Pico: turn second vacuum pump on/off */
+        MSG_DISPENSE_SPAWN = 0x49,   /* ESP-Pico start closed-loop dosing*/
+        MSG_SPAWN_STATUS = 0x4A,     /* Pico→ESP: spawn dosing status (unsolicited) */
+        MSG_HOTWIRE_TRAVERSE = 0x4B, /* ESP→Pico: traverse hot wire carriage stepper */
+        MSG_INDEXER_MOVE = 0x4C,     /* ESP→Pico: move bag depth/eject rack (indexer) */
         /* ---- Unsolicited status messages (0x60–0x6F) ---- */
         MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
         MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
@@ -96,7 +99,7 @@ extern "C"
     //     uint16_t low_th;
     //     uint16_t high_th;
     //     uint32_t interval_ms;
-    // } pl_drv8163_start_mon_t;
+    // } pl_drv8263_start_mon_t;
 
     typedef struct __attribute__((packed))
     {
@@ -106,7 +109,7 @@ extern "C"
         uint16_t low_th;
         uint16_t high_th;
         uint32_t interval_ms;
-    } pl_drv8163_start_mon_t;
+    } pl_drv8263_start_mon_t;
 
     typedef struct __attribute__((packed))
     {
@@ -137,6 +140,36 @@ extern "C"
         uint8_t code;
     } pl_nack_t;
 
+    typedef struct __attribute__((packed))
+    {
+        uint16_t bag_mass;      // mass of bag being innoculated
+        uint16_t spawn_mass;    // mass of spawn remaining
+        uint16_t innoc_percent; // spawn percentage of bag weight (x10)
+        uint8_t bag_number;     // how many bags have been innoculated from the same spawn
+    } pl_innoculate_bag_t;
+
+    typedef enum
+    {
+        SPAWN_STATUS_RUNNING = 0,
+        SPAWN_STATUS_DONE = 1,
+        SPAWN_STATUS_STALLED = 2,
+        SPAWN_STATUS_AGITATING = 3,
+        SPAWN_STATUS_BAG_EMPTY = 4,
+        SPAWN_STATUS_ERROR = 5,
+        SPAWN_STATUS_FLOW_FAILURE = 6, /* flaps opened fully with no flow — bag likely empty or jammed */
+        SPAWN_STATUS_ABORTED = 7,      /* dose cancelled by MSG_CTRL_STOP */
+    } spawn_status_code_t;
+
+    typedef struct __attribute__((packed))
+    {
+        uint8_t status;      /* spawn_status_code_t */
+        uint8_t retries;     /* current retry count */
+        uint16_t bag_number; /* copy of bag number from request */
+        uint32_t target_ug;  /* target dispense mass in micrograms */
+        uint32_t disp_ug;    /* dispensed mass in micrograms */
+        uint32_t remain_ug;  /* estimated spawn remaining (if provided) */
+    } pl_spawn_status_t;
+
     uint16_t proto_crc16_ccitt(const uint8_t *data, uint32_t len);
 
     /* ------------------------------------------------------------------ */
@@ -152,15 +185,17 @@ extern "C"
         SUBSYS_TURNTABLE = 3,
         SUBSYS_HOTWIRE = 4,
         SUBSYS_VACUUM = 5,
+        SUBSYS_INDEXER = 6, /* Bag depth/eject rack (MSG_INDEXER_MOVE) */
     } subsystem_id_t;
 
     /** Result code carried in MSG_MOTION_DONE */
     typedef enum
     {
-        MOTION_OK = 0,      /* reached target position / state */
-        MOTION_STALLED = 1, /* stall detected before target */
-        MOTION_TIMEOUT = 2, /* motion did not complete within deadline */
-        MOTION_FAULT = 3,   /* driver fault (nFAULT asserted) */
+        MOTION_OK = 0,        /* reached target position / state */
+        MOTION_STALLED = 1,   /* stall detected before target */
+        MOTION_TIMEOUT = 2,   /* motion did not complete within deadline */
+        MOTION_FAULT = 3,     /* driver fault (nFAULT asserted) */
+        MOTION_SPI_FAULT = 4, /* SPI communication failure (not a physical stall) */
     } motion_result_t;
 
     /** Named positions for the arm stepper (DRV8434S device 0) */
@@ -235,11 +270,31 @@ extern "C"
         uint8_t enable; /**< 1 = on, 0 = off */
     } pl_vacuum_set_t;
 
-    /** MSG_VACUUM2_SET payload (1 byte) — second vacuum pump via hotwire DRV8163 reverse channel */
+    /** MSG_VACUUM2_SET payload (1 byte) — DRV8263 independent IN2 half-bridge */
     typedef struct __attribute__((packed))
     {
         uint8_t enable; /**< 1 = on, 0 = off */
     } pl_vacuum2_set_t;
+
+    /** Named positions for the indexer (bag depth/eject rack, STEPPER_DEV_INDEXER) */
+    typedef enum __attribute__((packed))
+    {
+        INDEXER_POS_OPEN = 0,   /**< Retracted — bag can slide in */
+        INDEXER_POS_CENTER = 1, /**< Extended to bag-centering position */
+        INDEXER_POS_EJECT = 2,  /**< Fully extended — push bag out */
+    } indexer_pos_t;
+
+    /** MSG_HOTWIRE_TRAVERSE (0x4B) payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t direction; /**< 0 = cut (forward traverse), 1 = return */
+    } pl_hotwire_traverse_t;
+
+    /** MSG_INDEXER_MOVE (0x4C) payload (1 byte) */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t position; /**< indexer_pos_t cast to uint8_t */
+    } pl_indexer_move_t;
 
     /** MSG_MOTION_DONE payload (8 bytes) -- unsolicited Pico->ESP */
     typedef struct __attribute__((packed))
@@ -257,38 +312,6 @@ extern "C"
         uint8_t _rsvd;  /**< reserved */
         uint16_t rpm;   /**< measured RPM (0 if pump off) */
     } pl_vacuum_status_t;
-
-    /** MSG_DISPENSE_SPAWN payload (7 bytes) -- ESP->Pico */
-    typedef struct __attribute__((packed))
-    {
-        uint16_t bag_mass;      /**< mass of bag being inoculated (grams) */
-        uint16_t spawn_mass;    /**< mass of spawn remaining (grams) */
-        uint16_t innoc_percent; /**< spawn percentage of bag weight (x10, e.g. 250 = 25.0%) */
-        uint8_t bag_number;     /**< sequential bag count from this spawn block */
-    } pl_innoculate_bag_t;
-
-    /** Status codes carried in MSG_SPAWN_STATUS */
-    typedef enum
-    {
-        SPAWN_STATUS_RUNNING = 0,
-        SPAWN_STATUS_DONE = 1,
-        SPAWN_STATUS_STALLED = 2,
-        SPAWN_STATUS_AGITATING = 3,
-        SPAWN_STATUS_BAG_EMPTY = 4,
-        SPAWN_STATUS_ERROR = 5,
-        SPAWN_STATUS_FLOW_FAILURE = 6, /**< flaps opened fully with no flow — bag likely empty or jammed */
-    } spawn_status_code_t;
-
-    /** MSG_SPAWN_STATUS payload (14 bytes) -- unsolicited Pico->ESP */
-    typedef struct __attribute__((packed))
-    {
-        uint8_t status;      /**< spawn_status_code_t */
-        uint8_t retries;     /**< current retry count */
-        uint16_t bag_number; /**< copy of bag number from request */
-        uint32_t target_ug;  /**< target dispense mass in micrograms */
-        uint32_t disp_ug;    /**< dispensed mass in micrograms */
-        uint32_t remain_ug;  /**< estimated spawn remaining (if provided) */
-    } pl_spawn_status_t;
 
 #ifdef __cplusplus
 }

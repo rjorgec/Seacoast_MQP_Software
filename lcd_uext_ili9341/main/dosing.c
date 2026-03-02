@@ -1,3 +1,19 @@
+/**
+ * @file dosing.c
+ * @brief LEGACY ESP32-side dosing state machine implementation.
+ *
+ * @deprecated See dosing.h for the full deprecation notice.
+ *
+ * The preferred dosing path for the system-level state machine is
+ * sys_sequence.c, which sends MSG_DISPENSE_SPAWN to the Pico firmware
+ * and receives MSG_SPAWN_STATUS asynchronously.  The Pico-side closed-loop
+ * controller in uart_server.c is more reliable, runs at the hardware polling
+ * rate, and is not subject to ESP32 FreeRTOS scheduling jitter.
+ *
+ * This file is kept for the manual Dosing screen in the UI.
+ * Do NOT add new dosing logic here.
+ */
+
 #include "dosing.h"
 #include <esp_timer.h>
 #include <math.h>

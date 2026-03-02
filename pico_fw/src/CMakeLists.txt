@@ -22,7 +22,7 @@ project(UART_TEST LANGUAGES C CXX)
 
 pico_sdk_init()
 
-add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8163/drv8163.c ../../shared/proto/cobs.c ../../shared/proto/proto_crc.c ../drivers/drv8434s/drv8434s.c)
+add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8263/drv8263.c ../../shared/proto/cobs.c ../../shared/proto/proto_crc.c ../drivers/drv8434s/drv8434s.c)
 
 get_filename_component(BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
 

@@ -41,7 +41,7 @@
 │  Raspberry Pi Pico  (bare-metal polling loop)           │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
 │  │ uart_server │  │ Subsystem SMs│  │  Drivers      │  │
-│  │ .c (dispatch│─▶│ (flap, arm,  │─▶│ drv8163.c     │  │
+│  │ .c (dispatch│─▶│ (flap, arm,  │─▶│ drv8263.c     │  │
 │  │  + send)    │  │  rack, tt,   │  │ drv8434s.c    │  │
 │  └─────────────┘  │  hotwire,    │  │ GPIO/ADC      │  │
 │                   │  vacuum)     │  └───────────────┘  │
@@ -66,13 +66,13 @@ Existing IDs (0x01, 0x10–0x11, 0x20–0x21, 0x28–0x29, 0x30–0x33, 0x80–0
 
 | ID   | Constant Name              | Direction    | Payload Struct              | Description |
 |------|----------------------------|--------------|-----------------------------|-------------|
-| 0x40 | `MSG_FLAP_OPEN`            | ESP → Pico   | _(none, len=0)_             | Open both flaps — drive DRV8163 flap instance FORWARD at full speed with current-drop auto-stop |
-| 0x41 | `MSG_FLAP_CLOSE`           | ESP → Pico   | _(none, len=0)_             | Close both flaps — drive DRV8163 flap instance REVERSE with current-high auto-stop at mechanical stop |
+| 0x40 | `MSG_FLAPS_OPEN`            | ESP → Pico   | _(none, len=0)_             | Open both flaps — drive DRV8263 flap instance FORWARD at full speed with current-drop auto-stop |
+| 0x41 | `MSG_FLAPS_CLOSE`           | ESP → Pico   | _(none, len=0)_             | Close both flaps — drive DRV8263 flap instance REVERSE with current-high auto-stop at mechanical stop |
 | 0x42 | `MSG_ARM_MOVE`             | ESP → Pico   | `pl_arm_move_t`             | Move arm stepper (DRV8434S dev 0) to named absolute position |
 | 0x43 | `MSG_RACK_MOVE`            | ESP → Pico   | `pl_rack_move_t`            | Move rack stepper (DRV8434S dev 1) to named absolute position; HOME also zeros position counter |
 | 0x44 | `MSG_TURNTABLE_GOTO`       | ESP → Pico   | `pl_turntable_goto_t`       | Move turntable stepper (DRV8434S dev 2) to named absolute angular position |
 | 0x45 | `MSG_TURNTABLE_HOME`       | ESP → Pico   | _(none, len=0)_             | Drive turntable to physical endstop via stall detection; zero position counter |
-| 0x46 | `MSG_HOTWIRE_SET`          | ESP → Pico   | `pl_hotwire_set_t`          | Enable or disable hot-wire PWM (DRV8163 hotwire instance, constant current mode) |
+| 0x46 | `MSG_HOTWIRE_SET`          | ESP → Pico   | `pl_hotwire_set_t`          | Enable or disable hot-wire PWM (DRV8263 hotwire instance, constant current mode) |
 | 0x47 | `MSG_VACUUM_SET`           | ESP → Pico   | `pl_vacuum_set_t`           | Assert or de-assert vacuum pump trigger GPIO |
 
 ### 1.2 Unsolicited Status Messages (Pico → ESP32)
@@ -228,8 +228,8 @@ typedef struct __attribute__((packed))
 | `pl_vacuum_set_t`     | 1            | |
 | `pl_vacuum_status_t`  | 4            | status + rsvd + rpm |
 | `pl_motion_done_t`    | 8            | subsystem + result + 2×rsvd + steps_done |
-| `MSG_FLAP_OPEN`       | 0            | zero-length payload |
-| `MSG_FLAP_CLOSE`      | 0            | zero-length payload |
+| `MSG_FLAPS_OPEN`       | 0            | zero-length payload |
+| `MSG_FLAPS_CLOSE`      | 0            | zero-length payload |
 | `MSG_TURNTABLE_HOME`  | 0            | zero-length payload |
 
 All sizes fit within `PROTO_MAX_PAYLOAD = 128`.
@@ -254,30 +254,30 @@ static int32_t s_turntable_pos_steps;  /* DRV8434S dev 2 */
 
 ### 3.1 Flap Subsystem State Machine
 
-**Hardware:** DRV8163 flap instance (GP20/GP21, ADC ch1 GP27).  
-**Trigger messages:** `MSG_FLAP_OPEN` (0x40), `MSG_FLAP_CLOSE` (0x41).  
+**Hardware:** DRV8263 flap instance (GP20/GP21, ADC ch1 GP27).  
+**Trigger messages:** `MSG_FLAPS_OPEN` (0x40), `MSG_FLAPS_CLOSE` (0x41).  
 **Config constants:** `FLAP_OPEN_SPEED`, `FLAP_OPEN_LOW_TH`, `FLAP_OPEN_HIGH_TH`, `FLAP_CLOSE_SPEED`, `FLAP_CLOSE_LOW_TH`, `FLAP_CLOSE_HIGH_TH`, `FLAP_TIMEOUT_MS`.
 
 #### State Transition Table
 
 | From State   | Event / Condition                              | To State   | Side Effect |
 |--------------|------------------------------------------------|------------|-------------|
-| `IDLE`       | `MSG_FLAP_OPEN` received                       | `OPENING`  | Start DRV8163 FWD at full speed; start timeout timer; ACK |
-| `IDLE`       | `MSG_FLAP_CLOSE` received                      | `CLOSING`  | Start DRV8163 REV; start timeout timer; ACK |
+| `IDLE`       | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Start DRV8263 FWD at full speed; start timeout timer; ACK |
+| `IDLE`       | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Start DRV8263 REV; start timeout timer; ACK |
 | `OPENING`    | Monitoring auto-stop fires: current drops      | `OPEN`     | Send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_CURRENT_STOP)` |
-| `OPENING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8163; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
-| `OPENING`    | `MSG_FLAP_CLOSE` received                      | `CLOSING`  | Restart DRV8163 REV; reset timer; ACK |
-| `OPEN`       | `MSG_FLAP_CLOSE` received                      | `CLOSING`  | Start DRV8163 REV; start timer; ACK |
-| `OPEN`       | `MSG_FLAP_OPEN` received                       | `OPEN`     | Already open — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
+| `OPENING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
+| `OPENING`    | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Restart DRV8263 REV; reset timer; ACK |
+| `OPEN`       | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Start DRV8263 REV; start timer; ACK |
+| `OPEN`       | `MSG_FLAPS_OPEN` received                       | `OPEN`     | Already open — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
 | `CLOSING`    | Monitoring auto-stop fires: current high       | `CLOSED`   | Send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_CURRENT_STOP)` |
-| `CLOSING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8163; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
-| `CLOSING`    | `MSG_FLAP_OPEN` received                       | `OPENING`  | Restart DRV8163 FWD; reset timer; ACK |
-| `CLOSED`     | `MSG_FLAP_OPEN` received                       | `OPENING`  | Start DRV8163 FWD; start timer; ACK |
-| `CLOSED`     | `MSG_FLAP_CLOSE` received                      | `CLOSED`   | Already closed — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
-| `FAULT`      | `MSG_FLAP_OPEN` received                       | `OPENING`  | Clear fault; start DRV8163 FWD; ACK |
-| `FAULT`      | `MSG_FLAP_CLOSE` received                      | `CLOSING`  | Clear fault; start DRV8163 REV; ACK |
+| `CLOSING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
+| `CLOSING`    | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Restart DRV8263 FWD; reset timer; ACK |
+| `CLOSED`     | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Start DRV8263 FWD; start timer; ACK |
+| `CLOSED`     | `MSG_FLAPS_CLOSE` received                      | `CLOSED`   | Already closed — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
+| `FAULT`      | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Clear fault; start DRV8263 FWD; ACK |
+| `FAULT`      | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Clear fault; start DRV8263 REV; ACK |
 
-**Auto-stop detection:** Poll `s_drv8163_flap.monitoring_enabled` each loop iteration; transition fires when it goes `false` unexpectedly (i.e., the driver's internal threshold logic stopped the motor).
+**Auto-stop detection:** Poll `s_drv8263_flap.monitoring_enabled` each loop iteration; transition fires when it goes `false` unexpectedly (i.e., the driver's internal threshold logic stopped the motor).
 
 #### Flap State Diagram
 
@@ -285,25 +285,25 @@ static int32_t s_turntable_pos_steps;  /* DRV8434S dev 2 */
 stateDiagram-v2
     [*] --> IDLE
 
-    IDLE --> OPENING : MSG_FLAP_OPEN
-    IDLE --> CLOSING : MSG_FLAP_CLOSE
+    IDLE --> OPENING : MSG_FLAPS_OPEN
+    IDLE --> CLOSING : MSG_FLAPS_CLOSE
 
     OPENING --> OPEN  : current drops / end-of-travel
     OPENING --> FAULT : timeout elapsed
-    OPENING --> CLOSING : MSG_FLAP_CLOSE preempts
+    OPENING --> CLOSING : MSG_FLAPS_CLOSE preempts
 
-    OPEN --> CLOSING  : MSG_FLAP_CLOSE
-    OPEN --> OPEN     : MSG_FLAP_OPEN - already open
+    OPEN --> CLOSING  : MSG_FLAPS_CLOSE
+    OPEN --> OPEN     : MSG_FLAPS_OPEN - already open
 
     CLOSING --> CLOSED : current exceeds high threshold
     CLOSING --> FAULT  : timeout elapsed
-    CLOSING --> OPENING : MSG_FLAP_OPEN preempts
+    CLOSING --> OPENING : MSG_FLAPS_OPEN preempts
 
-    CLOSED --> OPENING : MSG_FLAP_OPEN
-    CLOSED --> CLOSED  : MSG_FLAP_CLOSE - already closed
+    CLOSED --> OPENING : MSG_FLAPS_OPEN
+    CLOSED --> CLOSED  : MSG_FLAPS_CLOSE - already closed
 
-    FAULT --> OPENING : MSG_FLAP_OPEN - fault cleared
-    FAULT --> CLOSING : MSG_FLAP_CLOSE - fault cleared
+    FAULT --> OPENING : MSG_FLAPS_OPEN - fault cleared
+    FAULT --> CLOSING : MSG_FLAPS_CLOSE - fault cleared
 
     OPEN --> [*]   : MSG_MOTION_DONE sent
     CLOSED --> [*] : MSG_MOTION_DONE sent
@@ -490,9 +490,9 @@ stateDiagram-v2
 
 ### 3.5 Hot Wire Subsystem State Machine
 
-**Hardware:** DRV8163 hotwire instance (GP6/GP7, ADC ch0 GP26).  
+**Hardware:** DRV8263 hotwire instance (GP6/GP7, ADC ch0 GP26).  
 **Trigger message:** `MSG_HOTWIRE_SET` (0x46).  
-**Mode:** Constant current — one direction only (forward), fixed duty cycle `HOTWIRE_CURRENT_DUTY`. No current-threshold auto-stop; the DRV8163 is configured with `high_th = 4095` (never auto-stop).
+**Mode:** Constant current — one direction only (forward), fixed duty cycle `HOTWIRE_CURRENT_DUTY`. No current-threshold auto-stop; the DRV8263 is configured with `high_th = 4095` (never auto-stop).
 
 > **No `MSG_MOTION_DONE` is sent** for the hot wire — it is a steady-state output, not a positional actuator. The ACK from `dispatch_decoded()` confirms the command was accepted.
 
@@ -500,8 +500,8 @@ stateDiagram-v2
 
 | From State | Event / Condition              | To State | Side Effect |
 |------------|--------------------------------|----------|-------------|
-| `OFF`      | `MSG_HOTWIRE_SET(enable=1)`    | `ON`     | `drv8163_set_motor_control(hotwire, FWD, HOTWIRE_CURRENT_DUTY)`; ACK |
-| `ON`       | `MSG_HOTWIRE_SET(enable=0)`    | `OFF`    | `drv8163_set_motor_control(hotwire, COAST, 0)`; ACK |
+| `OFF`      | `MSG_HOTWIRE_SET(enable=1)`    | `ON`     | `drv8263_set_motor_control(hotwire, FWD, HOTWIRE_CURRENT_DUTY)`; ACK |
+| `ON`       | `MSG_HOTWIRE_SET(enable=0)`    | `OFF`    | `drv8263_set_motor_control(hotwire, COAST, 0)`; ACK |
 | `ON`       | `MSG_HOTWIRE_SET(enable=1)`    | `ON`     | No-op; ACK |
 | `OFF`      | `MSG_HOTWIRE_SET(enable=0)`    | `OFF`    | No-op; ACK |
 | `ON`       | Driver nFAULT pin detected     | `FAULT`  | Log error; motor coasted automatically by driver |
@@ -575,7 +575,7 @@ The Pico main loop must call the following tick functions on every iteration:
 
 ```c
 /* In main() polling loop — called every ~1 ms minimum */
-flap_sm_tick();        /* polls s_drv8163_flap.monitoring_enabled, timeout */
+flap_sm_tick();        /* polls s_drv8263_flap.monitoring_enabled, timeout */
 arm_sm_tick();         /* polls drv8434s_motion_is_busy(), timeout */
 rack_sm_tick();        /* polls drv8434s_motion_is_busy(), timeout */
 turntable_sm_tick();   /* polls drv8434s_motion_is_busy(), timeout */
@@ -676,7 +676,7 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 #define TURNTABLE_MOVE_TIMEOUT_MS   15000
 #endif
 
-// ── Flap actuators (DRV8163 flap instance) ───────────────────────────────────
+// ── Flap actuators (DRV8263 flap instance) ───────────────────────────────────
 
 // Maximum time to open or close flaps before FAULT.
 #ifndef FLAP_TIMEOUT_MS
@@ -710,7 +710,7 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 #define FLAP_CLOSE_HIGH_TH       300    /* calibrate per hardware */
 #endif
 
-// ── Hot wire (DRV8163 hotwire instance) ──────────────────────────────────────
+// ── Hot wire (DRV8263 hotwire instance) ──────────────────────────────────────
 
 // 12-bit PWM duty cycle for constant-current hot-wire operation.
 // 1638 ≈ 40% duty (~1.6 A at typical Rsense — calibrate per wire gauge).
@@ -745,32 +745,32 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 
 ## 5. Board Pin Additions
 
-Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) immediately after the existing DRV8163 flap section:
+Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) immediately after the existing DRV8263 flap section:
 
 ```c
 // ============================================================
-// DRV8163 — HOT WIRE instance (second independent H-bridge)
-// Uses a separate DRV8163 IC or second channel if dual-channel
+// DRV8263 — HOT WIRE instance (second independent H-bridge)
+// Uses a separate DRV8263 IC or second channel if dual-channel
 // package is used.
 // ============================================================
 
 // IN1 — PWM-capable GPIO driving hot-wire forward direction only.
-#ifndef HOTWIRE_DRV8163_CTRL_A_GPIO
-#define HOTWIRE_DRV8163_CTRL_A_GPIO   6
+#ifndef HOTWIRE_DRV8263_CTRL_A_GPIO
+#define HOTWIRE_DRV8263_CTRL_A_GPIO   6
 #endif
 
 // IN2 — held LOW (hot wire is unidirectional).
-#ifndef HOTWIRE_DRV8163_CTRL_B_GPIO
-#define HOTWIRE_DRV8163_CTRL_B_GPIO   7
+#ifndef HOTWIRE_DRV8263_CTRL_B_GPIO
+#define HOTWIRE_DRV8263_CTRL_B_GPIO   7
 #endif
 
 // Current sense ADC pin (ADC ch0 = GP26 on RP2040).
-#ifndef HOTWIRE_DRV8163_SENSE_GPIO
-#define HOTWIRE_DRV8163_SENSE_GPIO    26
+#ifndef HOTWIRE_DRV8263_SENSE_GPIO
+#define HOTWIRE_DRV8263_SENSE_GPIO    26
 #endif
 
-#ifndef HOTWIRE_DRV8163_SENSE_ADC_CH
-#define HOTWIRE_DRV8163_SENSE_ADC_CH  0   /* GP26 = ADC ch0 */
+#ifndef HOTWIRE_DRV8263_SENSE_ADC_CH
+#define HOTWIRE_DRV8263_SENSE_ADC_CH  0   /* GP26 = ADC ch0 */
 #endif
 
 // ============================================================
@@ -801,12 +801,12 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) immediately after 
 | 3    | DRV8434S MOSI (SPI0)              | SPI0          | No |
 | 4    | DRV8434S MISO (SPI0)              | SPI0          | No |
 | 5    | DRV8434S CS (SPI0)                | SPI0 GPIO     | No |
-| **6**| **Hotwire DRV8163 IN1 (PWM)**     | **PWM3A**     | **New** |
-| **7**| **Hotwire DRV8163 IN2**           | **GPIO out**  | **New** |
+| **6**| **Hotwire DRV8263 IN1 (PWM)**     | **PWM3A**     | **New** |
+| **7**| **Hotwire DRV8263 IN2**           | **GPIO out**  | **New** |
 | 14   | HX711 DATA                        | GPIO          | No |
 | 15   | HX711 CLK                         | GPIO          | No |
-| 20   | Flap DRV8163 IN1 (PWM)            | PWM2A         | No |
-| 21   | Flap DRV8163 IN2 (PWM)            | PWM2B         | No |
+| 20   | Flap DRV8263 IN1 (PWM)            | PWM2A         | No |
+| 21   | Flap DRV8263 IN2 (PWM)            | PWM2B         | No |
 | **10**| **Vacuum trigger (output)**      | **GPIO out**  | **New** |
 | **11**| **Vacuum RPM sense (interrupt)** | **GPIO irq**  | **New** |
 | **26**| **Hotwire sense ADC ch0**        | **ADC0**      | **New** |
@@ -877,8 +877,8 @@ This is a **new screen** replacing `ui_show_stepper()`. It provides direct contr
 
 | Section     | `lv_btn` Label       | Callback                    | Message Sent                                    |
 |-------------|----------------------|-----------------------------|--------------------------------------------------|
-| FLAPS       | `"Flap Open"`        | `on_flap_open()`            | `motor_flap_open()` → `MSG_FLAP_OPEN`            |
-| FLAPS       | `"Flap Close"`       | `on_flap_close()`           | `motor_flap_close()` → `MSG_FLAP_CLOSE`          |
+| FLAPS       | `"Flap Open"`        | `on_flap_open()`            | `motor_flap_open()` → `MSG_FLAPS_OPEN`            |
+| FLAPS       | `"Flap Close"`       | `on_flap_close()`           | `motor_flap_close()` → `MSG_FLAPS_CLOSE`          |
 | ARM         | `"Arm Press"`        | `on_arm_press()`            | `motor_arm_move(ARM_POS_PRESS)` → `MSG_ARM_MOVE` |
 | ARM         | `"Arm Pos 1"`        | `on_arm_pos1()`             | `motor_arm_move(ARM_POS_1)` → `MSG_ARM_MOVE`     |
 | ARM         | `"Arm Pos 2"`        | `on_arm_pos2()`             | `motor_arm_move(ARM_POS_2)` → `MSG_ARM_MOVE`     |
@@ -918,13 +918,13 @@ All functions use `pico_link_send_rpc()` with a `MOTOR_RPC_TIMEOUT_MS = 300` ms 
 /* ── Flap helpers ─────────────────────────────────────────────────────────── */
 
 /**
- * @brief Command Pico to open both flaps (DRV8163 flap instance, FWD + current-drop stop).
+ * @brief Command Pico to open both flaps (DRV8263 flap instance, FWD + current-drop stop).
  * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE arrives later asynchronously.
  */
 esp_err_t motor_flap_open(void);
 
 /**
- * @brief Command Pico to close both flaps (DRV8163 flap instance, REV + current-high stop).
+ * @brief Command Pico to close both flaps (DRV8263 flap instance, REV + current-high stop).
  * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE arrives later asynchronously.
  */
 esp_err_t motor_flap_close(void);
@@ -1199,8 +1199,8 @@ static void ui_ops_update_vacuum(uint8_t status, uint16_t rpm)
 
 | File | Symbol | Reason |
 |------|--------|--------|
-| [`lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c`](lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c) | `motor_linact_start_monitor_dir()`, `motor_linact_stop_monitor()` | Used internally by `motor_flap_open/close()`; low-level DRV8163 wrappers. |
-| [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_drv8163_start()`, `handle_drv8163_stop()` | Existing MSG_MOTOR_DRV8163_START_MON / STOP_MON handlers | Kept — high-level flap handler calls `drv8163_set_motor_control()` directly; raw commands remain for debug. |
+| [`lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c`](lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c) | `motor_linact_start_monitor_dir()`, `motor_linact_stop_monitor()` | Used internally by `motor_flap_open/close()`; low-level DRV8263 wrappers. |
+| [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_drv8263_start()`, `handle_drv8263_stop()` | Existing MSG_MOTOR_DRV8263_START_MON / STOP_MON handlers | Kept — high-level flap handler calls `drv8263_set_motor_control()` directly; raw commands remain for debug. |
 | [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_stepper_enable()`, `handle_stepper_stepjob()` | Existing MSG_MOTOR_STEPPER_ENABLE / STEPJOB handlers | Kept — still useful for low-level debug and called by new high-level handlers. |
 | [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_hx711_tare()`, `handle_hx711_read()` | HX711 handlers | Fully unchanged. |
 | [`lcd_uext_ili9341/main/flap.h`](lcd_uext_ili9341/main/flap.h) / `flap_init()` | Init resets linact to stop on boot | Kept — `flap_init()` still useful for boot-time safety; `flap_set_opening()` is the only symbol removed. |
@@ -1213,11 +1213,11 @@ static void ui_ops_update_vacuum(uint8_t status, uint16_t rpm)
 Extend the `dispatch_decoded()` `switch` statement with these new cases:
 
 ```c
-case MSG_FLAP_OPEN:
+case MSG_FLAPS_OPEN:
     handle_flap_open(hdr.seq);
     break;
 
-case MSG_FLAP_CLOSE:
+case MSG_FLAPS_CLOSE:
     handle_flap_close(hdr.seq);
     break;
 
@@ -1249,8 +1249,8 @@ case MSG_VACUUM_SET:
 New static driver instances required at file scope in `uart_server.c`:
 
 ```c
-static drv8163_t       s_drv8163_hotwire;    /* second DRV8163 instance */
-static bool            s_drv8163_hotwire_ready;
+static drv8263_t       s_drv8263_hotwire;    /* second DRV8263 instance */
+static bool            s_drv8263_hotwire_ready;
 
 /* Vacuum */
 static bool            s_vacuum_on;          /* logical pump state */
@@ -1270,7 +1270,7 @@ static hotwire_sm_state_t   s_hotwire_sm;
 ### 10.4 Recommended Bring-Up Order
 
 1. Verify `MSG_PING` round-trip still works after adding new message IDs to `msg_type_t`.  
-2. Implement and test `MSG_FLAP_OPEN` / `MSG_FLAP_CLOSE` (simplest — no position tracking).  
+2. Implement and test `MSG_FLAPS_OPEN` / `MSG_FLAPS_CLOSE` (simplest — no position tracking).  
 3. Implement `MSG_TURNTABLE_HOME`, verify stall detection zeros counter.  
 4. Implement `MSG_TURNTABLE_GOTO` A→B→C→D with hardcoded step counts.  
 5. Implement `MSG_RACK_MOVE` HOME (homing), then EXTEND/PRESS.  

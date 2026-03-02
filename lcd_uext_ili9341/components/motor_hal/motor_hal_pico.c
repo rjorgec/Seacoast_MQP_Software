@@ -19,7 +19,7 @@ static esp_err_t linact_start_dir(uint8_t dir,
                                   uint16_t high_th,
                                   uint32_t interval_ms)
 {
-    pl_drv8163_start_mon_t payload = {
+    pl_drv8263_start_mon_t payload = {
         .speed = speed,
         .low_th = low_th,
         .high_th = high_th,
@@ -28,7 +28,7 @@ static esp_err_t linact_start_dir(uint8_t dir,
     };
 
     uint8_t nack_code = 0u;
-    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_DRV8163_START_MON,
+    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_DRV8263_START_MON,
                                        &payload,
                                        (uint16_t)sizeof(payload),
                                        MOTOR_RPC_TIMEOUT_MS,
@@ -55,7 +55,7 @@ esp_err_t motor_linact_start_monitor_dir(motor_dir_t dir,
 esp_err_t motor_linact_stop_monitor(void)
 {
     uint8_t nack_code = 0u;
-    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_DRV8163_STOP_MON,
+    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_DRV8263_STOP_MON,
                                        NULL,
                                        0u,
                                        MOTOR_RPC_TIMEOUT_MS,
@@ -249,6 +249,40 @@ esp_err_t motor_vacuum2_set(bool enable)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "vacuum2_set rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_hotwire_traverse(bool cut)
+{
+    pl_hotwire_traverse_t pl = {.direction = cut ? 0u : 1u};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_HOTWIRE_TRAVERSE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "hotwire_traverse rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_indexer_move(uint8_t position)
+{
+    pl_indexer_move_t pl = {.position = position};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_INDEXER_MOVE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "indexer_move rpc failed (%s), nack=%u",
                  esp_err_to_name(err), (unsigned)nack_code);
     }
     return err;

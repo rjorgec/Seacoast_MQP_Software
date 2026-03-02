@@ -1,0 +1,336 @@
+# NLSpec: Raspberry Pi Pico 2 Firmware
+
+## Version
+0.1.0
+
+## Depends On
+`01-shared-protocol.nlspec.md`
+
+---
+
+## 1. Overview
+
+The Pico firmware runs bare-metal C on the RP2040 (ARM core of the Pico 2). It is the sole controller of all physical actuators and sensors. It receives commands from the ESP32 over UART, executes them via hardware drivers, and reports results back.
+
+### 1.1 Source File Map
+
+| File | Responsibility |
+|------|---------------|
+| `pico_fw/src/main.c` | Entry point; calls `uart_server_init()`, runs polling loop calling `uart_server_poll()` |
+| `pico_fw/src/uart_server.c` | UART RX/TX, COBS framing, message dispatch, all subsystem state machines, spawn dosing algorithm |
+| `pico_fw/src/uart_server.h` | Public API: `uart_server_init()`, `uart_server_poll()` |
+| `pico_fw/src/board_pins.h` | All pin assignments and tuning constants |
+| `pico_fw/drivers/drv8263/drv8263.c` | DRV8263 H-bridge driver (PWM + current monitoring) |
+| `pico_fw/drivers/drv8434s/drv8434s.c` | DRV8434S SPI stepper driver (daisy-chain) |
+| `shared/proto/proto.h` | Protocol definitions (shared with ESP32) |
+| `shared/proto/cobs.c` | COBS encode/decode |
+| `shared/proto/proto_crc.c` | CRC-16-CCITT |
+
+### 1.2 Execution Model
+
+The Pico runs a **cooperative polling loop** in `main()`:
+
+```
+while (true) {
+    uart_server_poll();   // process incoming bytes, dispatch messages, tick state machines
+    sleep_ms(5);          // yield ~5 ms between iterations
+}
+```
+
+There is no RTOS. All subsystem state machines are polled every loop iteration via tick functions. Stepper pulse generation uses the Pico SDK `repeating_timer` at per-axis `step_delay_us` intervals.
+
+**Boot sequence:**
+1. `stdio_init_all()` — enables USB CDC for debug printf
+2. `sleep_ms(10000)` — 10-second boot delay for USB enumeration
+3. `uart_server_init()` — initializes UART, GPIO, ADC, SPI, DRV8263 instances, DRV8434S daisy chain, HX711 load cell
+4. Enter polling loop
+
+---
+
+## 2. Hardware Subsystems
+
+### 2.1 Flap Actuators (DRV8263 H-Bridge)
+
+**Hardware:** Two linear actuators driven by one or two DRV8263 H-bridge ICs with current sense ADC.
+
+**Behavior:**
+- **Open (MSG_FLAPS_OPEN):** Drive motor forward at `FLAP_OPEN_SPEED` (default: 4095 = full 12-bit PWM). Enable current monitoring. When ADC reading drops below `FLAP_OPEN_LOW_TH` (default: 30), the actuator has reached end-of-travel (internal limit switch opened). Auto-stop and report `MOTION_OK` or `MOTION_CURRENT_STOP`.
+- **Close (MSG_FLAPS_CLOSE):** Drive motor reverse at `FLAP_CLOSE_SPEED` (default: 4095). Enable current monitoring. When ADC reading exceeds `FLAP_CLOSE_HIGH_TH` (default: 300), the actuator has reached mechanical stop. Auto-stop and report.
+- **Timeout:** If neither threshold triggers within `FLAP_TIMEOUT_MS` (default: 8000 ms), enter FAULT state and report `MOTION_TIMEOUT`.
+
+**Flap State Machine States:** `IDLE`, `OPENING`, `OPEN`, `CLOSING`, `CLOSED`, `FAULT`
+
+**Transition Table:**
+
+| From | Event | To | Side Effect |
+|------|-------|-----|-------------|
+| IDLE | MSG_FLAPS_OPEN | OPENING | Start DRV8263 FWD; start timeout; ACK |
+| IDLE | MSG_FLAPS_CLOSE | CLOSING | Start DRV8263 REV; start timeout; ACK |
+| OPENING | Current drops below low threshold | OPEN | Stop motor; send MOTION_DONE(FLAPS, OK) |
+| OPENING | Timeout | FAULT | Stop motor; send MOTION_DONE(FLAPS, TIMEOUT) |
+| OPENING | MSG_FLAPS_CLOSE | CLOSING | Reverse motor; reset timer; ACK |
+| OPEN | MSG_FLAPS_CLOSE | CLOSING | Start REV; start timer; ACK |
+| OPEN | MSG_FLAPS_OPEN | OPEN | No-op; send MOTION_DONE(FLAPS, OK); ACK |
+| CLOSING | Current exceeds high threshold | CLOSED | Stop motor; send MOTION_DONE(FLAPS, OK) |
+| CLOSING | Timeout | FAULT | Stop motor; send MOTION_DONE(FLAPS, TIMEOUT) |
+| CLOSING | MSG_FLAPS_OPEN | OPENING | Reverse motor; reset timer; ACK |
+| CLOSED | MSG_FLAPS_OPEN | OPENING | Start FWD; start timer; ACK |
+| CLOSED | MSG_FLAPS_CLOSE | CLOSED | No-op; send MOTION_DONE(FLAPS, OK); ACK |
+| FAULT | MSG_FLAPS_OPEN | OPENING | Clear fault; start FWD; ACK |
+| FAULT | MSG_FLAPS_CLOSE | CLOSING | Clear fault; start REV; ACK |
+
+**Second flap driver (`s_drv8263_flap2`):** If present and initialized (`s_drv8263_flap2_ready == true`), both flap DRV8263 instances are commanded in parallel for every flap state transition. Both must complete before MOTION_DONE is sent.
+
+### 2.2 Arm Stepper (DRV8434S Device 0)
+
+**Hardware:** DRV8434S on SPI0 daisy-chain, device index 0.
+
+**Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Starts at 0 after boot (assumed home).
+
+**Behavior:** On `MSG_ARM_MOVE(position)`, compute delta from `s_arm_pos_steps` to target steps, call `drv8434s_motion_start()`. Named positions map to step counts:
+
+| Position | Constant | Default Steps |
+|----------|----------|--------------|
+| ARM_POS_PRESS | `ARM_STEPS_PRESS` | 4000 |
+| ARM_POS_1 | `ARM_STEPS_POS1` | 1000 |
+| ARM_POS_2 | `ARM_STEPS_POS2` | 2500 |
+
+**Special behavior for ARM_POS_PRESS:** Stall detection is enabled. If stall fires within `ARM_PRESS_STALL_WINDOW_STEPS` (default: 200) of the target, treat as `MOTION_OK` (successful engagement). Otherwise, treat as `MOTION_STALLED`.
+
+**Timeout:** `ARM_MOVE_TIMEOUT_MS` (default: 10000 ms).
+
+**Arm State Machine States:** `IDLE`, `MOVING`, `AT_PRESS`, `AT_POS1`, `AT_POS2`, `FAULT`
+
+**Transition Table:**
+
+| From | Event | To | Side Effect |
+|------|-------|-----|-------------|
+| IDLE / AT_* | MSG_ARM_MOVE(pos) | MOVING | Compute delta; start step job; ACK |
+| FAULT | MSG_ARM_MOVE(pos) | MOVING | Clear fault; start step job; ACK |
+| MOVING | Step job complete | AT_PRESS / AT_POS1 / AT_POS2 | Update s_arm_pos_steps; send MOTION_DONE(ARM, OK, steps) |
+| MOVING | Stall detected | FAULT | Send MOTION_DONE(ARM, STALLED, steps) |
+| MOVING | Timeout | FAULT | Cancel motion; send MOTION_DONE(ARM, TIMEOUT, steps) |
+| MOVING | MSG_ARM_MOVE(new_pos) | MOVING | Cancel current; start new job; ACK |
+
+### 2.3 Rack Stepper (DRV8434S Device 1)
+
+**Hardware:** DRV8434S on SPI0 daisy-chain, device index 1.
+
+**Position tracking:** `s_rack_pos_steps` (int32_t). Zeroed on successful home.
+
+**Homing:** `RACK_POS_HOME` drives full reverse until stall detection triggers at the physical endstop. On stall, set `s_rack_pos_steps = 0`.
+
+| Position | Constant | Default Steps |
+|----------|----------|--------------|
+| RACK_POS_HOME | — | Drive to stall; zero counter |
+| RACK_POS_EXTEND | `RACK_STEPS_EXTEND` | 6000 |
+| RACK_POS_PRESS | `RACK_STEPS_PRESS` | 7500 |
+
+**Timeouts:** `RACK_HOME_TIMEOUT_MS` (default: 15000), `RACK_MOVE_TIMEOUT_MS` (default: 12000).
+
+**Rack State Machine States:** `IDLE`, `HOMING`, `MOVING`, `AT_HOME`, `AT_EXTEND`, `AT_PRESS`, `FAULT`
+
+### 2.4 Turntable Stepper (DRV8434S Device 2)
+
+**Hardware:** DRV8434S on SPI0 daisy-chain, device index 2.
+
+**Position tracking:** `s_turntable_pos_steps` (int32_t). Zeroed on home.
+
+**Boot requirement:** The turntable starts in `UNCALIBRATED` state. It **must** receive `MSG_TURNTABLE_HOME` before any `MSG_TURNTABLE_GOTO` is valid. Commands received in `UNCALIBRATED` state are NACKed.
+
+| Position | Constant | Default Steps |
+|----------|----------|--------------|
+| TURNTABLE_POS_A | `TURNTABLE_STEPS_A` | 0 |
+| TURNTABLE_POS_B | `TURNTABLE_STEPS_B` | 1250 |
+| TURNTABLE_POS_C | `TURNTABLE_STEPS_C` | 2500 |
+| TURNTABLE_POS_D | `TURNTABLE_STEPS_D` | 3750 |
+
+**Timeouts:** `TURNTABLE_HOME_TIMEOUT_MS` (default: 20000), `TURNTABLE_MOVE_TIMEOUT_MS` (default: 15000).
+
+**Turntable State Machine States:** `UNCALIBRATED`, `HOMING`, `MOVING`, `AT_A`, `AT_B`, `AT_C`, `AT_D`, `FAULT`
+
+**Critical rules:**
+- FAULT state requires re-home (`MSG_TURNTABLE_HOME`) before any GOTO is accepted
+- MOVING + MSG_TURNTABLE_HOME = cancel current job, begin re-home
+
+### 2.5 Hot Wire (DRV8263 Hotwire Instance)
+
+**Hardware:** DRV8263 on GP6 (IN1, PWM) / GP7 (IN2, GPIO out), current sense on GP26 (ADC ch0).
+
+**Mode:** Constant current, forward direction only, fixed duty cycle `HOTWIRE_CURRENT_DUTY` (default: 4095). No auto-stop (high threshold set to 4095 = disabled).
+
+**MSG_VACUUM2_SET mutual exclusion:** The hotwire DRV8263's reverse channel (GP7/IN2) drives the second vacuum pump. `MSG_HOTWIRE_SET(enable=1)` and `MSG_VACUUM2_SET(enable=1)` are **mutually exclusive**. If the hotwire is ON and `MSG_VACUUM2_SET(enable=1)` is received, the Pico must NACK. If vacuum2 is ON and `MSG_HOTWIRE_SET(enable=1)` is received, the Pico must NACK. The disable commands (enable=0) are always accepted.
+
+**No MSG_MOTION_DONE** is sent for the hot wire — it is a steady-state output.
+
+**Hot Wire States:** `OFF`, `ON`, `FAULT`
+
+### 2.6 Vacuum Pumps
+
+**Primary vacuum pump:**
+- Trigger: GPIO output (`VACUUM_TRIGGER_GPIO`, default: GP10). HIGH = on, LOW = off.
+- RPM sense: GPIO input (`VACUUM_RPM_SENSE_GPIO`, default: GP11), rising-edge interrupt.
+- RPM calculation: count rising edges over `VACUUM_RPM_SAMPLE_INTERVAL_MS` (default: 100 ms), convert using `VACUUM_PULSES_PER_REV` (default: 2).
+- Blocked detection: if RPM < `VACUUM_RPM_BLOCKED_THRESHOLD` (default: 400) while pump is ON, report `VACUUM_BLOCKED`.
+- Periodic status: send `MSG_VACUUM_STATUS` every `VACUUM_PERIODIC_STATUS_MS` (default: 5000 ms) while pump is on, and immediately on any OK ↔ BLOCKED transition.
+
+**Secondary vacuum pump (MSG_VACUUM2_SET):**
+- Uses the hotwire DRV8263 reverse channel (GP7 driven, GP6 held low).
+- Simple on/off, no RPM monitoring.
+- Mutually exclusive with hotwire (see 2.5).
+
+**Vacuum States:** `OFF`, `ON_OK`, `ON_BLOCKED`
+
+### 2.7 Load Cell (HX711)
+
+**Hardware:** HX711 ADC on GP14 (DATA) / GP15 (CLK). Uses `pico-scale` library (submodule in `extern/`).
+
+**Behavior:**
+- `MSG_HX711_TARE`: Zero the scale. ACK on success.
+- `MSG_HX711_MEASURE`: Read weight. ACK payload is `pl_hx711_mass_t` with mass in micrograms.
+- Weight is also read internally during spawn dosing (see Section 3).
+
+---
+
+## 3. Spawn Dosing Algorithm (Closed-Loop on Pico)
+
+### 3.1 Overview
+
+When `MSG_DISPENSE_SPAWN` is received, the Pico runs a closed-loop dosing algorithm that:
+1. Opens the hopper flaps
+2. Reads the load cell continuously
+3. Controls flap position to regulate spawn flow rate
+4. Detects and recovers from material bridging
+5. Closes flaps when target mass is dispensed
+6. Reports progress via `MSG_SPAWN_STATUS`
+
+### 3.2 Initiation
+
+**Trigger:** `MSG_DISPENSE_SPAWN` with `pl_innoculate_bag_t` payload.
+
+**Precondition:** HX711 must be initialized and ready (`s_hx711_ready == true`). If not, NACK with `NACK_UNKNOWN`.
+
+**If a prior dose is active:** Stop the prior dose (stop timer, close flaps), then start the new one.
+
+**Target calculation:**
+```
+target_ug = (start_mass_ug × innoc_percent) / 1000
+```
+Where `innoc_percent` is in tenths of a percent (e.g., 250 = 25.0%).
+
+### 3.3 Timer-Driven Control Loop
+
+The dosing algorithm runs on a `repeating_timer` at `SPAWN_TIMER_PERIOD_MS` (default: 50 ms) intervals. Each tick:
+
+1. **Read the load cell** — single-shot reading via `pico-scale`.
+2. **Compute dispensed mass** — `dispensed_ug = current_mass_ug - start_mass_ug`.
+3. **Flow detection** — over a window of `SPAWN_FLOW_WINDOW_MS` (default: 100 ms), if dispensed mass has not increased, flow has stalled.
+4. **Control action** — based on current dosing state (see 3.4).
+5. **Report status** — send `MSG_SPAWN_STATUS` with current state, dispensed mass, target, retries.
+
+### 3.4 Dosing State Machine
+
+| State | Entry Condition | Behavior | Exit Condition |
+|-------|----------------|----------|----------------|
+| STARTUP_OPEN | Dose begins | Drive flaps open at full PWM. Wait for first weight change. | Weight change detected → RUNNING |
+| RUNNING | Flow detected | Flaps held at dosing PWM. Monitor flow rate. | `dispensed_ug >= target_ug` → DONE. No flow for window → STALLED. |
+| STALLED | No flow detected for `SPAWN_FLOW_WINDOW_MS` | Close flaps. Activate agitator (eccentric arm stepper) gently. | After agitation period → re-open flaps → RUNNING (retry). Max retries exceeded → BAG_EMPTY. |
+| AGITATING | Bridge detected | Agitator kneads bag side. Flaps closed. | Agitation time elapsed → re-open → RUNNING. |
+| DONE | Target mass reached | Close flaps. Stop timer. | Send SPAWN_STATUS(DONE). Terminal. |
+| BAG_EMPTY | Retries exhausted or insufficient spawn | Close flaps. Stop timer. | Send SPAWN_STATUS(BAG_EMPTY). Terminal. |
+| ERROR | Sensor failure, driver fault | Close flaps. Stop timer. | Send SPAWN_STATUS(ERROR). Terminal. |
+| ABORTED | MSG_CTRL_STOP received | Close flaps. Stop timer. | Send SPAWN_STATUS(ABORTED). Terminal. |
+
+### 3.5 Flap Nudging
+
+During RUNNING state, if flow rate drops but is not zero, the algorithm applies short position-nudge pulses to the flap motors to maintain flow without fully re-opening. A nudge drives the motor for a brief pulse (`nudge_until` timestamp), then stops and waits for the next timer tick to evaluate.
+
+### 3.6 Defaults and Boundaries
+
+| Parameter | Default | Unit | Notes |
+|-----------|---------|------|-------|
+| `SPAWN_TIMER_PERIOD_MS` | 50 | ms | Dosing loop tick rate |
+| `SPAWN_FLOW_WINDOW_MS` | 100 | ms | Window for flow detection |
+| `SPAWN_SCALE_READ_SAMPLES` | 1 | — | Single-shot for speed |
+| Max agitation retries | 3 | — | Per dose attempt. Configurable via `s_spawn.max_retries`. |
+
+---
+
+## 4. Polling Loop Tick Functions
+
+The main polling loop must call the following on every iteration:
+
+```c
+flap_sm_tick();        // polls DRV8263 monitoring_enabled flag, timeout
+arm_sm_tick();         // polls drv8434s_motion_is_busy(), timeout
+rack_sm_tick();        // polls drv8434s_motion_is_busy(), timeout
+turntable_sm_tick();   // polls drv8434s_motion_is_busy(), timeout
+vacuum_sm_tick();      // reads RPM counter every VACUUM_RPM_SAMPLE_INTERVAL_MS
+```
+
+These functions are called from within `uart_server_poll()` (or directly in the main loop — implementation choice).
+
+---
+
+## 5. Pin Assignment Table
+
+All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
+
+| GPIO | Function | Peripheral | Constant |
+|------|----------|-----------|----------|
+| 0 | UART TX → ESP32 | UART0 | `PICO_UART_TX_GPIO` |
+| 1 | UART RX ← ESP32 | UART0 | `PICO_UART_RX_GPIO` |
+| 2 | DRV8434S SCK | SPI0 | `DRV8434S_SCK_GPIO` |
+| 3 | DRV8434S MOSI | SPI0 | `DRV8434S_MOSI_GPIO` |
+| 4 | DRV8434S MISO | SPI0 | `DRV8434S_MISO_GPIO` |
+| 5 | DRV8434S CS | SPI0 GPIO | `DRV8434S_CS_GPIO` |
+| 6 | Hotwire DRV8263 IN1 (PWM) | PWM3A | `HOTWIRE_PIN_IN1` |
+| 7 | Hotwire DRV8263 IN2 | GPIO out | `HOTWIRE_PIN_IN2` |
+| 10 | Vacuum trigger (output) | GPIO out | `VACUUM_TRIGGER_GPIO` |
+| 11 | Vacuum RPM sense (interrupt) | GPIO IRQ | `VACUUM_RPM_SENSE_GPIO` |
+| 14 | HX711 DATA | GPIO | `HX711_DATA_GPIO` |
+| 15 | HX711 CLK | GPIO | `HX711_CLK_GPIO` |
+| 20 | Flap DRV8263 IN1 (PWM) | PWM2A | `DRV8263_CTRL_A_GPIO` |
+| 21 | Flap DRV8263 IN2 (PWM) | PWM2B | `DRV8263_CTRL_B_GPIO` |
+| 26 | Hotwire sense ADC ch0 | ADC0 | `HOTWIRE_ADC_SENSE_PIN` |
+| 27 | Flap sense ADC ch1 | ADC1 | `DRV8263_SENSE_GPIO` |
+
+**PWM conflict check:** GP6/GP7 = PWM slice 3, GP20/GP21 = PWM slice 2. No conflict.
+**ADC conflict check:** GP26 = ADC ch0, GP27 = ADC ch1. No conflict.
+
+---
+
+## 6. Definition of Done
+
+### 6.1 Subsystem State Machines
+- [ ] Flap state machine implements all transitions in Section 2.1 table
+- [ ] Arm state machine implements all transitions in Section 2.2 table
+- [ ] Rack state machine implements all transitions including homing via stall
+- [ ] Turntable state machine enforces UNCALIBRATED → HOME before GOTO
+- [ ] Hot wire state machine enforces mutual exclusion with vacuum2
+- [ ] Vacuum state machine reports RPM status periodically and on transitions
+- [ ] All state machines send correct MSG_MOTION_DONE on terminal states
+
+### 6.2 Protocol Compliance
+- [ ] Every ESP → Pico command receives ACK or NACK within one polling iteration
+- [ ] Unknown message types receive NACK(NACK_UNKNOWN)
+- [ ] Payload length mismatches receive NACK(NACK_BAD_LEN)
+- [ ] CRC failures receive NACK(NACK_BAD_CRC)
+
+### 6.3 Spawn Dosing
+- [ ] MSG_DISPENSE_SPAWN initiates closed-loop dosing with correct target calculation
+- [ ] Dosing reports progress via MSG_SPAWN_STATUS at each timer tick
+- [ ] Bridge detection triggers agitation and retry
+- [ ] MSG_CTRL_STOP aborts an active dose and closes flaps
+- [ ] On completion, flaps are closed and SPAWN_STATUS_DONE is sent
+
+### 6.4 Safety
+- [ ] All actuators drive to safe state on unrecoverable error
+- [ ] All tuning parameters are `#define` with `#ifndef` guards in `board_pins.h`
+- [ ] No magic numbers in state machine logic
+- [ ] All state transitions are logged via printf
+
+### 6.5 Build
+- [ ] Firmware compiles cleanly with Pico SDK 2.2.0, `pico2` board target
+- [ ] USB CDC stdio enabled, UART stdio disabled
+- [ ] Output: `.uf2` file for flashing
