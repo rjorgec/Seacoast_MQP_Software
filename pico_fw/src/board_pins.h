@@ -104,7 +104,7 @@
 #endif
 
 #ifndef DRV8434S_SPI_BAUD
-#define DRV8434S_SPI_BAUD 10000000 // 10 MHz (device supports up to 10 MHz)
+#define DRV8434S_SPI_BAUD 1000000 // 1 MHz (device supports up to 10 MHz)
 #endif
 
 #ifndef DRV8434S_SCK_GPIO
@@ -238,7 +238,7 @@
 #define FLAP2_CTRL_B_PIN 9 /* GP9 */
 #endif
 #ifndef FLAP2_ADC_SENSE_PIN
-#define FLAP2_ADC_SENSE_PIN 27 /* GP28 — ADC channel 1 */
+#define FLAP2_ADC_SENSE_PIN 27 /* GP27 — ADC channel 1 */
 #endif
 #ifndef FLAP2_ADC_CHANNEL
 #define FLAP2_ADC_CHANNEL 1
