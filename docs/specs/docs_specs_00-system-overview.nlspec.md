@@ -23,8 +23,8 @@ This document, together with the component specs it references, is the authorita
 
 The Automated Mycelium Inoculator is an electromechanical system that dispenses measured quantities of mycelium spawn from a hopper bag into substrate bags. The system consists of two cooperating microcontrollers:
 
-1. **ESP32-C6** — runs FreeRTOS + ESP-IDF. Hosts the LVGL touchscreen UI, the `pico_link` UART transport, the `control` task (orchestration), and the `dosing` state machine (ESP-side, legacy — being superseded by Pico-side closed-loop dosing).
-2. **Raspberry Pi Pico 2 (RP2040)** — runs bare-metal C with a cooperative polling loop. Directly drives all actuators and sensors: DRV8263 H-bridge motor drivers (flaps, hot wire), DRV8434S SPI stepper drivers (arm, rack, turntable), HX711 load cell, vacuum pumps, and the closed-loop spawn dispensing algorithm.
+1. **ESP32-C6** — runs FreeRTOS + ESP-IDF. Hosts the LVGL touchscreen UI, the `pico_link` UART transport, and the `sys_sequence` FreeRTOS task which implements the whiteboard process flow (preferred orchestration path). The legacy ESP-side `dosing` state machine remains for the manual Dosing screen.
+2. **Raspberry Pi Pico 2 (RP2350, ARM core)** — runs bare-metal C with a cooperative polling loop. Directly drives all actuators and sensors: DRV8263 H-bridge motor drivers (flaps in standard mode; hot wire + vacuum pump 2 in independent half-bridge mode), DRV8434S SPI stepper drivers (arm, rack, turntable; agitator/hot wire carriage/indexer planned), HX711 load cell, vacuum pumps, and the closed-loop spawn dispensing algorithm.
 
 The two processors communicate over a **UART link at 115200 baud** using COBS framing with CRC-16-CCITT integrity checking, carrying a structured binary protocol defined in `shared/proto/proto.h`.
 

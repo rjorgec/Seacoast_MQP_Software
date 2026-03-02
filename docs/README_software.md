@@ -79,26 +79,30 @@ idf.py flash monitor
 
 All Pico pin assignments are in [`pico_fw/src/board_pins.h`](../pico_fw/src/board_pins.h).
 
-| GPIO | Function                                | Peripheral |
-|:----:|-----------------------------------------|:----------:|
-| 0    | UART0 TX → ESP32                        | UART0      |
-| 1    | UART0 RX ← ESP32                        | UART0      |
-| 2    | DRV8434S SCK (SPI0)                     | SPI0       |
-| 3    | DRV8434S MOSI (SPI0)                    | SPI0       |
-| 4    | DRV8434S MISO (SPI0)                    | SPI0       |
-| 5    | DRV8434S CS (SPI0)                      | SPI0 GPIO  |
-| 6    | DRV8263 hotwire IN1 (PWM, hot wire)     | PWM3A      |
-| 7    | DRV8263 hotwire IN2 (PWM, vacuum 2)     | PWM3B      |
-| 8    | DRV8263 flap 2 IN1 (PWM)               | PWM4A      |
-| 9    | DRV8263 flap 2 IN2 (PWM)               | PWM4B      |
-| 10   | Vacuum pump 1 trigger (output)          | GPIO out   |
-| 11   | Vacuum pump 1 RPM sense (interrupt)     | GPIO irq   |
-| 14   | HX711 DATA                              | GPIO       |
-| 15   | HX711 CLK                              | GPIO       |
-| 20   | DRV8263 flap 1 IN1 (PWM)               | PWM2A      |
-| 21   | DRV8263 flap 1 IN2 (PWM)               | PWM2B      |
-| 26   | DRV8263 hotwire ADC sense (unused)      | ADC0       |
-| 27   | DRV8263 flap ADC sense                  | ADC1       |
+| GPIO | Function                                                    | Peripheral | Constant                |
+|:----:|-------------------------------------------------------------|:----------:|-------------------------|
+| 0    | UART0 TX → ESP32                                            | UART0      | `PICO_UART_TX_GPIO`     |
+| 1    | UART0 RX ← ESP32                                            | UART0      | `PICO_UART_RX_GPIO`     |
+| 2    | DRV8434S SCK (SPI0)                                         | SPI0       | `DRV8434S_SCK_GPIO`     |
+| 3    | DRV8434S MOSI (SPI0)                                        | SPI0       | `DRV8434S_MOSI_GPIO`    |
+| 4    | DRV8434S MISO (SPI0)                                        | SPI0       | `DRV8434S_MISO_GPIO`    |
+| 5    | DRV8434S CS (SPI0)                                          | SPI0 GPIO  | `DRV8434S_CS_GPIO`      |
+| 6    | Flap 1 DRV8263 IN1 (PWM)                                    | PWM3A      | `DRV8263_CTRL_A_GPIO`   |
+| 7    | Flap 1 DRV8263 IN2 (PWM)                                    | PWM3B      | `DRV8263_CTRL_B_GPIO`   |
+| 8    | Flap 2 DRV8263 IN1 (PWM)                                    | PWM4A      | `FLAP2_CTRL_A_PIN`      |
+| 9    | Flap 2 DRV8263 IN2 (PWM)                                    | PWM4B      | `FLAP2_CTRL_B_PIN`      |
+| 10   | Hot wire IN1 — DRV8263 independent half-bridge (PWM)        | PWM5A      | `HOTWIRE_PIN_IN1`       |
+| 11   | Vacuum pump 2 IN2 — DRV8263 independent half-bridge (PWM)   | PWM5B      | `HOTWIRE_PIN_IN2`       |
+| 12   | Vacuum pump 1 trigger (output)                              | GPIO out   | `VACUUM_TRIGGER_PIN`    |
+| 13   | Vacuum pump 1 RPM sense (rising-edge interrupt)             | GPIO irq   | `VACUUM_RPM_SENSE_PIN`  |
+| 14   | HX711 DATA                                                  | GPIO       | `HX711_DATA_GPIO`       |
+| 15   | HX711 CLK                                                   | GPIO       | `HX711_CLK_GPIO`        |
+| 27   | Flap 2 current sense ADC ch1                                | ADC1       | `FLAP2_ADC_SENSE_PIN`   |
+| 28   | Flap 1 current sense ADC ch2                                | ADC2       | `DRV8263_SENSE_GPIO`    |
+
+**PWM slices:** GP6/7 = slice 3 (flap 1), GP8/9 = slice 4 (flap 2), GP10/11 = slice 5 (hot wire + vacuum 2). No conflicts.  
+**ADC channels:** GP27 = ADC ch1 (flap 2 sense), GP28 = ADC ch2 (flap 1 sense). No conflicts.  
+**Hot wire ADC (GP26, ADC ch0):** Not populated — current regulation is done by external Rsense on DRV8263.
 
 ---
 

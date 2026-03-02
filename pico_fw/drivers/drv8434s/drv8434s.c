@@ -1,6 +1,7 @@
 #include "drv8434s.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 // ── Internal timing helpers ─────────────────────────────────────────────────
 //

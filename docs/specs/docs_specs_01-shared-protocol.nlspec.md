@@ -86,9 +86,11 @@ typedef struct __attribute__((packed)) {
 | 0x45 | `MSG_TURNTABLE_HOME` | none (len=0) | 0 | Home turntable via stall detection; zero position counter |
 | 0x46 | `MSG_HOTWIRE_SET` | `pl_hotwire_set_t` | 1 | Enable/disable hot wire constant-current output |
 | 0x47 | `MSG_VACUUM_SET` | `pl_vacuum_set_t` | 1 | Turn primary vacuum pump on/off |
-| 0x48 | `MSG_VACUUM2_SET` | `pl_vacuum2_set_t` | 1 | Turn secondary vacuum (hotwire DRV8263 reverse channel) on/off; mutually exclusive with hotwire ON |
+| 0x48 | `MSG_VACUUM2_SET` | `pl_vacuum2_set_t` | 1 | Turn secondary vacuum pump on/off — drives DRV8263 independent half-bridge IN2. NOT mutually exclusive with hotwire (IN1); both can run simultaneously. |
 | 0x49 | `MSG_DISPENSE_SPAWN` | `pl_innoculate_bag_t` | 7 | Start closed-loop spawn dosing on Pico |
 | 0x4A | `MSG_SPAWN_STATUS` | `pl_spawn_status_t` | 16 | Pico → ESP unsolicited: dosing progress updates |
+| 0x4B | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t` | 1 | Traverse hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE); direction 0=cut, 1=return |
+| 0x4C | `MSG_INDEXER_MOVE` | `pl_indexer_move_t` | 1 | Move bag depth/eject rack (STEPPER_DEV_INDEXER) to named position |
 
 ### 3.3 Unsolicited Status Messages (0x60–0x6F, Pico → ESP32)
 
@@ -133,11 +135,12 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | Value | Name | Hardware |
 |-------|------|----------|
 | 0 | `SUBSYS_FLAPS` | DRV8263 flap instance(s) |
-| 1 | `SUBSYS_ARM` | DRV8434S device 0 |
-| 2 | `SUBSYS_RACK` | DRV8434S device 1 |
-| 3 | `SUBSYS_TURNTABLE` | DRV8434S device 2 |
-| 4 | `SUBSYS_HOTWIRE` | DRV8263 hotwire instance |
-| 5 | `SUBSYS_VACUUM` | Vacuum pump GPIO |
+| 1 | `SUBSYS_ARM` | DRV8434S device 0 (rotary suction arm) |
+| 2 | `SUBSYS_RACK` | DRV8434S device 1 (linear vacuum arm) |
+| 3 | `SUBSYS_TURNTABLE` | DRV8434S device 2 (platform) |
+| 4 | `SUBSYS_HOTWIRE` | DRV8263 hotwire instance (IN1 independent half-bridge) |
+| 5 | `SUBSYS_VACUUM` | Vacuum pump 1 GPIO + RPM ISR |
+| 6 | `SUBSYS_INDEXER` | DRV8434S device 5 (bag depth/eject rack) — not yet wired |
 
 ### 4.3 Motion Result Codes (`motion_result_t`)
 
@@ -147,6 +150,7 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | 1 | `MOTION_STALLED` | Stall detected before target (DRV8434S torque threshold or unexpected current drop) |
 | 2 | `MOTION_TIMEOUT` | Motion did not complete within the subsystem's timeout deadline |
 | 3 | `MOTION_FAULT` | Driver fault pin (nFAULT) asserted |
+| 4 | `MOTION_SPI_FAULT` | SPI communication failure (not a physical stall); distinguishable from nFAULT for diagnostics |
 
 ### 4.4 Position Enumerations
 
@@ -174,6 +178,14 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | 1 | `TURNTABLE_POS_B` | Position B |
 | 2 | `TURNTABLE_POS_C` | Position C |
 | 3 | `TURNTABLE_POS_D` | Position D |
+
+**Indexer (`indexer_pos_t`):**
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `INDEXER_POS_OPEN` | Fully retracted — bag can slide in freely |
+| 1 | `INDEXER_POS_CENTER` | Extended to bag-centering position (holds bag while weighing) |
+| 2 | `INDEXER_POS_EJECT` | Fully extended — pushes inoculated bag out of platform |
 
 ### 4.5 Vacuum Status (`vacuum_status_code_t`)
 
@@ -220,6 +232,8 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 | `pl_spawn_status_t` | 16 | `status:u8, retries:u8, bag_number:u16, target_ug:u32, disp_ug:u32, remain_ug:u32` |
 | `pl_motion_done_t` | 8 | `subsystem:u8, result:u8, _rsvd[2]:u8, steps_done:i32` |
 | `pl_vacuum_status_t` | 4 | `status:u8, _rsvd:u8, rpm:u16` |
+| `pl_hotwire_traverse_t` | 1 | `direction:u8` (0=cut/forward, 1=return) |
+| `pl_indexer_move_t` | 1 | `position:u8` (indexer_pos_t) |
 
 ---
 
