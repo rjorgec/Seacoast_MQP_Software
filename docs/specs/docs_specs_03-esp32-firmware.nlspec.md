@@ -23,8 +23,9 @@ The ESP32-C6 firmware runs FreeRTOS under ESP-IDF v5.5.x. It is the user-facing 
 | `lcd_uext_ili9341/main/display.c` / `display.h` | SPI bus + ILI9341 panel init |
 | `lcd_uext_ili9341/main/touch_ns2009.c/h` | I2C resistive touch driver |
 | `lcd_uext_ili9341/main/touch_cal.c/h` | Touch calibration NVS persistence |
-| `lcd_uext_ili9341/main/control.c/h` | Control task: command queue, dosing orchestration |
-| `lcd_uext_ili9341/main/dosing.c/h` | ESP-side dosing state machine (legacy, used with control task) |
+| `lcd_uext_ili9341/main/sys_sequence.c/h` | **Preferred** system-level inoculation state machine (FreeRTOS task, whiteboard process flow) |
+| `lcd_uext_ili9341/main/control.c/h` | Control task: command queue, legacy dosing orchestration |
+| `lcd_uext_ili9341/main/dosing.c/h` | ESP-side dosing state machine (**LEGACY** — see dosing.h; preferred path is sys_sequence.c) |
 | `lcd_uext_ili9341/main/flap.c/h` | Flap convenience functions (wraps motor_hal) |
 | `lcd_uext_ili9341/main/loadcell.c/h` | Load cell reading via pico_link RPC |
 | `lcd_uext_ili9341/main/recipes.c/h` | SPIFFS recipe storage (future) |
@@ -40,7 +41,8 @@ ESP-IDF FreeRTOS with the following tasks:
 |------|----------|-------|---------------|
 | LVGL port task | (managed by `esp_lvgl_port`) | — | Renders UI, handles touch input |
 | pico_link RX task | (managed by `pico_link`) | — | Reads UART bytes, decodes COBS frames, dispatches to callback |
-| control_task | 10 | 4096 | Polls command queue, ticks dosing state machine |
+| sys_seq | 5 | 4096 | **Preferred** system-level state machine (whiteboard process flow, FreeRTOS task) |
+| control_task | 10 | 4096 | Legacy: polls command queue, ticks ESP-side dosing state machine |
 | main (app_main) | — | — | Init only; enters idle loop (`vTaskDelay`) after setup |
 
 ---
@@ -73,9 +75,9 @@ ESP_ERROR_CHECK(pico_link_init(&link));
 
 | Message Type | Handler |
 |-------------|---------|
-| `MSG_MOTION_DONE` | `ui_ops_on_motion_done()` — update Operations screen status |
+| `MSG_MOTION_DONE` | `sys_sequence_notify_motion_done()` — notify sys_seq task; `ui_ops_on_motion_done()` — update Operations screen status |
 | `MSG_VACUUM_STATUS` | `ui_ops_on_vacuum_status()` — update vacuum status label |
-| `MSG_SPAWN_STATUS` | `ui_dosing_on_spawn_status()` — update Dosing screen |
+| `MSG_SPAWN_STATUS` | `sys_sequence_notify_spawn_status()` — notify sys_seq task (preferred path); `ui_dosing_on_spawn_status()` — update Dosing screen (legacy path) |
 | All others | `ui_screens_pico_rx_handler()` — weight display, generic status |
 
 ---
@@ -95,6 +97,8 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_hotwire_set(bool enable)` | `MSG_HOTWIRE_SET` | `pl_hotwire_set_t{enable}` |
 | `motor_vacuum_set(bool enable)` | `MSG_VACUUM_SET` | `pl_vacuum_set_t{enable}` |
 | `motor_vacuum2_set(bool enable)` | `MSG_VACUUM2_SET` | `pl_vacuum2_set_t{enable}` |
+| `motor_hotwire_traverse(bool cut)` | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t{direction}` |
+| `motor_indexer_move(uint8_t position)` | `MSG_INDEXER_MOVE` | `pl_indexer_move_t{position}` |
 | `motor_linact_start_monitor_dir(dir, speed, low, high, interval)` | `MSG_MOTOR_DRV8263_START_MON` | `pl_drv8263_start_mon_t` (legacy) |
 | `motor_linact_stop_monitor()` | `MSG_MOTOR_DRV8263_STOP_MON` | none (legacy) |
 
@@ -118,8 +122,9 @@ All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_se
 
 ```
 Home Screen
-├── Operations Screen   (direct actuator control)
-├── Dosing Screen       (spawn dispensing UI)
+├── Operations Screen   (direct actuator control — manual testing)
+├── Dosing Screen       (LEGACY manual spawn dispensing — see dosing.h)
+├── Sequence Screen     (NEW — sys_sequence.c whiteboard process flow)
 └── (Recipes — future, not specified here)
 ```
 

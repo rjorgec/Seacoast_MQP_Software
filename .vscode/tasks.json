@@ -1,0 +1,125 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PICO: Configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S",
+                "${workspaceFolder}/pico_fw/src",
+                "-B",
+                "${workspaceFolder}/pico_fw/src/build",
+                "-DPICO_BOARD=pico2"
+            ],
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "PICO: Build",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/pico_fw/src/build",
+                "--parallel"
+            ],
+            "dependsOn": "PICO: Configure",
+            "dependsOrder": "sequence",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "PICO: Flash (picotool)",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-lc",
+                "set -euo pipefail; UF2=$(ls \"${workspaceFolder}/pico_fw/src/build\"/*.uf2 | head -n1); \"${HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\" load \"$UF2\" -fx"
+            ],
+            "dependsOn": "PICO: Build",
+            "dependsOrder": "sequence",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "ESP: Build",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-lc",
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; PROJECT=\"${workspaceFolder}/lcd_uext_ili9341\"; if ! compgen -G \"${HOME}/.espressif/python_env/idf*_py*_env/bin/python\" > /dev/null; then \"$IDF_PATH/install.sh\"; fi; source \"$IDF_PATH/export.sh\"; if ! idf.py -C \"$PROJECT\" build; then idf.py -C \"$PROJECT\" fullclean; idf.py -C \"$PROJECT\" build; fi"
+            ],
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "ESP: Flash",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-lc",
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if ! compgen -G \"${HOME}/.espressif/python_env/idf*_py*_env/bin/python\" > /dev/null; then \"$IDF_PATH/install.sh\"; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash"
+            ],
+            "dependsOn": "ESP: Build",
+            "dependsOrder": "sequence",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "ESP: Monitor",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-lc",
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if ! compgen -G \"${HOME}/.espressif/python_env/idf*_py*_env/bin/python\" > /dev/null; then \"$IDF_PATH/install.sh\"; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" monitor"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "ESP: Flash + Monitor",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-lc",
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if ! compgen -G \"${HOME}/.espressif/python_env/idf*_py*_env/bin/python\" > /dev/null; then \"$IDF_PATH/install.sh\"; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash monitor"
+            ],
+            "dependsOn": "ESP: Build",
+            "dependsOrder": "sequence",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        }
+    ]
+}

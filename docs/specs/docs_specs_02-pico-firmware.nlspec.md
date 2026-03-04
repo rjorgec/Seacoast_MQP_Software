@@ -153,13 +153,21 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 - FAULT state requires re-home (`MSG_TURNTABLE_HOME`) before any GOTO is accepted
 - MOVING + MSG_TURNTABLE_HOME = cancel current job, begin re-home
 
-### 2.5 Hot Wire (DRV8263 Hotwire Instance)
+### 2.5 Hot Wire (DRV8263 Hotwire Instance — Independent Half-Bridge Mode)
 
-**Hardware:** DRV8263 on GP6 (IN1, PWM) / GP7 (IN2, GPIO out), current sense on GP26 (ADC ch0).
+**Hardware:** DRV8263 on GP6 (IN1, PWM) / GP7 (IN2, PWM), current sense on GP26 (ADC ch0, **unused — see below**).
 
-**Mode:** Constant current, forward direction only, fixed duty cycle `HOTWIRE_CURRENT_DUTY` (default: 4095). No auto-stop (high threshold set to 4095 = disabled).
+**Configuration: Independent H-bridge mode.** The DRV8263 is wired in independent half-bridge mode:
+- **IN1 (GP6, `HOTWIRE_PIN_IN1`)** — drives the nichrome hot wire. Current regulation handled by an external Rsense resistor and the DRV8263's internal regulation loop. No software current control needed.
+- **IN2 (GP7, `HOTWIRE_PIN_IN2`)** — drives vacuum pump 2 independently. Can run simultaneously with IN1.
 
-**MSG_VACUUM2_SET mutual exclusion:** The hotwire DRV8263's reverse channel (GP7/IN2) drives the second vacuum pump. `MSG_HOTWIRE_SET(enable=1)` and `MSG_VACUUM2_SET(enable=1)` are **mutually exclusive**. If the hotwire is ON and `MSG_VACUUM2_SET(enable=1)` is received, the Pico must NACK. If vacuum2 is ON and `MSG_HOTWIRE_SET(enable=1)` is received, the Pico must NACK. The disable commands (enable=0) are always accepted.
+**Key difference from H-bridge mode:** `drv8263_set_in1()` and `drv8263_set_in2()` are used instead of `drv8263_set_motor_control()`, so each half-bridge is controlled independently without clearing the other.
+
+**Constant on/off:** Full duty cycle (`HOTWIRE_ENABLE_DUTY = 4095`). No PWM ramping needed — current is set by Rsense.
+
+**ADC sense pin:** GP26 is initialized by the driver but readings are **not used for control** — current is hardware-regulated.
+
+**NOT mutually exclusive with vacuum2.** Both IN1 (hot wire) and IN2 (vacuum pump 2) can be active simultaneously.
 
 **No MSG_MOTION_DONE** is sent for the hot wire — it is a steady-state output.
 
@@ -175,11 +183,39 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 - Periodic status: send `MSG_VACUUM_STATUS` every `VACUUM_PERIODIC_STATUS_MS` (default: 5000 ms) while pump is on, and immediately on any OK ↔ BLOCKED transition.
 
 **Secondary vacuum pump (MSG_VACUUM2_SET):**
-- Uses the hotwire DRV8263 reverse channel (GP7 driven, GP6 held low).
+- Uses the hotwire DRV8263 independent half-bridge IN2 (GP7 driven via `drv8263_set_in2()`).
 - Simple on/off, no RPM monitoring.
-- Mutually exclusive with hotwire (see 2.5).
+- **Not mutually exclusive with hotwire (IN1).** Both can run simultaneously.
 
 **Vacuum States:** `OFF`, `ON_OK`, `ON_BLOCKED`
+
+### 2.8 Hot Wire Traverse Stepper (DRV8434S Device 4 — `STEPPER_DEV_HW_CARRIAGE`)
+
+**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_HW_CARRIAGE` in `uart_server.c`.
+
+**Hardware:** DRV8434S on SPI0 daisy-chain, device index 4 (when wired). Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
+
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward `HOTWIRE_TRAVERSE_STEPS` (default: 1000) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 2000 µs/step). This cuts the tip.
+
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse the same number of steps. This retracts the wire.
+
+**Activation:** To uncomment `STEPPER_DEV_HW_CARRIAGE` in `board_pins.h` and increment `DRV8434S_N_DEVICES` to include this device.
+
+### 2.9 Indexer / Bag Depth Rack (DRV8434S Device 5 — `STEPPER_DEV_INDEXER`)
+
+**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_INDEXER` in `uart_server.c`.
+
+**Hardware:** DRV8434S on SPI0 daisy-chain, device index 5 (when wired). Drives the bag depth/eject rack that centers the incoming substrate bag and pushes out the inoculated bag.
+
+**Position tracking:** `s_indexer_pos_steps` (int32_t). Updated on each move.
+
+| Position | Constant | Default Steps | Purpose |
+|----------|----------|--------------|---------|
+| `INDEXER_POS_OPEN` | — | 0 | Retracted; bag can slide in |
+| `INDEXER_POS_CENTER` | `INDEXER_STEPS_CENTER` | 3000 | Holds bag centered for weighing/opening |
+| `INDEXER_POS_EJECT` | `INDEXER_STEPS_EJECT` | 8000 | Fully extended; pushes inoculated bag out |
+
+**Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h` and increment `DRV8434S_N_DEVICES`.
 
 ### 2.7 Load Cell (HX711)
 
@@ -261,11 +297,10 @@ During RUNNING state, if flow rate drops but is not zero, the algorithm applies 
 The main polling loop must call the following on every iteration:
 
 ```c
-flap_sm_tick();        // polls DRV8263 monitoring_enabled flag, timeout
-arm_sm_tick();         // polls drv8434s_motion_is_busy(), timeout
-rack_sm_tick();        // polls drv8434s_motion_is_busy(), timeout
-turntable_sm_tick();   // polls drv8434s_motion_is_busy(), timeout
-vacuum_sm_tick();      // reads RPM counter every VACUUM_RPM_SAMPLE_INTERVAL_MS
+flap_sm_tick();                // polls DRV8263 monitoring_enabled flag, timeout
+vacuum_sm_tick();              // reads RPM counter every VACUUM_RPM_SAMPLE_INTERVAL_MS
+stepper_completion_tick();     // polls drv8434s_motion active flag for arm/rack/turntable, timeout
+stepper_spi_watchdog_tick();   // reads FAULT register ~2s while idle; logs/clears faults
 ```
 
 These functions are called from within `uart_server_poll()` (or directly in the main loop — implementation choice).
@@ -277,26 +312,29 @@ These functions are called from within `uart_server_poll()` (or directly in the 
 All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 
 | GPIO | Function | Peripheral | Constant |
-|------|----------|-----------|----------|
+|:----:|----------|:----------:|----------|
 | 0 | UART TX → ESP32 | UART0 | `PICO_UART_TX_GPIO` |
 | 1 | UART RX ← ESP32 | UART0 | `PICO_UART_RX_GPIO` |
 | 2 | DRV8434S SCK | SPI0 | `DRV8434S_SCK_GPIO` |
 | 3 | DRV8434S MOSI | SPI0 | `DRV8434S_MOSI_GPIO` |
 | 4 | DRV8434S MISO | SPI0 | `DRV8434S_MISO_GPIO` |
 | 5 | DRV8434S CS | SPI0 GPIO | `DRV8434S_CS_GPIO` |
-| 6 | Hotwire DRV8263 IN1 (PWM) | PWM3A | `HOTWIRE_PIN_IN1` |
-| 7 | Hotwire DRV8263 IN2 | GPIO out | `HOTWIRE_PIN_IN2` |
-| 10 | Vacuum trigger (output) | GPIO out | `VACUUM_TRIGGER_GPIO` |
-| 11 | Vacuum RPM sense (interrupt) | GPIO IRQ | `VACUUM_RPM_SENSE_GPIO` |
+| 6 | Flap 1 DRV8263 IN1 (PWM) | PWM3A | `DRV8263_CTRL_A_GPIO` |
+| 7 | Flap 1 DRV8263 IN2 (PWM) | PWM3B | `DRV8263_CTRL_B_GPIO` |
+| 8 | Flap 2 DRV8263 IN1 (PWM) | PWM4A | `FLAP2_CTRL_A_PIN` |
+| 9 | Flap 2 DRV8263 IN2 (PWM) | PWM4B | `FLAP2_CTRL_B_PIN` |
+| 10 | Hot wire IN1 — DRV8263 independent half-bridge (PWM) | PWM5A | `HOTWIRE_PIN_IN1` |
+| 11 | Vacuum pump 2 IN2 — DRV8263 independent half-bridge (PWM) | PWM5B | `HOTWIRE_PIN_IN2` |
+| 12 | Vacuum pump 1 trigger (output) | GPIO out | `VACUUM_TRIGGER_PIN` |
+| 13 | Vacuum pump 1 RPM sense (rising-edge interrupt) | GPIO IRQ | `VACUUM_RPM_SENSE_PIN` |
 | 14 | HX711 DATA | GPIO | `HX711_DATA_GPIO` |
 | 15 | HX711 CLK | GPIO | `HX711_CLK_GPIO` |
-| 20 | Flap DRV8263 IN1 (PWM) | PWM2A | `DRV8263_CTRL_A_GPIO` |
-| 21 | Flap DRV8263 IN2 (PWM) | PWM2B | `DRV8263_CTRL_B_GPIO` |
-| 26 | Hotwire sense ADC ch0 | ADC0 | `HOTWIRE_ADC_SENSE_PIN` |
-| 27 | Flap sense ADC ch1 | ADC1 | `DRV8263_SENSE_GPIO` |
+| 27 | Flap 2 current sense ADC ch1 | ADC1 | `FLAP2_ADC_SENSE_PIN` |
+| 28 | Flap 1 current sense ADC ch2 | ADC2 | `DRV8263_SENSE_GPIO` |
 
-**PWM conflict check:** GP6/GP7 = PWM slice 3, GP20/GP21 = PWM slice 2. No conflict.
-**ADC conflict check:** GP26 = ADC ch0, GP27 = ADC ch1. No conflict.
+**PWM slices:** GP6/7 = slice 3 (flap 1), GP8/9 = slice 4 (flap 2), GP10/11 = slice 5 (hot wire + vacuum 2). No conflicts.  
+**ADC channels:** GP27 = ADC ch1 (flap 2 sense), GP28 = ADC ch2 (flap 1 sense). No conflicts.  
+**Hot wire ADC (GP26, ADC ch0):** Not populated — current regulation is done by external Rsense on DRV8263.
 
 ---
 
@@ -307,7 +345,7 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 - [ ] Arm state machine implements all transitions in Section 2.2 table
 - [ ] Rack state machine implements all transitions including homing via stall
 - [ ] Turntable state machine enforces UNCALIBRATED → HOME before GOTO
-- [ ] Hot wire state machine enforces mutual exclusion with vacuum2
+- [ ] Hot wire uses DRV8263 independent half-bridge mode (drv8263_set_in1/in2); IN1 and IN2 can be active simultaneously
 - [ ] Vacuum state machine reports RPM status periodically and on transitions
 - [ ] All state machines send correct MSG_MOTION_DONE on terminal states
 
