@@ -43,7 +43,8 @@
 #endif
 
 #ifndef DRV8263_SENSE_GPIO
-#define DRV8263_SENSE_GPIO 28 // ADC-capable GPIO (commonly 26/27/28 on RP2040-style)
+#define DRV8263_SENSE_GPIO                                                     \
+  28 // ADC-capable GPIO (commonly 26/27/28 on RP2040-style)
 #endif
 
 // If you use RP2040-style ADC GPIO mapping, channel = gpio - 26.
@@ -99,32 +100,34 @@
 // PCB layout.  Set DRV8434S_CS_GPIO to -1 (and SPI pins to -1) to disable
 // the stepper subsystem at compile time.
 
+// ********PIN 3 cannot drive low!! Blown up!! Must use pin 10 instead********
+
 #ifndef DRV8434S_SPI_ID
-#define DRV8434S_SPI_ID 0 // 0 = spi0, 1 = spi1
+#define DRV8434S_SPI_ID 1 // 0 = spi0, 1 = spi1
 #endif
 
 #ifndef DRV8434S_SPI_BAUD
-#define DRV8434S_SPI_BAUD 10000000 // 10 MHz (device supports up to 10 MHz)
+#define DRV8434S_SPI_BAUD 1000000 // 1 MHz (device supports up to 10 MHz)
 #endif
 
 #ifndef DRV8434S_SCK_GPIO
-#define DRV8434S_SCK_GPIO 2
+#define DRV8434S_SCK_GPIO 10
 #endif
 
 #ifndef DRV8434S_MOSI_GPIO
-#define DRV8434S_MOSI_GPIO 3
+#define DRV8434S_MOSI_GPIO 11
 #endif
 
 #ifndef DRV8434S_MISO_GPIO
-#define DRV8434S_MISO_GPIO 4
+#define DRV8434S_MISO_GPIO 12
 #endif
 
 // Single shared chip-select for the entire daisy chain.
 #ifndef DRV8434S_CS_GPIO
-#define DRV8434S_CS_GPIO 5
+#define DRV8434S_CS_GPIO 13
 #endif
 
-// Number of DRV8434S devices wired in series.
+// Number of DRV8434S devices wired in series.B
 // 1 = single device (still uses the daisy-chain framing, which is valid).
 // Set to 0 to disable the stepper subsystem entirely.
 #ifndef DRV8434S_N_DEVICES
@@ -144,11 +147,14 @@
 // Turn these on once you're ready to require real pin selection.
 #ifdef REQUIRE_REAL_PINS
 #if (PICO_UART_TX_GPIO < 0) || (PICO_UART_RX_GPIO < 0)
-#error "Set PICO_UART_TX_GPIO and PICO_UART_RX_GPIO in board_pins.h (or via -D defines)."
+#error                                                                         \
+    "Set PICO_UART_TX_GPIO and PICO_UART_RX_GPIO in board_pins.h (or via -D defines)."
 #endif
 
-#if (DRV8263_CTRL_A_GPIO < 0) || (DRV8263_CTRL_B_GPIO < 0) || (DRV8263_SENSE_GPIO < 0)
-#error "Set DRV8263_CTRL_A_GPIO / DRV8263_CTRL_B_GPIO / DRV8263_SENSE_GPIO in board_pins.h."
+#if (DRV8263_CTRL_A_GPIO < 0) || (DRV8263_CTRL_B_GPIO < 0) ||                  \
+    (DRV8263_SENSE_GPIO < 0)
+#error                                                                         \
+    "Set DRV8263_CTRL_A_GPIO / DRV8263_CTRL_B_GPIO / DRV8263_SENSE_GPIO in board_pins.h."
 #endif
 
 #if (DRV8263_SENSE_ADC_CH < 0) || (DRV8263_SENSE_ADC_CH > 3)
@@ -238,7 +244,7 @@
 #define FLAP2_CTRL_B_PIN 9 /* GP9 */
 #endif
 #ifndef FLAP2_ADC_SENSE_PIN
-#define FLAP2_ADC_SENSE_PIN 27 /* GP28 — ADC channel 1 */
+#define FLAP2_ADC_SENSE_PIN 27 /* GP27 — ADC channel 1 */
 #endif
 #ifndef FLAP2_ADC_CHANNEL
 #define FLAP2_ADC_CHANNEL 1
@@ -259,25 +265,27 @@
 /* ================================================================== */
 
 #ifndef HOTWIRE_PIN_IN1
-#define HOTWIRE_PIN_IN1 10 /* GP10 -- PWM slice 5A, drives hot wire (IN1) */
+#define HOTWIRE_PIN_IN1 4 /* GP4 -- drives hot wire (IN1) */
 #endif
 #ifndef HOTWIRE_PIN_IN2
-#define HOTWIRE_PIN_IN2 11 /* GP11 -- PWM slice 5B, drives vacuum pump 2 (IN2) */
+#define HOTWIRE_PIN_IN2 5 /* GP5 -- drives vacuum pump 2 (IN2) */
 #endif
 
 /* ADC sense pin: unused in independent H-bridge mode.
  * Current regulation for the hot wire is set by an external Rsense resistor
  * and is handled internally by the DRV8263 — software does not monitor current.
- * The pin is initialised by drv8263_init() but readings are not used for control. */
+ * The pin is initialised by drv8263_init() but readings are not used for
+ * control. */
 #ifndef HOTWIRE_ADC_SENSE_PIN
-#define HOTWIRE_ADC_SENSE_PIN 26 /* GP26 -- ADC channel 0 (sense unused, see above) */
+#define HOTWIRE_ADC_SENSE_PIN                                                  \
+  26 /* GP26 -- ADC channel 0 (sense unused, see above) */
 #endif
 #ifndef HOTWIRE_ADC_CHANNEL
 #define HOTWIRE_ADC_CHANNEL 0
 #endif
 
-/* Full on (4095 = 12-bit max).  Current is set by external Rsense on the DRV8263;
- * no PWM duty cycle tuning is required in software. */
+/* Full on (4095 = 12-bit max).  Current is set by external Rsense on the
+ * DRV8263; no PWM duty cycle tuning is required in software. */
 #ifndef HOTWIRE_ENABLE_DUTY
 #define HOTWIRE_ENABLE_DUTY 4095
 #endif
@@ -290,10 +298,12 @@
 /* ================================================================== */
 
 #ifndef VACUUM_TRIGGER_PIN
-#define VACUUM_TRIGGER_PIN 12 /* GP12 -- digital output */
+#define VACUUM_TRIGGER_PIN 2 /* GP2 -- digital output */
 #endif
 #ifndef VACUUM_RPM_SENSE_PIN
-#define VACUUM_RPM_SENSE_PIN 13 /* GP13 -- rising-edge interrupt input */
+#define VACUUM_RPM_SENSE_PIN                                                   \
+  3 /* GP3 -- rising-edge interrupt input (let's hope input still works on     \
+       this pin) */
 #endif
 #ifndef VACUUM_PULSES_PER_REV
 #define VACUUM_PULSES_PER_REV 1 /* adjust to match pump sensor */
@@ -359,16 +369,21 @@
 #define SPAWN_SCALE_READ_SAMPLES 1u /* HX711 averaging samples per tick */
 #endif
 #ifndef SPAWN_FLOW_NOFLOW_UG
-#define SPAWN_FLOW_NOFLOW_UG 500000u /* min mass/window to count as flowing (µg) */
+#define SPAWN_FLOW_NOFLOW_UG                                                   \
+  500000u /* min mass/window to count as flowing (µg) */
 #endif
 #ifndef SPAWN_FLOW_MIN_UG
-#define SPAWN_FLOW_MIN_UG 1000000u /* low-end flow target at end of dose (µg/window) */
+#define SPAWN_FLOW_MIN_UG                                                      \
+  1000000u /* low-end flow target at end of dose (µg/window) */
 #endif
 #ifndef SPAWN_FLOW_MAX_UG
-#define SPAWN_FLOW_MAX_UG 5000000u /* high-end flow target at start of dose (µg/window) */
+#define SPAWN_FLOW_MAX_UG                                                      \
+  5000000u /* high-end flow target at start of dose (µg/window) */
 #endif
 #ifndef SPAWN_MAX_RETRIES
-#define SPAWN_MAX_RETRIES 100 /* agitation retries before declaring bag empty */
+#define SPAWN_MAX_RETRIES                                                      \
+  100 /* agitation retries before declaring bag empty                          \
+       */
 #endif
 #ifndef SPAWN_AGITATE_MS
 #define SPAWN_AGITATE_MS 2000 /* duration of agitation hold-off (ms) */
@@ -389,7 +404,8 @@
 #define SPAWN_PROP_LOWER 10u /* below target/LOWER → use min flow rate */
 #endif
 #ifndef SPAWN_STARTUP_FLOW_DETECT_UG
-#define SPAWN_STARTUP_FLOW_DETECT_UG 1000000u /* min mass change during startup open */
+#define SPAWN_STARTUP_FLOW_DETECT_UG                                           \
+  1000000u /* min mass change during startup open */
 #endif
 
 /* ================================================================== */
@@ -397,7 +413,8 @@
 /* ================================================================== */
 
 #ifndef SPAWN_MAX_AGITATE_RETRIES
-#define SPAWN_MAX_AGITATE_RETRIES 5 /* max agitation attempts before SPAWN_STATUS_BAG_EMPTY */
+#define SPAWN_MAX_AGITATE_RETRIES                                              \
+  5 /* max agitation attempts before SPAWN_STATUS_BAG_EMPTY */
 #endif
 #ifndef AGITATOR_KNEAD_STEPS
 #define AGITATOR_KNEAD_STEPS 200 /* steps per agitation knead cycle */
@@ -422,8 +439,10 @@
 /* ================================================================== */
 
 #ifndef INDEXER_STEPS_CENTER
-#define INDEXER_STEPS_CENTER 3000 /* steps from home to bag-centering position */
+#define INDEXER_STEPS_CENTER                                                   \
+  3000 /* steps from home to bag-centering position */
 #endif
 #ifndef INDEXER_STEPS_EJECT
-#define INDEXER_STEPS_EJECT 8000 /* steps from home to full bag-eject position */
+#define INDEXER_STEPS_EJECT                                                    \
+  8000 /* steps from home to full bag-eject position */
 #endif

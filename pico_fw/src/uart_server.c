@@ -698,7 +698,10 @@ static void stepper_cs(void *ctx, bool asserted)
 static void stepper_delay_us(void *ctx, unsigned us)
 {
     (void)ctx;
-    sleep_us(us);
+    /* busy_wait_us_32, NOT sleep_us — this callback is invoked from the
+     * repeating-timer alarm IRQ context.  sleep_us calls __wfe() internally
+     * which deadlocks when called from the same alarm IRQ it relies on. */
+    busy_wait_us_32(us);
 }
 
 static void stepper_delay_ms(void *ctx, unsigned ms)
