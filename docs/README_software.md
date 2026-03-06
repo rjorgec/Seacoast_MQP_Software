@@ -83,18 +83,18 @@ All Pico pin assignments are in [`pico_fw/src/board_pins.h`](../pico_fw/src/boar
 |:----:|-------------------------------------------------------------|:----------:|-------------------------|
 | 0    | UART0 TX → ESP32                                            | UART0      | `PICO_UART_TX_GPIO`     |
 | 1    | UART0 RX ← ESP32                                            | UART0      | `PICO_UART_RX_GPIO`     |
-| 2    | DRV8434S SCK (SPI0)                                         | SPI0       | `DRV8434S_SCK_GPIO`     |
-| 3    | DRV8434S MOSI (SPI0)                                        | SPI0       | `DRV8434S_MOSI_GPIO`    |
-| 4    | DRV8434S MISO (SPI0)                                        | SPI0       | `DRV8434S_MISO_GPIO`    |
-| 5    | DRV8434S CS (SPI0)                                          | SPI0 GPIO  | `DRV8434S_CS_GPIO`      |
+| 10    | DRV8434S SCK (SPI1)                                         | SPI1       | `DRV8434S_SCK_GPIO`     |
+| 11    | DRV8434S MOSI (SPI1)                                        | SPI1       | `DRV8434S_MOSI_GPIO`    |
+| 12    | DRV8434S MISO (SPI1)                                        | SPI1       | `DRV8434S_MISO_GPIO`    |
+| 13    | DRV8434S CS (SPI1)                                          | SPI1 GPIO  | `DRV8434S_CS_GPIO`      |
 | 6    | Flap 1 DRV8263 IN1 (PWM)                                    | PWM3A      | `DRV8263_CTRL_A_GPIO`   |
 | 7    | Flap 1 DRV8263 IN2 (PWM)                                    | PWM3B      | `DRV8263_CTRL_B_GPIO`   |
 | 8    | Flap 2 DRV8263 IN1 (PWM)                                    | PWM4A      | `FLAP2_CTRL_A_PIN`      |
 | 9    | Flap 2 DRV8263 IN2 (PWM)                                    | PWM4B      | `FLAP2_CTRL_B_PIN`      |
-| 10   | Hot wire IN1 — DRV8263 independent half-bridge (PWM)        | PWM5A      | `HOTWIRE_PIN_IN1`       |
-| 11   | Vacuum pump 2 IN2 — DRV8263 independent half-bridge (PWM)   | PWM5B      | `HOTWIRE_PIN_IN2`       |
-| 12   | Vacuum pump 1 trigger (output)                              | GPIO out   | `VACUUM_TRIGGER_PIN`    |
-| 13   | Vacuum pump 1 RPM sense (rising-edge interrupt)             | GPIO irq   | `VACUUM_RPM_SENSE_PIN`  |
+| 4   | Hot wire IN1 — DRV8263 independent half-bridge (PWM)        | GPIO out      | `HOTWIRE_PIN_IN1`       |
+| 5   | Vacuum pump 2 IN2 — DRV8263 independent half-bridge (PWM)   | GPIO out      | `HOTWIRE_PIN_IN2`       |
+| 2   | Vacuum pump 1 trigger (output)                              | GPIO out   | `VACUUM_TRIGGER_PIN`    |
+| 3   | Vacuum pump 1 RPM sense (rising-edge interrupt)             | GPIO irq   | `VACUUM_RPM_SENSE_PIN`  |
 | 14   | HX711 DATA                                                  | GPIO       | `HX711_DATA_GPIO`       |
 | 15   | HX711 CLK                                                   | GPIO       | `HX711_CLK_GPIO`        |
 | 27   | Flap 2 current sense ADC ch1                                | ADC1       | `FLAP2_ADC_SENSE_PIN`   |
@@ -108,7 +108,7 @@ All Pico pin assignments are in [`pico_fw/src/board_pins.h`](../pico_fw/src/boar
 
 ## DRV8434S Device Index Table
 
-The DRV8434S stepper controllers are daisy-chained on SPI0.  
+The DRV8434S stepper controllers are daisy-chained on SPI1.  
 `DRV8434S_N_DEVICES` in `board_pins.h` must match the number of physically wired devices.
 
 | Index | Constant                  | Subsystem                    | Status            |

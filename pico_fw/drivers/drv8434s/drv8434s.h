@@ -87,15 +87,15 @@ extern "C"
 
     // ── CTRL1 register (0x03) bit masks ─────────────────────────────────────
 
-#define DRV8434S_CTRL1_TRQ_DAC_MASK 0x78 // Bits [6:3]
-#define DRV8434S_CTRL1_TRQ_DAC_SHIFT 3
+#define DRV8434S_CTRL1_TRQ_DAC_MASK 0xF0 // Bits [7:4] (datasheet Table 7-22)
+#define DRV8434S_CTRL1_TRQ_DAC_SHIFT 4
 #define DRV8434S_CTRL1_OL_MODE (1u << 1) // Open-load mode select
 
     // ── CTRL2 register (0x04) bit masks ─────────────────────────────────────
 
 #define DRV8434S_CTRL2_EN_OUT (1u << 7) // 1 = outputs enabled
-#define DRV8434S_CTRL2_TOFF_MASK 0x30   // Bits [5:4] PWM off-time
-#define DRV8434S_CTRL2_TOFF_SHIFT 4
+#define DRV8434S_CTRL2_TOFF_MASK 0x18   // Bits [4:3] PWM off-time (datasheet Table 7-23)
+#define DRV8434S_CTRL2_TOFF_SHIFT 3
 #define DRV8434S_CTRL2_DECAY_MASK 0x07 // Bits [2:0] decay mode
 #define DRV8434S_CTRL2_DECAY_SHIFT 0
 
@@ -148,18 +148,21 @@ extern "C"
 
     // ── Microstep mode enumeration ──────────────────────────────────────────
 
+    // Datasheet Table 7-24: MICROSTEP_MODE[3:0] in CTRL3 bits [3:0]
     typedef enum
     {
-        DRV8434S_STEP_FULL = 0,  // 100% current, full step
-        DRV8434S_STEP_1_2 = 1,   // 1/2  step (non-circular)
-        DRV8434S_STEP_1_4 = 2,   // 1/4  step
-        DRV8434S_STEP_1_8 = 3,   // 1/8  step
-        DRV8434S_STEP_1_16 = 4,  // 1/16 step
-        DRV8434S_STEP_1_32 = 5,  // 1/32 step
-        DRV8434S_STEP_1_64 = 6,  // 1/64 step
-        DRV8434S_STEP_1_128 = 7, // 1/128 step
-        DRV8434S_STEP_1_256 = 8, // 1/256 step
-        DRV8434S_STEP_1_2_NC = 9 // 1/2 step (non-circular, alt)
+        DRV8434S_STEP_FULL_100 = 0, // 0000 = Full step (2-phase), 100% current
+        DRV8434S_STEP_FULL_71 = 1,  // 0001 = Full step (2-phase), 71% current
+        DRV8434S_STEP_1_2_NC = 2,   // 0010 = Non-circular 1/2 step
+        DRV8434S_STEP_1_2 = 3,      // 0011 = 1/2 step
+        DRV8434S_STEP_1_4 = 4,      // 0100 = 1/4 step
+        DRV8434S_STEP_1_8 = 5,      // 0101 = 1/8 step
+        DRV8434S_STEP_1_16 = 6,     // 0110 = 1/16 step (default)
+        DRV8434S_STEP_1_32 = 7,     // 0111 = 1/32 step
+        DRV8434S_STEP_1_64 = 8,     // 1000 = 1/64 step
+        DRV8434S_STEP_1_128 = 9,    // 1001 = 1/128 step
+        DRV8434S_STEP_1_256 = 10,   // 1010 = 1/256 step
+        // 1011–1111 = Reserved
     } drv8434s_microstep_t;
 
     // ── Decay mode enumeration (CTRL2 bits [2:0]) ──────────────────────────
@@ -421,7 +424,8 @@ extern "C"
 
     // Header byte bit patterns.
 #define DRV8434S_CHAIN_HDR_PREFIX 0x80u // bits[7:6] = "10"
-#define DRV8434S_CHAIN_HDR_N_MASK 0x3Fu // bits[5:0] = device count (in HDR1)
+#define DRV8434S_CHAIN_HDR_N_MASK 0x3Fu // HDR1 bits[5:0] = device count
+#define DRV8434S_CHAIN_HDR2_CLR 0x20u   // HDR2 bit 5 = global fault clear on nSCS↑
 
     // Status byte bit patterns.
 #define DRV8434S_CHAIN_STAT_PREFIX 0xC0u // bits[7:6] = "11"
@@ -461,6 +465,16 @@ extern "C"
     // or n_devices is out of range (0 or > DRV8434S_CHAIN_MAX_DEVICES).
     bool drv8434s_chain_init(drv8434s_chain_t *chain,
                              const drv8434s_chain_config_t *cfg);
+
+    // Send a chain frame with the HDR2 global-CLR bit set (bit 5 = 1).
+    // All devices in the chain clear their fault registers on the rising
+    // edge of nSCS at the end of this frame (datasheet Fig 7-27, HDR2 CLR).
+    // This is the fastest recovery from SPI_ERROR faults caused by VM
+    // power-on transients, because it does NOT require a register read-
+    // modify-write and works even when the SPI state machine is out of
+    // sync.  All devices receive a NOP (read FAULT) alongside the CLR.
+    // Returns false only on SPI transfer failure.
+    bool drv8434s_chain_global_clear_faults(drv8434s_chain_t *chain);
 
     // ── Per-device register access (targeted – all others receive NOP) ───────
     //

@@ -244,7 +244,7 @@ bool drv8434s_disable(drv8434s_t *dev)
 
 bool drv8434s_set_microstep(drv8434s_t *dev, drv8434s_microstep_t mode)
 {
-    if ((uint8_t)mode > 9)
+    if ((uint8_t)mode > 10)
         return false;
     // MICROSTEP_MODE is CTRL3 bits [3:0]
     return drv8434s_modify_reg(dev, DRV8434S_REG_CTRL3,
@@ -659,6 +659,34 @@ bool drv8434s_chain_init(drv8434s_chain_t *chain,
     memset(chain, 0, sizeof(*chain));
     chain->cfg = *cfg;
     return true;
+}
+
+bool drv8434s_chain_global_clear_faults(drv8434s_chain_t *chain)
+{
+    if (!chain)
+        return false;
+
+    uint8_t N = chain->cfg.n_devices;
+    uint8_t tx[DRV8434S_CHAIN_MAX_FRAME] = {0};
+    uint8_t rx[DRV8434S_CHAIN_MAX_FRAME] = {0};
+
+    // All devices receive a NOP (read FAULT); the CLR bit in HDR2 does
+    // the actual work on the rising edge of nSCS.
+    uint8_t addr_bytes[DRV8434S_CHAIN_MAX_DEVICES];
+    uint8_t data_bytes[DRV8434S_CHAIN_MAX_DEVICES];
+    for (uint8_t k = 0; k < N; ++k)
+    {
+        addr_bytes[k] = CHAIN_NOP_ADDR;
+        data_bytes[k] = CHAIN_NOP_DATA;
+    }
+
+    // Build the frame with CLR=1 in HDR2 (bit 5).
+    chain_fill_tx(chain, addr_bytes, data_bytes, tx);
+    tx[1] |= DRV8434S_CHAIN_HDR2_CLR; // set the global clear bit
+
+    return (chain_xfer(chain, tx, rx) == 0);
+    // On the rising edge of nSCS that chain_xfer produces, all devices
+    // clear their fault registers regardless of current fault state.
 }
 
 bool drv8434s_chain_write_reg(drv8434s_chain_t *chain,

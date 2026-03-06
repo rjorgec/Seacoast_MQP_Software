@@ -83,7 +83,7 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 ### 2.2 Arm Stepper (DRV8434S Device 0)
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 0.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 0.
 
 **Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Starts at 0 after boot (assumed home).
 
@@ -176,8 +176,8 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 ### 2.6 Vacuum Pumps
 
 **Primary vacuum pump:**
-- Trigger: GPIO output (`VACUUM_TRIGGER_GPIO`, default: GP10). HIGH = on, LOW = off.
-- RPM sense: GPIO input (`VACUUM_RPM_SENSE_GPIO`, default: GP11), rising-edge interrupt.
+- Trigger: GPIO output (`VACUUM_TRIGGER_GPIO`, default: GP2). HIGH = on, LOW = off.
+- RPM sense: GPIO input (`VACUUM_RPM_SENSE_GPIO`, default: GP3), rising-edge interrupt.
 - RPM calculation: count rising edges over `VACUUM_RPM_SAMPLE_INTERVAL_MS` (default: 100 ms), convert using `VACUUM_PULSES_PER_REV` (default: 2).
 - Blocked detection: if RPM < `VACUUM_RPM_BLOCKED_THRESHOLD` (default: 400) while pump is ON, report `VACUUM_BLOCKED`.
 - Periodic status: send `MSG_VACUUM_STATUS` every `VACUUM_PERIODIC_STATUS_MS` (default: 5000 ms) while pump is on, and immediately on any OK ↔ BLOCKED transition.
@@ -315,18 +315,18 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 |:----:|----------|:----------:|----------|
 | 0 | UART TX → ESP32 | UART0 | `PICO_UART_TX_GPIO` |
 | 1 | UART RX ← ESP32 | UART0 | `PICO_UART_RX_GPIO` |
-| 2 | DRV8434S SCK | SPI0 | `DRV8434S_SCK_GPIO` |
-| 3 | DRV8434S MOSI | SPI0 | `DRV8434S_MOSI_GPIO` |
-| 4 | DRV8434S MISO | SPI0 | `DRV8434S_MISO_GPIO` |
-| 5 | DRV8434S CS | SPI0 GPIO | `DRV8434S_CS_GPIO` |
+| 10 | DRV8434S SCK | SPI1 | `DRV8434S_SCK_GPIO` |
+| 11 | DRV8434S MOSI | SPI1 | `DRV8434S_MOSI_GPIO` |
+| 12 | DRV8434S MISO | SPI1 | `DRV8434S_MISO_GPIO` |
+| 13 | DRV8434S CS | SPI1 GPIO | `DRV8434S_CS_GPIO` |
 | 6 | Flap 1 DRV8263 IN1 (PWM) | PWM3A | `DRV8263_CTRL_A_GPIO` |
 | 7 | Flap 1 DRV8263 IN2 (PWM) | PWM3B | `DRV8263_CTRL_B_GPIO` |
 | 8 | Flap 2 DRV8263 IN1 (PWM) | PWM4A | `FLAP2_CTRL_A_PIN` |
 | 9 | Flap 2 DRV8263 IN2 (PWM) | PWM4B | `FLAP2_CTRL_B_PIN` |
-| 10 | Hot wire IN1 — DRV8263 independent half-bridge (PWM) | PWM5A | `HOTWIRE_PIN_IN1` |
-| 11 | Vacuum pump 2 IN2 — DRV8263 independent half-bridge (PWM) | PWM5B | `HOTWIRE_PIN_IN2` |
-| 12 | Vacuum pump 1 trigger (output) | GPIO out | `VACUUM_TRIGGER_PIN` |
-| 13 | Vacuum pump 1 RPM sense (rising-edge interrupt) | GPIO IRQ | `VACUUM_RPM_SENSE_PIN` |
+| 4 | Hot wire IN1 — DRV8263 independent half-bridge (PWM) | GPIO out | `HOTWIRE_PIN_IN1` |
+| 5 | Vacuum pump 2 IN2 — DRV8263 independent half-bridge (PWM) | GPIO out | `HOTWIRE_PIN_IN2` |
+| 2 | Vacuum pump 1 trigger (output) | GPIO out | `VACUUM_TRIGGER_PIN` |
+| 3 | Vacuum pump 1 RPM sense (rising-edge interrupt) | GPIO IRQ | `VACUUM_RPM_SENSE_PIN` |
 | 14 | HX711 DATA | GPIO | `HX711_DATA_GPIO` |
 | 15 | HX711 CLK | GPIO | `HX711_CLK_GPIO` |
 | 27 | Flap 2 current sense ADC ch1 | ADC1 | `FLAP2_ADC_SENSE_PIN` |
