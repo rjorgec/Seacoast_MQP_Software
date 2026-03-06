@@ -11,6 +11,7 @@
 #include "esp_lvgl_port.h"
 
 #include "control.h"
+#include "sys_sequence.h"
 #include "ui_screens.h"
 
 #include "motor_hal.h"
@@ -23,12 +24,32 @@
 
 static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t len)
 {
+    sys_state_t seq_state = sys_sequence_get_state();
+
     switch (type)
     {
     case MSG_MOTION_DONE:
         if (len >= sizeof(pl_motion_done_t))
         {
-            ui_ops_on_motion_done((const pl_motion_done_t *)pl);
+            const pl_motion_done_t *motion = (const pl_motion_done_t *)pl;
+            ui_ops_on_motion_done(motion);
+
+            switch (seq_state)
+            {
+            case SYS_SETUP_LOAD:
+            case SYS_CUTTING_TIP:
+            case SYS_ROTATING_TO_ACCEPT:
+            case SYS_INTAKE_WEIGHING:
+            case SYS_OPENING_BAG:
+            case SYS_POST_DOSE:
+            case SYS_EJECTING:
+            case SYS_ROTATING_TO_INTAKE:
+            case SYS_CONTINUE_RESTART:
+                sys_sequence_notify_motion_done(motion->subsystem, motion->result);
+                break;
+            default:
+                break;
+            }
         }
         break;
     case MSG_VACUUM_STATUS:
@@ -40,7 +61,12 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
     case MSG_SPAWN_STATUS:
         if (len >= sizeof(pl_spawn_status_t))
         {
-            ui_dosing_on_spawn_status((const pl_spawn_status_t *)pl);
+            const pl_spawn_status_t *spawn = (const pl_spawn_status_t *)pl;
+            ui_dosing_on_spawn_status(spawn);
+            if (seq_state == SYS_INOCULATING)
+            {
+                sys_sequence_notify_spawn_status(spawn->status);
+            }
         }
         break;
     default:
@@ -75,6 +101,7 @@ void app_main(void)
     ui_init(&disp);
 
     ESP_ERROR_CHECK(control_start()); // ONLY ONCE
+    ESP_ERROR_CHECK(sys_sequence_init());
 
     ESP_ERROR_CHECK(touch_ns2009_init(&g_touch, 6, 7, 100000, 0x48, 320, 240));
 

@@ -37,5 +37,7 @@
     "raspberry-pi-pico.useCmakeTools": true,
     "raspberry-pi-pico.cmakePath": "${HOME}/.pico-sdk/cmake/v3.31.5/bin/cmake",
     "raspberry-pi-pico.ninjaPath": "${HOME}/.pico-sdk/ninja/v1.12.1/ninja",
-    "cmake.sourceDirectory": "/home/daniel/GitHub/Seacoast_MQP_Software/pico_fw/src"
+    "cmake.sourceDirectory": "/home/daniel/GitHub/Seacoast_MQP_Software/pico_fw/src",
+    "cmake.defaultBuildTarget": "UART_TEST",
+    "cmake.launchTargetTitle": "UART_TEST"
 }

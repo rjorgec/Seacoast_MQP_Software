@@ -380,6 +380,10 @@ static void spawn_stop_timer(void)
     s_spawn.timer.delay_us = 0;
 }
 
+/* Forward declaration — ensure_step_timer_running is defined after the
+ * DRV8434S callback section but called from dispense_spawn_callback. */
+static bool ensure_step_timer_running(void);
+
 static bool dispense_spawn_callback(struct repeating_timer *t)
 {
     (void)t;
@@ -547,14 +551,17 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
 #ifdef STEPPER_DEV_AGITATOR
             if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
             {
-                drv8434s_motion_job_t agit_job = {0};
-                agit_job.dev_idx = (uint8_t)STEPPER_DEV_AGITATOR;
-                agit_job.steps = (uint32_t)AGITATOR_KNEAD_STEPS;
-                agit_job.reverse = false;
-                agit_job.step_delay_us = (uint32_t)AGITATOR_STEP_DELAY_US;
-                (void)drv8434s_motion_start(&s_motion, &agit_job);
-                printf("Agitator: started knead motion (%u steps)\n",
-                       (unsigned)AGITATOR_KNEAD_STEPS);
+                if (drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_AGITATOR,
+                                         (int32_t)AGITATOR_KNEAD_STEPS, 0u))
+                {
+                    (void)ensure_step_timer_running();
+                    printf("Agitator: started knead motion (%u steps)\n",
+                           (unsigned)AGITATOR_KNEAD_STEPS);
+                }
+                else
+                {
+                    printf("Agitator: failed to start motion\n");
+                }
             }
             else
             {
@@ -994,10 +1001,10 @@ static void stepper_completion_tick(void)
 {
     uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-    /* ── ARM — device 0 ─────────────────────────────────────── */
+    /* ── ARM — device STEPPER_DEV_ROT_ARM ───────────────────── */
     if (s_arm_pending.pending)
     {
-        bool job_done = !s_motion.jobs[0].active;
+        bool job_done = !s_motion.jobs[STEPPER_DEV_ROT_ARM].active;
         bool timeout = (now_ms - s_arm_pending.start_ms) >= s_arm_pending.timeout_ms;
 
         if (job_done || timeout)
@@ -1007,12 +1014,12 @@ static void stepper_completion_tick(void)
             if (timeout && !job_done)
             {
                 /* Still running but deadline exceeded — cancel it. */
-                drv8434s_motion_cancel(&s_motion, 0u, NULL);
+                drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_ROT_ARM, NULL);
                 result = MOTION_TIMEOUT;
             }
             else
             {
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[0].reason;
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_ROT_ARM].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
@@ -1041,10 +1048,11 @@ static void stepper_completion_tick(void)
         }
     }
 
-    /* ── RACK — device 1 ─────────────────────────────────────── */
+#ifdef STEPPER_DEV_LIN_ARM
+    /* ── RACK (linear arm) — device STEPPER_DEV_LIN_ARM ────────── */
     if (s_rack_pending.pending)
     {
-        bool job_done = !s_motion.jobs[1].active;
+        bool job_done = !s_motion.jobs[STEPPER_DEV_LIN_ARM].active;
         bool timeout = (now_ms - s_rack_pending.start_ms) >= s_rack_pending.timeout_ms;
 
         if (job_done || timeout)
@@ -1053,12 +1061,12 @@ static void stepper_completion_tick(void)
 
             if (timeout && !job_done)
             {
-                drv8434s_motion_cancel(&s_motion, 1u, NULL);
+                drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_LIN_ARM, NULL);
                 result = MOTION_TIMEOUT;
             }
             else
             {
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[1].reason;
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_LIN_ARM].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
@@ -1086,11 +1094,12 @@ static void stepper_completion_tick(void)
                    (unsigned)result, (long)s_rack_pos_steps);
         }
     }
+#endif /* STEPPER_DEV_LIN_ARM */
 
-    /* ── TURNTABLE — device 2 ────────────────────────────────── */
+    /* ── TURNTABLE — device STEPPER_DEV_TURNTABLE ───────────── */
     if (s_turntable_pending.pending)
     {
-        bool job_done = !s_motion.jobs[2].active;
+        bool job_done = !s_motion.jobs[STEPPER_DEV_TURNTABLE].active;
         bool timeout = (now_ms - s_turntable_pending.start_ms) >= s_turntable_pending.timeout_ms;
 
         if (job_done || timeout)
@@ -1099,12 +1108,12 @@ static void stepper_completion_tick(void)
 
             if (timeout && !job_done)
             {
-                drv8434s_motion_cancel(&s_motion, 2u, NULL);
+                drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE, NULL);
                 result = MOTION_TIMEOUT;
             }
             else
             {
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[2].reason;
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_TURNTABLE].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
@@ -1518,18 +1527,16 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
                                  uint16_t seq)
 {
     int32_t current_steps;
-    switch (dev_idx)
+    if (dev_idx == (uint8_t)STEPPER_DEV_ROT_ARM)
     {
-    case 0u:
         current_steps = s_arm_pos_steps;
-        break;
-    case 1u:
-        current_steps = s_rack_pos_steps;
-        break;
-    case 2u:
+    }
+    else if (dev_idx == (uint8_t)STEPPER_DEV_TURNTABLE)
+    {
         current_steps = s_turntable_pos_steps;
-        break;
-    default:
+    }
+    else
+    {
         send_nack(seq, NACK_UNKNOWN);
         return false;
     }
@@ -1612,7 +1619,7 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     printf("Arm move → %li steps\n", (long)target);
-    (void)start_stepper_motion(0u, target, &s_arm_pending,
+    (void)start_stepper_motion((uint8_t)STEPPER_DEV_ROT_ARM, target, &s_arm_pending,
                                SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq);
 }
 
@@ -1653,9 +1660,18 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
         return;
     }
 
+#ifdef STEPPER_DEV_LIN_ARM
     printf("Rack move → %li steps\n", (long)target);
-    (void)start_stepper_motion(1u, target, &s_rack_pending,
+    (void)start_stepper_motion((uint8_t)STEPPER_DEV_LIN_ARM, target, &s_rack_pending,
                                SUBSYS_RACK, (uint32_t)RACK_MOTION_TIMEOUT_MS, seq);
+#else
+    /* No linear arm / rack device in the current chain configuration.
+     * Define STEPPER_DEV_LIN_ARM in board_pins.h and bump DRV8434S_N_DEVICES
+     * when the linear arm stepper is wired. */
+    printf("Rack Move: STEPPER_DEV_LIN_ARM not defined (device not wired)\n");
+    send_nack(seq, NACK_UNKNOWN);
+    (void)target;
+#endif
 }
 
 /**
@@ -1707,7 +1723,7 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     printf("Turntable GOTO → %li steps\n", (long)target);
-    (void)start_stepper_motion(2u, target, &s_turntable_pending,
+    (void)start_stepper_motion((uint8_t)STEPPER_DEV_TURNTABLE, target, &s_turntable_pending,
                                SUBSYS_TURNTABLE,
                                (uint32_t)TURNTABLE_MOTION_TIMEOUT_MS, seq);
 }
@@ -1720,9 +1736,9 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
 static void handle_turntable_home(uint16_t seq)
 {
     /* Cancel any in-progress turntable motion. */
-    if (s_motion.jobs[2].active)
+    if (s_motion.jobs[STEPPER_DEV_TURNTABLE].active)
     {
-        drv8434s_motion_cancel(&s_motion, 2u, NULL);
+        drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE, NULL);
         s_turntable_pending.pending = false;
     }
 
@@ -1884,21 +1900,17 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
 
-    drv8434s_motion_job_t job = {0};
-    job.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
-    job.steps = (uint32_t)((steps < 0) ? -steps : steps);
-    job.reverse = (steps < 0);
-    job.step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
-
-    if (!drv8434s_motion_start(&s_motion, &job))
+    if (!drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                               steps, 0u))
     {
         printf("Hotwire Traverse: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    printf("Hotwire Traverse: dir=%u steps=%u\n",
-           (unsigned)p->direction, (unsigned)job.steps);
+    (void)ensure_step_timer_running();
+    printf("Hotwire Traverse: dir=%u steps=%li\n",
+           (unsigned)p->direction, (long)steps);
     send_ack(seq);
     /* Note: MOTION_DONE for STEPPER_DEV_HW_CARRIAGE is not yet wired to
      * stepper_completion_tick — add a pending tracker when the device is
@@ -1957,34 +1969,30 @@ static void handle_indexer_move(uint16_t seq, const uint8_t *payload, uint16_t l
 
     int32_t delta = target_steps - s_indexer_pos_steps;
 
-    drv8434s_motion_job_t job = {0};
-    job.dev_idx = (uint8_t)STEPPER_DEV_INDEXER;
-    job.steps = (uint32_t)((delta < 0) ? -delta : delta);
-    job.reverse = (delta < 0);
-    job.step_delay_us = (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US;
-
-    if (job.steps == 0u)
+    if (delta == 0)
     {
         /* Already at target — send immediate MOTION_DONE. */
         printf("Indexer Move: already at position %u (no-op)\n", (unsigned)p->position);
         send_ack(seq);
-        send_motion_done(SUBSYS_INDEXER, MOTION_OK, 0);
+        send_motion_done(SUBSYS_INDEXER, MOTION_OK, s_indexer_pos_steps);
         return;
     }
 
-    if (!drv8434s_motion_start(&s_motion, &job))
+    if (!drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_INDEXER,
+                               delta, 0u))
     {
         printf("Indexer Move: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
+    (void)ensure_step_timer_running();
     s_indexer_pos_steps = target_steps;
-    printf("Indexer Move: pos=%u steps=%u %s\n",
-           (unsigned)p->position, (unsigned)job.steps,
-           job.reverse ? "REV" : "FWD");
+    printf("Indexer Move: pos=%u delta=%li %s\n",
+           (unsigned)p->position, (long)delta,
+           (delta < 0) ? "REV" : "FWD");
     send_ack(seq);
-    send_motion_done(SUBSYS_INDEXER, MOTION_OK, (int32_t)job.steps);
+    send_motion_done(SUBSYS_INDEXER, MOTION_OK, s_indexer_pos_steps);
 #endif
 }
 

@@ -81,11 +81,11 @@
 // - HX711_DATA_GPIO: Data pin
 
 #ifndef HX711_CLK_GPIO
-#define HX711_CLK_GPIO 15
+#define HX711_CLK_GPIO 14
 #endif
 
 #ifndef HX711_DATA_GPIO
-#define HX711_DATA_GPIO 14
+#define HX711_DATA_GPIO 15
 #endif
 
 #ifndef HX711_DEFAULT_RATE_US
@@ -171,10 +171,10 @@
 #define ARM_STEPS_PRESS 500 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1 1000 /* absolute position 1 */
+#define ARM_STEPS_POS1 2000 /* absolute position 1 */
 #endif
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2 1500 /* absolute position 2 */
+#define ARM_STEPS_POS2 5000 /* absolute position 2 */
 #endif
 #ifndef ARM_PRESS_STALL_WINDOW_STEPS
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
@@ -199,13 +199,13 @@
 #define TURNTABLE_STEPS_A 0
 #endif
 #ifndef TURNTABLE_STEPS_B
-#define TURNTABLE_STEPS_B 400
+#define TURNTABLE_STEPS_B 500
 #endif
 #ifndef TURNTABLE_STEPS_C
-#define TURNTABLE_STEPS_C 800
+#define TURNTABLE_STEPS_C 1000
 #endif
 #ifndef TURNTABLE_STEPS_D
-#define TURNTABLE_STEPS_D 1200
+#define TURNTABLE_STEPS_D 1500
 #endif
 #ifndef TURNTABLE_MOTION_TIMEOUT_MS
 #define TURNTABLE_MOTION_TIMEOUT_MS 8000
@@ -225,7 +225,7 @@
 #define FLAP_CLOSE_SPEED_PWM 3000 /* reduced speed on close */
 #endif
 #ifndef FLAP_CLOSE_TORQUE_TH
-#define FLAP_CLOSE_TORQUE_TH 145 /* ADC counts -- stall/torque threshold */
+#define FLAP_CLOSE_TORQUE_TH 300 /* ADC counts -- stall/torque threshold */
 #endif
 #ifndef FLAP_MONITOR_INTERVAL_MS
 #define FLAP_MONITOR_INTERVAL_MS 20
@@ -324,16 +324,18 @@
 /* ================================================================== */
 
 #ifndef STEPPER_DEV_ROT_ARM
-#define STEPPER_DEV_ROT_ARM 0 /* Rotary suction arm (MSG_ARM_MOVE) */
+#define STEPPER_DEV_ROT_ARM 1 /* Rotary suction arm (MSG_ARM_MOVE) */
 #endif
-#ifndef STEPPER_DEV_LIN_ARM
-#define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
-#endif
+// #ifndef STEPPER_DEV_LIN_ARM
+// #define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
+// #endif
 #ifndef STEPPER_DEV_TURNTABLE
 #define STEPPER_DEV_TURNTABLE 2 /* Turntable / platform */
 #endif
 /* Uncomment each entry and bump DRV8434S_N_DEVICES when wired: */
-// #define STEPPER_DEV_AGITATOR    3  /* Agitator eccentric arm */
+#ifndef STEPPER_DEV_AGITATOR
+#define STEPPER_DEV_AGITATOR 0 /* Agitator eccentric arm */
+#endif
 // #define STEPPER_DEV_HW_CARRIAGE 4  /* Hot wire carriage traverse */
 // #define STEPPER_DEV_INDEXER     5  /* Bag depth/eject rack (indexer) */
 

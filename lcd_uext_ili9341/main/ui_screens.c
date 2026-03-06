@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "ui_screens.h"
-#include "control.h"
+#include "sys_sequence.h"
 
 #include "lvgl.h"
 #include "esp_log.h"
@@ -61,11 +61,30 @@ static void set_status(const char *s)
     ui_status_set(s);
 }
 
+static bool sequence_manual_actions_blocked(void)
+{
+    switch (sys_sequence_get_state())
+    {
+    case SYS_IDLE:
+    case SYS_SPAWN_EMPTY:
+    case SYS_ERROR:
+    case SYS_ESTOP:
+        return false;
+    default:
+        return true;
+    }
+}
+
 /* ── Home-screen button callbacks ────────────────────────────────────────── */
 
 static void on_fwd(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_FWD,
                                                    JOG_SPEED,
                                                    JOG_LOW_TH,
@@ -78,6 +97,11 @@ static void on_fwd(lv_event_t *e)
 static void on_rev(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_REV,
                                                    JOG_SPEED,
                                                    JOG_LOW_TH,
@@ -90,6 +114,11 @@ static void on_rev(lv_event_t *e)
 static void on_dose(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     ui_show_dosing();
     ESP_LOGI(TAG, "DOSE pressed");
 }
@@ -104,6 +133,11 @@ static void on_home(lv_event_t *e)
 static void on_ops_page(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     ui_show_operations();
     ESP_LOGI(TAG, "Operations pressed");
 }
@@ -111,6 +145,11 @@ static void on_ops_page(lv_event_t *e)
 static void on_tare(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     uint8_t nack_code = 0;
     esp_err_t err = pico_link_send_rpc(MSG_HX711_TARE,
                                        NULL, 0,
@@ -159,43 +198,28 @@ static void on_read_weight(lv_event_t *e)
     }
 }
 
-static void on_start(lv_event_t *e)
+static void on_seq_setup_load(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {
-        .type = CTRL_CMD_START,
-        .target_g = 50.0f,
-        .recipe_id = 0,
-    };
-    bool ok = control_send(&cmd);
-    set_status(ok ? "START sent" : "START failed");
-    ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_SETUP_LOAD);
+    set_status(err == ESP_OK ? "SEQ: SETUP_LOAD sent" : "SEQ: SETUP_LOAD failed");
+    ESP_LOGI(TAG, "Sequence setup/load (%s)", esp_err_to_name(err));
 }
 
-static void on_pause(lv_event_t *e)
+static void on_seq_start(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_PAUSE};
-    bool ok = control_send(&cmd);
-    set_status(ok ? "PAUSE sent" : "PAUSE failed");
-    ESP_LOGI(TAG, "Pause pressed (send=%d)", (int)ok);
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_START);
+    set_status(err == ESP_OK ? "SEQ: START sent" : "SEQ: START failed");
+    ESP_LOGI(TAG, "Sequence start (%s)", esp_err_to_name(err));
 }
 
-static void on_stop(lv_event_t *e)
+static void on_seq_abort(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
-    bool ok = control_send(&cmd);
-    set_status(ok ? "STOP sent" : "STOP failed");
-    ESP_LOGI(TAG, "Stop pressed (send=%d)", (int)ok);
-}
-
-static void on_stop_linact(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_linact_stop_monitor();
-    set_status(err == ESP_OK ? "LINACT: STOP" : "LINACT: STOP FAILED");
-    ESP_LOGI(TAG, "STOP pressed (%s)", esp_err_to_name(err));
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_ABORT);
+    set_status(err == ESP_OK ? "SEQ: ABORT sent" : "SEQ: ABORT failed");
+    ESP_LOGI(TAG, "Sequence abort (%s)", esp_err_to_name(err));
 }
 
 /* ── Operations-screen button callbacks ──────────────────────────────────── */
@@ -538,7 +562,7 @@ void ui_show_home(void)
     lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* 2-column × 3-row button grid */
+    /* 2-column × 4-row button grid */
     lv_obj_t *cont = lv_obj_create(scr);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(cont, 300, 210);
@@ -552,13 +576,16 @@ void ui_show_home(void)
     static lv_coord_t col_dsc[] = {
         LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     static lv_coord_t row_dsc[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
 
     lv_obj_t *b_fwd = make_big_btn(cont, "Forward", on_fwd);
     lv_obj_t *b_rev = make_big_btn(cont, "Backward", on_rev);
     lv_obj_t *b_dose = make_big_btn(cont, "Dose", on_dose);
     lv_obj_t *b_tare = make_big_btn(cont, "Tare", on_tare);
+    lv_obj_t *b_setup = make_big_btn(cont, "Setup/Load", on_seq_setup_load);
+    lv_obj_t *b_start = make_big_btn(cont, "Start", on_seq_start);
+    lv_obj_t *b_abort = make_big_btn(cont, "Abort", on_seq_abort);
     lv_obj_t *b_ops = make_big_btn(cont, "Operations", on_ops_page);
 
     lv_obj_set_grid_cell(b_fwd, LV_GRID_ALIGN_STRETCH, 0, 1,
@@ -569,9 +596,14 @@ void ui_show_home(void)
                          LV_GRID_ALIGN_STRETCH, 1, 1);
     lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 1, 1,
                          LV_GRID_ALIGN_STRETCH, 1, 1);
-    /* Operations spans both columns in row 2 for a wide, easy touch target */
-    lv_obj_set_grid_cell(b_ops, LV_GRID_ALIGN_STRETCH, 0, 2,
+    lv_obj_set_grid_cell(b_setup, LV_GRID_ALIGN_STRETCH, 0, 1,
                          LV_GRID_ALIGN_STRETCH, 2, 1);
+    lv_obj_set_grid_cell(b_start, LV_GRID_ALIGN_STRETCH, 1, 1,
+                         LV_GRID_ALIGN_STRETCH, 2, 1);
+    lv_obj_set_grid_cell(b_abort, LV_GRID_ALIGN_STRETCH, 0, 1,
+                         LV_GRID_ALIGN_STRETCH, 3, 1);
+    lv_obj_set_grid_cell(b_ops, LV_GRID_ALIGN_STRETCH, 1, 1,
+                         LV_GRID_ALIGN_STRETCH, 3, 1);
 }
 
 /*
