@@ -6,8 +6,8 @@
             "type": "shell",
             "command": "bash",
             "args": [
-                "-lc",
-                "set -euo pipefail; \n  # Ensure cmake is available (try pip install fallback)\n  if ! command -v cmake >/dev/null; then\n    echo 'cmake not found; attempting python -m pip install --user cmake...';\n    python -m pip install --user cmake;\n  fi\n\n  # Ensure git is available\n  if ! command -v git >/dev/null; then\n    echo 'git not found; please install git via your package manager.';\n    exit 1;\n  fi\n\n  # Ensure ESP-IDF is cloned and tools are installed\n  IDF_PATH=\"${config:idf.currentSetup}\";\n  if [ ! -d \"$IDF_PATH\" ]; then\n    echo 'ESP-IDF not found at "$IDF_PATH"; cloning esp-idf v5.5.2...';\n    mkdir -p \"$(dirname \"$IDF_PATH\")\";\n    git clone -b v5.5.2 --depth 1 https://github.com/espressif/esp-idf.git \"$IDF_PATH\";\n  fi\n  if ! compgen -G \"${HOME}/.espressif/python_env/idf*_py*_env/bin/python\" > /dev/null; then\n    echo 'ESP-IDF tools not installed; running $IDF_PATH/install.sh...';\n    \"$IDF_PATH/install.sh\";\n  fi\n"
+                "${workspaceFolder}/scripts/setup_dependencies.sh",
+                "${config:idf.currentSetup}"
             ],
             "problemMatcher": [],
             "presentation": {
