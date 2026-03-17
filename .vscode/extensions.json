@@ -1,10 +1,10 @@
 {
-  "recommendations": [
-    "ms-vscode.cmake-tools",
-    "ms-vscode.cpptools",
-    "espressif.esp-idf-extension",
-    "raspberrypi.raspberry-pi-pico",
-    "ms-python.python"
-  ],
-  "unwantedRecommendations": []
+    "recommendations": [
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools",
+        "espressif.esp-idf-extension",
+        "raspberrypi.raspberry-pi-pico",
+        "ms-python.python"
+    ],
+    "unwantedRecommendations": []
 }
