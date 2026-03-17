@@ -9,6 +9,7 @@ managed_components/
 # VSCode / editor
 .vscode/*
 !.vscode/tasks.json
+!.vscode/extensions.json
 *.code-workspace
 
 # OS junk
