@@ -140,13 +140,31 @@ extern "C"
         uint8_t code;
     } pl_nack_t;
 
+    /**
+     * Finish-mode selector for MSG_DISPENSE_SPAWN.
+     * Carried in pl_innoculate_bag_t::flags bit 0.
+     */
+    typedef enum
+    {
+        SPAWN_FINISH_MODE_A = 0, /* close-early + top-off (anti-overshoot) */
+        SPAWN_FINISH_MODE_B = 1, /* low-flow taper near target              */
+    } spawn_finish_mode_t;
+
+    /** Bit definitions for pl_innoculate_bag_t::flags */
+    #define SPAWN_FLAG_FINISH_MODE_B (1u << 0) /* set = Finish B, clear = Finish A */
+    #define SPAWN_FLAG_DO_HOME       (1u << 1) /* set = home flaps to closed before dosing */
+
     typedef struct __attribute__((packed))
     {
         uint16_t bag_mass;      // mass of bag being innoculated
         uint16_t spawn_mass;    // mass of spawn remaining
         uint16_t innoc_percent; // spawn percentage of bag weight (x10)
         uint8_t bag_number;     // how many bags have been innoculated from the same spawn
+        uint8_t flags;          // SPAWN_FLAG_* bitmask (finish mode, homing); 0 = defaults
     } pl_innoculate_bag_t;
+
+    /** Minimum payload length for pl_innoculate_bag_t without flags (legacy). */
+    #define PL_INNOCULATE_BAG_MIN_LEN 7u
 
     typedef enum
     {
