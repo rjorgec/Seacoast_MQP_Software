@@ -563,11 +563,21 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
         double raw_avg = (double)raw_sum / (double)fifo_count;
         /* mass_g = (raw − offset) / ref_unit  →  mass_ug = mass_g × 1 000 000 */
         double mass_g = (raw_avg - (double)s_scale.offset) / (double)s_scale.ref_unit;
-        mass.ug = (int32_t)(mass_g * 1000000.0);
+        /* Clamp via int64_t to avoid undefined behaviour if mass_g > 2147 g
+         * (e.g. untared scale) which would overflow int32_t.  Also clamp the
+         * double before the int64 cast in case mass_g is astronomically large
+         * (e.g. sensor fault) to stay within valid int64_t range. */
+        static const double K_MAX_UG = (double)INT32_MAX;
+        static const double K_MIN_UG = (double)INT32_MIN;
+        double mass_ug_d = mass_g * 1000000.0;
+        if (mass_ug_d > K_MAX_UG) mass_ug_d = K_MAX_UG;
+        if (mass_ug_d < K_MIN_UG) mass_ug_d = K_MIN_UG;
+        mass.ug = (int32_t)(int64_t)mass_ug_d;
         mass.unit = s_scale.unit;
     }
 
-    uint32_t current_ug = (uint32_t)mass.ug;
+    /* Use non-negative mass only: negative means below tare (nothing dispensed yet) */
+    uint32_t current_ug = (mass.ug >= 0) ? (uint32_t)mass.ug : 0u;
     double m = 0;
     mass_get_value(&mass, &m);
 
