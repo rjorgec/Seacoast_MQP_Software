@@ -69,6 +69,14 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
             }
         }
         break;
+    case MSG_HX711_MEASURE:
+        ESP_LOGI("app_main", "RX HX711_MEASURE seq=%u len=%u", (unsigned)seq, (unsigned)len);
+        ui_screens_pico_rx_handler(type, seq, pl, len);
+        break;
+    case MSG_NACK:
+        ESP_LOGW("app_main", "RX NACK seq=%u len=%u", (unsigned)seq, (unsigned)len);
+        ui_screens_pico_rx_handler(type, seq, pl, len);
+        break;
     default:
         /* Forward to UI screens handler for weight display */
         ui_screens_pico_rx_handler(type, seq, pl, len);

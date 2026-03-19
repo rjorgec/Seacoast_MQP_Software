@@ -11,6 +11,11 @@ extern "C"
 #define PROTO_MAX_PAYLOAD 128u
 #define PROTO_DELIM 0x00u
 
+/* Shared default for DRV8434S soft torque-limit threshold.
+ * Both ESP and Pico firmware should source their fallback from this symbol
+ * so the UART payload default cannot drift between projects. */
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 300u
+
     /*
      * Wire format endianness is little-endian for all multi-byte fields.
      * ESP32-C6 and RP2040 are both little-endian, so native packed structs
