@@ -3,10 +3,11 @@
 # setup_dependencies.sh
 # =============================================================================
 # Sets up everything needed to build, flash, and serial-monitor firmware for
-# the Raspberry Pi Pico 2 (RP2350) and ESP32-C6 on a fresh Debian Linux
+# the Raspberry Pi Pico 2 (RP2350) and ESP32-C6 on a fresh Debian/Ubuntu/Mint
 # installation of VS Code.
 #
-# Designed for: Debian 12 (Bookworm) or Ubuntu 22.04/24.04 LTS
+# Designed for: Debian 12 (Bookworm), Ubuntu 22.04/24.04 LTS, or
+#               Linux Mint 21.x / 22.x (which is based on Ubuntu LTS)
 # Must NOT be run as root — the script will call sudo where required and
 # prompt you for your password as needed.
 #
@@ -75,11 +76,11 @@ if [ -f ".vscode/settings.json" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 # -----------------------------------------------------------------------------
-# Guard: must be run on a Debian/Ubuntu system with apt-get
+# Guard: must be run on a Debian/Ubuntu/Mint system with apt-get
 # -----------------------------------------------------------------------------
 
 if ! command -v apt-get >/dev/null 2>&1; then
-  echo "ERROR: This script targets Debian/Ubuntu Linux and requires apt-get." >&2
+  echo "ERROR: This script targets Debian/Ubuntu/Mint Linux and requires apt-get." >&2
   echo "       Please install the required tools manually on your distribution." >&2
   exit 1
 fi
@@ -103,7 +104,7 @@ section() {
   echo "================================================================"
 }
 
-# Install one or more Debian packages, skipping any that are already present.
+# Install one or more Debian/Ubuntu/Mint packages, skipping any that are already present.
 apt_install() {
   local to_install=()
   for pkg in "$@"; do
@@ -126,10 +127,10 @@ apt_install() {
 
   # Run apt-get update to refresh the package index.
   # We use '|| true' here so that a broken third-party repository (e.g. a
-  # stale AMD GPU, CUDA, or other vendor repo that no longer has a Release
+  # stale AMD GPU, CUDA, or other vendor/Mint repo that no longer has a Release
   # file) does not abort the entire setup script.  If the update itself fails,
   # apt-get install will still work from the cached package lists for all
-  # standard Debian/Ubuntu repositories.
+  # standard Debian/Ubuntu/Mint repositories.
   sudo apt-get update -y -qq 2>&1 || {
     echo "  WARNING: 'apt-get update' reported errors (possibly a broken third-party"
     echo "  repository in /etc/apt/sources.list.d/).  Proceeding with cached package"
@@ -155,7 +156,7 @@ git_clone_once() {
 # =============================================================================
 # STEP 1 — System packages
 # =============================================================================
-# Install everything a fresh Debian system needs to compile Pico and ESP32
+# Install everything a fresh Debian/Ubuntu/Mint system needs to compile Pico and ESP32
 # firmware, flash devices, and open a serial monitor.
 # =============================================================================
 
