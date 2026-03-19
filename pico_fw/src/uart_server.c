@@ -212,6 +212,8 @@ typedef struct
     /* Rate limiting */
     uint8_t consecutive_open_nudges; /* reset on close nudge or flow improvement */
     uint32_t prev_ema_flow_ug;       /* prior EMA value to detect improvement     */
+    int8_t last_nudge_dir;           /* +1 open, -1 close, 0 unset                */
+    absolute_time_t reverse_holdoff_until; /* block immediate opposite nudge     */
 
     /* Close confirmation */
     absolute_time_t close_start_time;
@@ -472,6 +474,18 @@ static void spawn_set_flap_pwm(bool forward, uint16_t pwm)
     }
 }
 
+static bool spawn_direction_reversal_blocked(int8_t desired_dir, absolute_time_t now)
+{
+    bool opposite = ((desired_dir > 0 && s_spawn.last_nudge_dir < 0) ||
+                     (desired_dir < 0 && s_spawn.last_nudge_dir > 0));
+    if (!opposite)
+    {
+        return false;
+    }
+
+    return absolute_time_diff_us(s_spawn.reverse_holdoff_until, now) < 0;
+}
+
 static void send_spawn_status(spawn_status_code_t status)
 {
     pl_spawn_status_t pl = {
@@ -523,10 +537,21 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
     if (s_spawn.nudging &&
         absolute_time_diff_us(s_spawn.nudge_until, now) >= 0)
     {
-        /* Stop motor; hold current flap position until next nudge decision */
+        /* Stop motor; hold current flap position until next nudge decision.
+         * Must disable current monitoring to prevent false undercurrent flags
+         * when the motor is intentionally stopped (zero current is normal). */
+        if (s_drv8263.monitoring_enabled)
+        {
+            drv8263_stop_current_monitoring(&s_drv8263);
+        }
         (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+        
         if (s_drv8263_flap2_ready)
         {
+            if (s_drv8263_flap2.monitoring_enabled)
+            {
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
+            }
             (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
         }
         s_spawn.nudging = false;
@@ -957,12 +982,20 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
                                (unsigned)SPAWN_MAX_OPEN_NUDGES);
                         s_spawn.consecutive_open_nudges = 0u; /* reset after hold */
                     }
+                    else if (spawn_direction_reversal_blocked(+1, now))
+                    {
+                        printf("Spawn DOSE_MAIN: holdoff blocks OPEN reversal (ema=%luug)\n",
+                               (unsigned long)s_spawn.ema_flow_ug);
+                    }
                     else
                     {
                         spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
                         s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
                                                             (uint32_t)SPAWN_NUDGE_OPEN_MS);
                         s_spawn.nudging = true;
+                        s_spawn.last_nudge_dir = +1;
+                        s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                       (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
                         printf("Spawn DOSE_MAIN: open nudge %ums (error=%ldug, ema=%luug, consec=%u)\n",
                                (unsigned)SPAWN_NUDGE_OPEN_MS,
                                (long)error_ug,
@@ -974,14 +1007,25 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
                 {
                     /* Flow above target — close a little; reset open nudge counter */
                     s_spawn.consecutive_open_nudges = 0u;
-                    spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
-                    s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
-                                                        (uint32_t)SPAWN_NUDGE_CLOSE_MS);
-                    s_spawn.nudging = true;
-                    printf("Spawn DOSE_MAIN: close nudge %ums (error=%ldug, ema=%luug)\n",
-                           (unsigned)SPAWN_NUDGE_CLOSE_MS,
-                           (long)error_ug,
-                           (unsigned long)s_spawn.ema_flow_ug);
+                    if (spawn_direction_reversal_blocked(-1, now))
+                    {
+                        printf("Spawn DOSE_MAIN: holdoff blocks CLOSE reversal (ema=%luug)\n",
+                               (unsigned long)s_spawn.ema_flow_ug);
+                    }
+                    else
+                    {
+                        spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
+                        s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                            (uint32_t)SPAWN_NUDGE_CLOSE_MS);
+                        s_spawn.nudging = true;
+                        s_spawn.last_nudge_dir = -1;
+                        s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                       (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                        printf("Spawn DOSE_MAIN: close nudge %ums (error=%ldug, ema=%luug)\n",
+                               (unsigned)SPAWN_NUDGE_CLOSE_MS,
+                               (long)error_ug,
+                               (unsigned long)s_spawn.ema_flow_ug);
+                    }
                 }
                 /* else: within deadband — hold position */
 
@@ -1030,22 +1074,44 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
             int32_t error_ug = (int32_t)SPAWN_TICK_MIN_UG - (int32_t)s_spawn.ema_flow_ug;
             if (error_ug > (int32_t)SPAWN_TICK_DEADBAND)
             {
-                spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-                s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
-                                                    (uint32_t)SPAWN_LOWFLOW_NUDGE_MS);
-                s_spawn.nudging = true;
-                printf("Spawn FINISH_B_LOWFLOW: open nudge %ums (ema=%luug)\n",
-                       (unsigned)SPAWN_LOWFLOW_NUDGE_MS,
-                       (unsigned long)s_spawn.ema_flow_ug);
+                if (spawn_direction_reversal_blocked(+1, now))
+                {
+                    printf("Spawn FINISH_B_LOWFLOW: holdoff blocks OPEN reversal (ema=%luug)\n",
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
+                else
+                {
+                    spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+                    s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                        (uint32_t)SPAWN_LOWFLOW_NUDGE_MS);
+                    s_spawn.nudging = true;
+                    s_spawn.last_nudge_dir = +1;
+                    s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                   (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                    printf("Spawn FINISH_B_LOWFLOW: open nudge %ums (ema=%luug)\n",
+                           (unsigned)SPAWN_LOWFLOW_NUDGE_MS,
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
             }
             else if (error_ug < -(int32_t)SPAWN_TICK_DEADBAND)
             {
-                spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
-                s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
-                                                    (uint32_t)SPAWN_NUDGE_CLOSE_MS);
-                s_spawn.nudging = true;
-                printf("Spawn FINISH_B_LOWFLOW: close nudge (ema=%luug)\n",
-                       (unsigned long)s_spawn.ema_flow_ug);
+                if (spawn_direction_reversal_blocked(-1, now))
+                {
+                    printf("Spawn FINISH_B_LOWFLOW: holdoff blocks CLOSE reversal (ema=%luug)\n",
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
+                else
+                {
+                    spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
+                    s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                        (uint32_t)SPAWN_NUDGE_CLOSE_MS);
+                    s_spawn.nudging = true;
+                    s_spawn.last_nudge_dir = -1;
+                    s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                   (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                    printf("Spawn FINISH_B_LOWFLOW: close nudge (ema=%luug)\n",
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
             }
         }
         return true;
@@ -1159,10 +1225,21 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
         }
         else
         {
-            /* Nudge expired on this tick — stop motor and start settle */
+            /* Nudge expired on this tick — stop motor and start settle.
+             * Must disable current monitoring to prevent false undercurrent flags
+             * when the motor is intentionally stopped (zero current is normal). */
+            if (s_drv8263.monitoring_enabled)
+            {
+                drv8263_stop_current_monitoring(&s_drv8263);
+            }
             (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+            
             if (s_drv8263_flap2_ready)
             {
+                if (s_drv8263_flap2.monitoring_enabled)
+                {
+                    drv8263_stop_current_monitoring(&s_drv8263_flap2);
+                }
                 (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
             }
             s_spawn.nudging         = false;
@@ -2623,6 +2700,8 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
     s_spawn.ema_seeded         = false;
     s_spawn.ema_flow_ug        = 0u;
     s_spawn.consecutive_open_nudges = 0u;
+    s_spawn.last_nudge_dir     = 0;
+    s_spawn.reverse_holdoff_until = get_absolute_time();
     s_spawn.topoff_pulses      = 0u;
     s_spawn.topoff_settling    = false;
 

@@ -26,6 +26,7 @@ static lv_obj_t *lbl_status = NULL; /* updated by ui_status_set() / set_status()
 static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without it */
 static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
 static uint16_t s_weight_req_seq = 0u; /* 0 = no in-flight read request */
+static uint32_t s_weight_req_interval_us = 0u;
 
 /* Scale screen auto-refresh timer — non-NULL only while the Scale screen is active */
 static lv_timer_t *s_scale_timer = NULL;
@@ -186,6 +187,7 @@ static void on_read_weight(lv_event_t *e)
     if (err == ESP_OK)
     {
         s_weight_req_seq = seq;
+        s_weight_req_interval_us = measure_payload.interval_us;
         set_status("Weight request sent...");
         ESP_LOGI(TAG, "Weight request sent (seq=%u)", seq);
     }
@@ -391,18 +393,52 @@ static void on_vacuum2_off(lv_event_t *e)
 void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
                                 const uint8_t *payload, uint16_t len)
 {
-    if (msg_type == MSG_HX711_MEASURE &&
-        payload != NULL &&
-        len >= sizeof(pl_hx711_mass_t))
+    if (msg_type == MSG_HX711_MEASURE && payload != NULL)
     {
-        pl_hx711_mass_t mass_data;
-        memcpy(&mass_data, payload, sizeof(mass_data));
+        if (len == sizeof(pl_hx711_measure_t) && s_weight_req_seq != 0u && seq == s_weight_req_seq)
+        {
+            uint32_t echoed_interval_us = 0u;
+            memcpy(&echoed_interval_us, payload, sizeof(echoed_interval_us));
+            if (echoed_interval_us == s_weight_req_interval_us)
+            {
+                /* UART loopback/echo case: request came back as RX frame.
+                 * This is not a weight response. */
+                ESP_LOGW(TAG, "Ignored echoed HX711 request (seq=%u interval_us=%lu)",
+                         (unsigned)seq, (unsigned long)echoed_interval_us);
+                set_status("HX711 echo detected (check Pico->ESP RX path)");
+                s_weight_req_seq = 0u;
+                return;
+            }
+        }
 
-        float weight_g = (float)mass_data.mass_ug / 1000000.0f;
+        int32_t mass_ug = 0;
+        uint8_t unit = 0u;
+
+        if (len >= sizeof(pl_hx711_mass_t))
+        {
+            pl_hx711_mass_t mass_data;
+            memcpy(&mass_data, payload, sizeof(mass_data));
+            mass_ug = mass_data.mass_ug;
+            unit = mass_data.unit;
+        }
+        else if (len >= sizeof(int32_t))
+        {
+            /* Legacy Pico payload: mass only (int32_t micrograms). */
+            memcpy(&mass_ug, payload, sizeof(mass_ug));
+            ESP_LOGW(TAG, "Received legacy HX711 payload len=%u (mass only)",
+                     (unsigned)len);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Invalid HX711 payload len=%u", (unsigned)len);
+            return;
+        }
+
+        float weight_g = (float)mass_ug / 1000000.0f;
         s_last_weight_g = weight_g;
         s_weight_req_seq = 0u;
         ESP_LOGI(TAG, "Received weight: %.3f g (unit=%u)", weight_g,
-                 mass_data.unit);
+                 unit);
 
         char weight_str[32];
         snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g", weight_g);
@@ -679,10 +715,7 @@ void ui_show_scale(void)
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 156);
 
-    /* ── Auto-refresh timer: request a new reading every 2 s ────────────── */
-    s_scale_timer = lv_timer_create(scale_auto_read_cb, 2000, NULL);
-    /* Trigger an immediate first read so the display is not stale on entry */
-    scale_auto_read_cb(s_scale_timer);
+    /* Manual read only: do not auto-poll the Pico from this screen. */
 }
 
 /*

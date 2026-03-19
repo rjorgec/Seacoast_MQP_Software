@@ -394,7 +394,8 @@
 #define SPAWN_AGITATE_MS 2000u /* agitation hold-off duration (ms) */
 #endif
 #ifndef SPAWN_STARTUP_FLOW_DETECT_UG
-#define SPAWN_STARTUP_FLOW_DETECT_UG 1000000u /* min µg change to confirm prime flow */
+#define SPAWN_STARTUP_FLOW_DETECT_UG                                           \
+  1000000u /* min µg change to confirm prime flow */
 #endif
 
 /* ── EMA filtering ─────────────────────────────────────────────────── *
@@ -403,7 +404,8 @@
  * Higher = faster response; lower = more noise rejection.              */
 
 #ifndef SPAWN_EMA_ALPHA_X1000
-#define SPAWN_EMA_ALPHA_X1000 250u /* EMA smoothing factor ×1000; range 50–500 */
+#define SPAWN_EMA_ALPHA_X1000                                                  \
+  250u /* EMA smoothing factor ×1000; range 50–500 */
 #endif
 
 /* ── Flow spike clamp ──────────────────────────────────────────────── *
@@ -413,7 +415,7 @@
  * is an implausible spike.                                             */
 
 #ifndef SPAWN_FLOW_SPIKE_CLAMP_UG
-#define SPAWN_FLOW_SPIKE_CLAMP_UG 10000000u /* max believable µg per tick */
+#define SPAWN_FLOW_SPIKE_CLAMP_UG 100000000u /* max believable µg per tick */
 #endif
 
 /* ── Nudge / rate limiting ─────────────────────────────────────────── */
@@ -425,10 +427,16 @@
 #define SPAWN_NUDGE_OPEN_MS 300u /* ms to nudge flap open per control tick */
 #endif
 #ifndef SPAWN_NUDGE_CLOSE_MS
-#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge flap closed per control tick */
+#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge flap closed per control tick  \
+                                   */
 #endif
 #ifndef SPAWN_MAX_OPEN_NUDGES
-#define SPAWN_MAX_OPEN_NUDGES 8u /* max consecutive open nudges with no flow increase */
+#define SPAWN_MAX_OPEN_NUDGES                                                  \
+  8u /* max consecutive open nudges with no flow increase */
+#endif
+#ifndef SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS
+#define SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS                                    \
+  350u /* minimum time before allowing an immediate nudge direction reversal */
 #endif
 
 /* ── Proportional gain thresholds ──────────────────────────────────── */
@@ -443,7 +451,8 @@
 /* ── Homing (optional re-zero to closed endpoint before dose) ──────── */
 
 #ifndef SPAWN_HOME_TIMEOUT_MS
-#define SPAWN_HOME_TIMEOUT_MS 6000u /* max time to home flaps (ms); ~2× full stroke */
+#define SPAWN_HOME_TIMEOUT_MS                                                  \
+  6000u /* max time to home flaps (ms); ~2× full stroke */
 #endif
 
 /* ── Close confirmation ─────────────────────────────────────────────── *
@@ -452,7 +461,8 @@
  * anyway.                                                               */
 
 #ifndef SPAWN_CLOSE_CONFIRM_TIMEOUT_MS
-#define SPAWN_CLOSE_CONFIRM_TIMEOUT_MS 6000u /* ms to wait for close endpoint detect */
+#define SPAWN_CLOSE_CONFIRM_TIMEOUT_MS                                         \
+  6000u /* ms to wait for close endpoint detect */
 #endif
 
 /* ── Fast-close PWM ─────────────────────────────────────────────────── *
@@ -461,7 +471,8 @@
  * command is issued.                                                   */
 
 #ifndef SPAWN_FAST_CLOSE_PWM
-#define SPAWN_FAST_CLOSE_PWM 4095u /* max PWM for fast close (safe if torque monitoring active) */
+#define SPAWN_FAST_CLOSE_PWM                                                   \
+  4095u /* max PWM for fast close (safe if torque monitoring active) */
 #endif
 
 /* ── Estimated close latency (for Finish A overshoot prediction) ────── *
@@ -475,20 +486,26 @@
 
 /* ── Finish Mode A: close-early + top-off ───────────────────────────── *
  * Close when:  remaining_ug < predicted_in_flight_ug + CLOSE_EARLY_MARGIN_UG *
- * predicted_in_flight_ug = (ema_flow_ug_per_tick * SPAWN_CLOSE_LATENCY_MS) / SPAWN_TIMER_PERIOD_MS */
+ * predicted_in_flight_ug = (ema_flow_ug_per_tick * SPAWN_CLOSE_LATENCY_MS) /
+ * SPAWN_TIMER_PERIOD_MS */
 
 #ifndef SPAWN_CLOSE_EARLY_MARGIN_UG
-#define SPAWN_CLOSE_EARLY_MARGIN_UG 500000u /* extra safety margin (µg) for early close */
+#define SPAWN_CLOSE_EARLY_MARGIN_UG                                            \
+  500000u /* extra safety margin (µg) for early close */
 #endif
-/* Top-off: issue small open pulses if final mass < target - TOPOFF_TOLERANCE_UG */
+/* Top-off: issue small open pulses if final mass < target - TOPOFF_TOLERANCE_UG
+ */
 #ifndef SPAWN_TOPOFF_TOLERANCE_UG
-#define SPAWN_TOPOFF_TOLERANCE_UG 1000000u /* undershoot tolerance for top-off (µg = 1 g) */
+#define SPAWN_TOPOFF_TOLERANCE_UG                                              \
+  1000000u /* undershoot tolerance for top-off (µg = 1 g) */
 #endif
 #ifndef SPAWN_TOPOFF_PULSE_MS
-#define SPAWN_TOPOFF_PULSE_MS 80u /* duration of each top-off open nudge (ms) */
+#define SPAWN_TOPOFF_PULSE_MS 80u /* duration of each top-off open nudge (ms)  \
+                                   */
 #endif
 #ifndef SPAWN_TOPOFF_MAX_PULSES
-#define SPAWN_TOPOFF_MAX_PULSES 5u /* max top-off attempts before declaring done */
+#define SPAWN_TOPOFF_MAX_PULSES                                                \
+  5u /* max top-off attempts before declaring done */
 #endif
 /* Pause between top-off open and re-close to let weight settle (ms) */
 #ifndef SPAWN_TOPOFF_SETTLE_MS
@@ -500,14 +517,17 @@
  * nudge duration so the flap barely trickles.                          */
 
 #ifndef SPAWN_LOWFLOW_THRESHOLD_UG
-#define SPAWN_LOWFLOW_THRESHOLD_UG 5000000u /* enter low-flow taper when ≤ 5 g remain */
+#define SPAWN_LOWFLOW_THRESHOLD_UG                                             \
+  5000000u /* enter low-flow taper when ≤ 5 g remain */
 #endif
 #ifndef SPAWN_LOWFLOW_NUDGE_MS
-#define SPAWN_LOWFLOW_NUDGE_MS 80u /* reduced nudge duration in low-flow phase (ms) */
+#define SPAWN_LOWFLOW_NUDGE_MS                                                 \
+  80u /* reduced nudge duration in low-flow phase (ms) */
 #endif
 /* Close fully when remaining_ug < CLOSE_THRESHOLD_UG (within low-flow phase) */
 #ifndef SPAWN_CLOSE_THRESHOLD_UG
-#define SPAWN_CLOSE_THRESHOLD_UG 500000u /* 0.5 g — issue final close from low-flow */
+#define SPAWN_CLOSE_THRESHOLD_UG                                               \
+  500000u /* 0.5 g — issue final close from low-flow */
 #endif
 
 /* ================================================================== */
