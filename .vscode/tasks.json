@@ -44,23 +44,21 @@
             // Runs cmake to generate the Ninja/Makefile build system inside
             // pico_fw/src/build/.  Re-run this if you add new source files or
             // change cmake options.
+            //
+            // The script unsets any ambient PICO_SDK_PATH environment variable
+            // before invoking cmake.  This prevents a pre-existing system-wide
+            // SDK (e.g. ~/pico/pico-sdk set by pico-setup or a stale
+            // pico-vscode.cmake) from overriding the SDK installed by the
+            // Setup task and causing cmake path-collision errors.
+            // NOTE: "2.2.0" must match PICO_SDK_VERSION in
+            //       scripts/setup_dependencies.sh — update both together.
             "label": "PICO: Configure",
             "detail": "Run cmake to configure the Pico 2 build system (re-run after adding source files).",
             "type": "shell",
-            "command": "cmake",
+            "command": "bash",
             "args": [
-                "-S",
-                "${workspaceFolder}/pico_fw/src",
-                "-B",
-                "${workspaceFolder}/pico_fw/src/build",
-                "-G",
-                "Ninja",
-                "-DPICO_BOARD=pico2",
-                // Explicit SDK path — works even without the Pico VS Code
-                // extension having downloaded its own copy of the SDK.
-                // NOTE: "2.2.0" must match PICO_SDK_VERSION in
-                //       scripts/setup_dependencies.sh — update both together.
-                "-DPICO_SDK_PATH=${env:HOME}/.pico-sdk/sdk/2.2.0"
+                "-lc",
+                "set -euo pipefail; SDK=\"${env:HOME}/.pico-sdk/sdk/2.2.0\"; if [ ! -d \"$SDK\" ]; then echo \"ERROR: Pico SDK not found at $SDK. Run the Setup task first.\"; exit 1; fi; unset PICO_SDK_PATH; cmake -S \"${workspaceFolder}/pico_fw/src\" -B \"${workspaceFolder}/pico_fw/src/build\" -G Ninja -DPICO_BOARD=pico2 \"-DPICO_SDK_PATH=$SDK\""
             ],
             "problemMatcher": [
                 "$gcc"
