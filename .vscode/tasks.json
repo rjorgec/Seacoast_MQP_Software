@@ -14,11 +14,9 @@
     // =========================================================================
     "version": "2.0.0",
     "tasks": [
-
         // =====================================================================
         // SETUP
         // =====================================================================
-
         {
             // Installs all system packages, Pico SDK, picotool, ESP-IDF, udev
             // rules, and VS Code settings needed for a fresh Debian machine.
@@ -38,12 +36,10 @@
                 "clear": true
             }
         },
-
         // =====================================================================
         // PICO 2 (RP2350) firmware tasks
         // Build chain: Configure → Build → Flash
         // =====================================================================
-
         {
             // Runs cmake to generate the Ninja/Makefile build system inside
             // pico_fw/src/build/.  Re-run this if you add new source files or
@@ -53,9 +49,12 @@
             "type": "shell",
             "command": "cmake",
             "args": [
-                "-S", "${workspaceFolder}/pico_fw/src",
-                "-B", "${workspaceFolder}/pico_fw/src/build",
-                "-G", "Ninja",
+                "-S",
+                "${workspaceFolder}/pico_fw/src",
+                "-B",
+                "${workspaceFolder}/pico_fw/src/build",
+                "-G",
+                "Ninja",
                 "-DPICO_BOARD=pico2",
                 // Explicit SDK path — works even without the Pico VS Code
                 // extension having downloaded its own copy of the SDK.
@@ -63,14 +62,15 @@
                 //       scripts/setup_dependencies.sh — update both together.
                 "-DPICO_SDK_PATH=${env:HOME}/.pico-sdk/sdk/2.2.0"
             ],
-            "problemMatcher": ["$gcc"],
+            "problemMatcher": [
+                "$gcc"
+            ],
             "presentation": {
                 "reveal": "always",
                 "panel": "dedicated",
                 "clear": true
             }
         },
-
         {
             // Compiles the Pico 2 firmware.  Output: pico_fw/src/build/UART_TEST.uf2
             // This is the default build task (Ctrl+Shift+B).
@@ -79,12 +79,15 @@
             "type": "shell",
             "command": "cmake",
             "args": [
-                "--build", "${workspaceFolder}/pico_fw/src/build",
+                "--build",
+                "${workspaceFolder}/pico_fw/src/build",
                 "--parallel"
             ],
             "dependsOn": "PICO: Configure",
             "dependsOrder": "sequence",
-            "problemMatcher": ["$gcc"],
+            "problemMatcher": [
+                "$gcc"
+            ],
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -95,7 +98,6 @@
                 "clear": true
             }
         },
-
         {
             // Flashes the compiled .uf2 onto the Pico 2 using picotool.
             // The Pico must be connected via USB in BOOTSEL mode (hold BOOTSEL
@@ -111,7 +113,7 @@
             "command": "bash",
             "args": [
                 "-lc",
-                "set -euo pipefail; UF2=\"${workspaceFolder}/pico_fw/src/build/UART_TEST.uf2\"; PICOTOOL=\"${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\"; if [ ! -x \"$PICOTOOL\" ]; then echo \"ERROR: picotool not found. Run the Setup task first.\"; exit 1; fi; echo \"Flashing $UF2 ...\"; \"$PICOTOOL\" load \"$UF2\" -fx && echo \"Flash complete.\""
+                "set -euo pipefail; UF2=\"${workspaceFolder}/pico_fw/src/build/UART_TEST.uf2\"; PICOTOOL=\"${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\"; if [ ! -x \"$PICOTOOL\" ]; then echo \"ERROR: picotool not found. Run the Setup task first.\"; exit 1; fi; echo \"Flashing $UF2 ...\"; \"$PICOTOOL\" load \"$UF2\" -fx && echo \"Flash complete.\"""set -euo pipefail; UF2=\"${workspaceFolder}/pico_fw/src/build/UART_TEST.uf2\"; PICOTOOL=\"${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\"; if [ ! -x \"$PICOTOOL\" ]; then echo \"ERROR: picotool not found. Run the Setup task first.\"; exit 1; fi; echo \"Flashing $UF2 ...\"; \"$PICOTOOL\" load \"$UF2\" -fx && echo \"Flash complete.\""
             ],
             "dependsOn": "PICO: Build",
             "dependsOrder": "sequence",
@@ -122,7 +124,6 @@
                 "clear": true
             }
         },
-
         {
             // Opens a picocom serial terminal connected to the Pico's USB CDC
             // stdio port (/dev/ttyACM0 by default, or /dev/ttyPico after udev
@@ -144,7 +145,6 @@
                 "panel": "dedicated"
             }
         },
-
         {
             // Convenience task: build, flash, then immediately open the serial
             // monitor so you can see the Pico's printf output without switching
@@ -155,7 +155,7 @@
             "command": "bash",
             "args": [
                 "-lc",
-                "set -euo pipefail; UF2=\"${workspaceFolder}/pico_fw/src/build/UART_TEST.uf2\"; PICOTOOL=\"${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\"; if [ ! -x \"$PICOTOOL\" ]; then echo \"ERROR: picotool not found. Run the Setup task first.\"; exit 1; fi; echo \"Flashing $UF2 ...\"; \"$PICOTOOL\" load \"$UF2\" -fx && echo \"Flash complete. Waiting for device to enumerate...\"; sleep 2; PORT=$(ls /dev/ttyPico /dev/ttyACM0 /dev/ttyACM1 2>/dev/null | head -1 || true); if [ -z \"$PORT\" ]; then echo \"WARNING: serial port not found after flash. Connect USB and run PICO: Serial Monitor manually.\"; exit 0; fi; echo \"Opening serial monitor on $PORT (exit: Ctrl+A Ctrl+X) ...\"; picocom --baud 115200 --flow none \"$PORT\""
+                "set -euo pipefail; UF2=\"${workspaceFolder}/pico_fw/src/build/UART_TEST.uf2\"; PICOTOOL=\"${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\"; if [ ! -x \"$PICOTOOL\" ]; then echo \"ERROR: picotool not found. Run the Setup task first.\"; exit 1; fi; echo \"Flashing $UF2 ...\"; \"$PICOTOOL\" load \"$UF2\" -fx && echo \"Flash complete. Waiting for device to enumerate...\"; sleep 2; PORT=$(ls /dev/ttyPico /dev/ttyACM0 /dev/ttyACM1 2>/dev/null | head -1 || true); if [ -z \"$PORT\" ]; then echo \"WARNING: serial port not found after flash. Connect USB and run PICO: Serial Monitor manually.\"; exit 0; fi; echo \"Opening serial monitor on $PORT (exit: Ctrl+A Ctrl+X) ...\"; picocom --baud 115200 --flow none \"$PORT\"""set -euo pipefail; UF2=\"${workspaceFolder}/pico_fw/src/build/UART_TEST.uf2\"; PICOTOOL=\"${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool\"; if [ ! -x \"$PICOTOOL\" ]; then echo \"ERROR: picotool not found. Run the Setup task first.\"; exit 1; fi; echo \"Flashing $UF2 ...\"; \"$PICOTOOL\" load \"$UF2\" -fx && echo \"Flash complete. Waiting for device to enumerate...\"; sleep 2; PORT=$(ls /dev/ttyPico /dev/ttyACM0 /dev/ttyACM1 2>/dev/null | head -1 || true); if [ -z \"$PORT\" ]; then echo \"WARNING: serial port not found after flash. Connect USB and run PICO: Serial Monitor manually.\"; exit 0; fi; echo \"Opening serial monitor on $PORT (exit: Ctrl+A Ctrl+X) ...\"; picocom --baud 115200 --flow none \"$PORT\""
             ],
             "dependsOn": "PICO: Build",
             "dependsOrder": "sequence",
@@ -165,13 +165,11 @@
                 "panel": "dedicated"
             }
         },
-
         // =====================================================================
         // ESP32-C6 firmware tasks
         // Build chain: Build → Flash → Monitor  (or Flash + Monitor combined)
         // All tasks source ESP-IDF's export.sh so idf.py is on the PATH.
         // =====================================================================
-
         {
             // Compiles the ESP32-C6 firmware using idf.py.
             // On the first run this also sets the IDF target to esp32c6.
@@ -185,14 +183,15 @@
                 "-lc",
                 "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; PROJECT=\"${workspaceFolder}/lcd_uext_ili9341\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; if ! idf.py -C \"$PROJECT\" build; then echo \"Build failed — running fullclean and retrying...\"; idf.py -C \"$PROJECT\" fullclean; idf.py -C \"$PROJECT\" build; fi"
             ],
-            "problemMatcher": ["$gcc"],
+            "problemMatcher": [
+                "$gcc"
+            ],
             "presentation": {
                 "reveal": "always",
                 "panel": "dedicated",
                 "clear": true
             }
         },
-
         {
             // Flashes the ESP32-C6 firmware via the serial port set in
             // idf.port (.vscode/settings.json).  After udev rules are
@@ -203,7 +202,7 @@
             "command": "bash",
             "args": [
                 "-lc",
-                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash"
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash""set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash"
             ],
             "dependsOn": "ESP: Build",
             "dependsOrder": "sequence",
@@ -214,7 +213,6 @@
                 "clear": true
             }
         },
-
         {
             // Opens idf.py monitor to display ESP32-C6 serial output.
             // The monitor decodes ESP-IDF log levels and backtraces.
@@ -225,7 +223,7 @@
             "command": "bash",
             "args": [
                 "-lc",
-                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" monitor"
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" monitor""set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" monitor"
             ],
             "problemMatcher": [],
             "presentation": {
@@ -233,7 +231,6 @@
                 "panel": "dedicated"
             }
         },
-
         {
             // Convenience task: build, flash, then immediately open idf.py
             // monitor so you can see ESP32-C6 log output in one step.
@@ -243,7 +240,7 @@
             "command": "bash",
             "args": [
                 "-lc",
-                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash monitor"
+                "set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash monitor""set -euo pipefail; IDF_PATH=\"${config:idf.currentSetup}\"; if [ ! -f \"$IDF_PATH/export.sh\" ]; then echo \"ERROR: ESP-IDF not found at $IDF_PATH. Run the Setup task first.\"; exit 1; fi; source \"$IDF_PATH/export.sh\"; idf.py -C \"${workspaceFolder}/lcd_uext_ili9341\" -p \"${config:idf.port}\" flash monitor"
             ],
             "dependsOn": "ESP: Build",
             "dependsOrder": "sequence",
