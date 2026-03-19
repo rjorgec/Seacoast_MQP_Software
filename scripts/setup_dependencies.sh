@@ -107,19 +107,35 @@ section() {
 apt_install() {
   local to_install=()
   for pkg in "$@"; do
-    # dpkg-query exits non-zero when the package is not installed.
+    # dpkg-query exits non-zero when the package is not installed via apt/dpkg.
+    # Note: packages installed by other means (e.g. snap, pip, manually compiled
+    # binaries) will NOT appear in dpkg-query — they will be queued for apt
+    # install, which is harmless since apt-get install is idempotent and will
+    # simply report "already up to date" if the package is already satisfied.
     if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
       to_install+=("$pkg")
     fi
   done
 
   if [ ${#to_install[@]} -eq 0 ]; then
-    echo "  (all packages already installed — skipping apt-get)"
+    echo "  (all packages already installed via apt — skipping apt-get)"
     return
   fi
 
   echo "  Installing: ${to_install[*]}"
-  sudo apt-get update -y -qq
+
+  # Run apt-get update to refresh the package index.
+  # We use '|| true' here so that a broken third-party repository (e.g. a
+  # stale AMD GPU, CUDA, or other vendor repo that no longer has a Release
+  # file) does not abort the entire setup script.  If the update itself fails,
+  # apt-get install will still work from the cached package lists for all
+  # standard Debian/Ubuntu repositories.
+  sudo apt-get update -y -qq 2>&1 || {
+    echo "  WARNING: 'apt-get update' reported errors (possibly a broken third-party"
+    echo "  repository in /etc/apt/sources.list.d/).  Proceeding with cached package"
+    echo "  lists — run 'sudo apt-get update' manually to investigate the error."
+  }
+
   sudo apt-get install -y "${to_install[@]}"
 }
 
