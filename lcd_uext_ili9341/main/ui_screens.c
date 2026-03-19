@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "ui_screens.h"
+#include "control.h"
 #include "sys_sequence.h"
 
 #include "lvgl.h"
@@ -20,15 +21,10 @@ static const char *TAG = "ui_screens";
 #define LVGL_ACTIVE_SCREEN() lv_scr_act()
 #endif
 
-#define JOG_SPEED 2500u
-#define JOG_LOW_TH 30u
-#define JOG_HIGH_TH 200u
-#define JOG_INTERVAL_MS 5u
-
 /* Shared file-scope labels — re-assigned by every ui_show_* call */
 static lv_obj_t *lbl_status = NULL; /* updated by ui_status_set() / set_status() */
 static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without it */
-static float s_last_weight_g = 0.0f;
+static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
 
 /* Operations screen async-update labels — NULL when not on that screen */
 static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
@@ -77,40 +73,6 @@ static bool sequence_manual_actions_blocked(void)
 
 /* ── Home-screen button callbacks ────────────────────────────────────────── */
 
-static void on_fwd(lv_event_t *e)
-{
-    (void)e;
-    if (sequence_manual_actions_blocked())
-    {
-        set_status("SEQ active: manual disabled");
-        return;
-    }
-    esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_FWD,
-                                                   JOG_SPEED,
-                                                   JOG_LOW_TH,
-                                                   JOG_HIGH_TH,
-                                                   JOG_INTERVAL_MS);
-    set_status(err == ESP_OK ? "LINACT: FWD" : "LINACT: FWD FAILED");
-    ESP_LOGI(TAG, "FWD pressed (%s)", esp_err_to_name(err));
-}
-
-static void on_rev(lv_event_t *e)
-{
-    (void)e;
-    if (sequence_manual_actions_blocked())
-    {
-        set_status("SEQ active: manual disabled");
-        return;
-    }
-    esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_REV,
-                                                   JOG_SPEED,
-                                                   JOG_LOW_TH,
-                                                   JOG_HIGH_TH,
-                                                   JOG_INTERVAL_MS);
-    set_status(err == ESP_OK ? "LINACT: REV" : "LINACT: REV FAILED");
-    ESP_LOGI(TAG, "REV pressed (%s)", esp_err_to_name(err));
-}
-
 static void on_dose(lv_event_t *e)
 {
     (void)e;
@@ -140,6 +102,20 @@ static void on_ops_page(lv_event_t *e)
     }
     ui_show_operations();
     ESP_LOGI(TAG, "Operations pressed");
+}
+
+static void on_auto_page(lv_event_t *e)
+{
+    (void)e;
+    ui_show_auto();
+    ESP_LOGI(TAG, "Automated Functions pressed");
+}
+
+static void on_scale_page(lv_event_t *e)
+{
+    (void)e;
+    ui_show_scale();
+    ESP_LOGI(TAG, "Scale pressed");
 }
 
 static void on_tare(lv_event_t *e)
@@ -198,12 +174,20 @@ static void on_read_weight(lv_event_t *e)
     }
 }
 
-static void on_seq_setup_load(lv_event_t *e)
+static void on_setup_load(lv_event_t *e)
 {
     (void)e;
     esp_err_t err = sys_sequence_send_cmd(SYS_CMD_SETUP_LOAD);
-    set_status(err == ESP_OK ? "SEQ: SETUP_LOAD sent" : "SEQ: SETUP_LOAD failed");
-    ESP_LOGI(TAG, "Sequence setup/load (%s)", esp_err_to_name(err));
+    set_status(err == ESP_OK ? "Setup/Load started" : "Setup/Load FAILED");
+    ESP_LOGI(TAG, "Setup/Load (%s)", esp_err_to_name(err));
+}
+
+static void on_start(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_START);
+    set_status(err == ESP_OK ? "Starting..." : "Start FAILED");
+    ESP_LOGI(TAG, "Start pressed (%s)", esp_err_to_name(err));
 }
 
 static void on_seq_start(lv_event_t *e)
@@ -217,9 +201,10 @@ static void on_seq_start(lv_event_t *e)
 static void on_seq_abort(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_ABORT);
-    set_status(err == ESP_OK ? "SEQ: ABORT sent" : "SEQ: ABORT failed");
-    ESP_LOGI(TAG, "Sequence abort (%s)", esp_err_to_name(err));
+    ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
+    bool ok = control_send(&cmd);
+    set_status(ok ? "STOP sent" : "STOP failed");
+    ESP_LOGI(TAG, "Stop pressed (send=%d)", (int)ok);
 }
 
 /* ── Operations-screen button callbacks ──────────────────────────────────── */
@@ -508,20 +493,6 @@ void ui_ops_on_vacuum_status(const pl_vacuum_status_t *pl)
 
 /* ── UI helpers ──────────────────────────────────────────────────────────── */
 
-/** Create a full-featured grid button (for Home screen grid layout). */
-static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *txt,
-                              lv_event_cb_t cb)
-{
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *label = lv_label_create(btn);
-    lv_label_set_text(label, txt);
-    lv_obj_center(label);
-
-    return btn;
-}
-
 /**
  * Create a button at an explicit absolute position within the screen's
  * padded content area. Uses LV_ALIGN_TOP_LEFT + (x, y) offsets.
@@ -545,14 +516,143 @@ static lv_obj_t *make_btn(lv_obj_t *scr, const char *txt,
 
 /* ── Screen builders ─────────────────────────────────────────────────────── */
 
+/*
+ * Automated Functions Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  2  "Automated Functions"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
+ *  y= 20  status label (colour = white)
+ *  y= 42  [Setup / Load  300×56]
+ *  y=104  [Dose          300×56]
+ *  y=166  [Start         300×56]
+ */
+void ui_show_auto(void)
+{
+    lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
+    lv_obj_clean(scr);
+
+    /* Nullify async-update handles on unrelated screens */
+    s_ops_lbl_status = NULL;
+    s_ops_lbl_vacuum = NULL;
+    lbl_weight = NULL;
+
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* ── Title ───────────────────────────────────────────────────────────── */
+    lv_obj_t *lbl_title = lv_label_create(scr);
+    lv_label_set_text(lbl_title, "Automated Functions");
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, 0, 2);
+
+    /* ── Home nav (top-right) ────────────────────────────────────────────── */
+    lv_obj_t *btn_nav = lv_btn_create(scr);
+    lv_obj_set_size(btn_nav, 60, 20);
+    lv_obj_align(btn_nav, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_nav, on_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l_nav = lv_label_create(btn_nav);
+    lv_label_set_text(l_nav, "Home");
+    lv_obj_center(l_nav);
+
+    /* ── Status label (y=20) ─────────────────────────────────────────────── */
+    lbl_status = lv_label_create(scr);
+    lv_label_set_text(lbl_status, "Ready");
+    lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 20);
+
+    /* ── Three large action buttons ──────────────────────────────────────── */
+    make_btn(scr, "Setup / Load", 0, 42, 300, 56, on_setup_load);
+    make_btn(scr, "Dose",         0, 104, 300, 56, on_dose);
+    make_btn(scr, "Start",        0, 166, 300, 56, on_start);
+}
+
+/*
+ * Scale Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  2  "Scale"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
+ *  y= 28  weight readout label (large, live-updated)
+ *  y= 68  [Tare  145×80]   4   [Read  145×80]
+ *  y=156  status label (result of last Tare / Read)
+ */
+void ui_show_scale(void)
+{
+    lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
+    lv_obj_clean(scr);
+
+    /* Nullify unrelated async handles */
+    s_ops_lbl_status = NULL;
+    s_ops_lbl_vacuum = NULL;
+    s_dose_lbl_status = NULL;
+    s_dose_lbl_progress = NULL;
+    s_dose_lbl_retries = NULL;
+    s_dose_bar = NULL;
+    s_dose_lbl_innoc = NULL;
+    s_dose_target_ug = 0;
+
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* ── Title ───────────────────────────────────────────────────────────── */
+    lv_obj_t *lbl_title = lv_label_create(scr);
+    lv_label_set_text(lbl_title, "Scale");
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, 0, 2);
+
+    /* ── Home nav (top-right) ────────────────────────────────────────────── */
+    lv_obj_t *btn_nav = lv_btn_create(scr);
+    lv_obj_set_size(btn_nav, 60, 20);
+    lv_obj_align(btn_nav, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_nav, on_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l_nav = lv_label_create(btn_nav);
+    lv_label_set_text(l_nav, "Home");
+    lv_obj_center(l_nav);
+
+    /* ── Weight readout (y=28) — updated live via ui_screens_pico_rx_handler */
+    lbl_weight = lv_label_create(scr);
+    lv_obj_set_style_text_font(lbl_weight, &lv_font_montserrat_14, 0);
+    /* Show last-known value immediately so the screen is not blank */
+    {
+        char w_buf[32];
+        if (s_last_weight_g >= 0.0f)
+            snprintf(w_buf, sizeof(w_buf), "Weight: %.2f g", (double)s_last_weight_g);
+        else
+            snprintf(w_buf, sizeof(w_buf), "Weight: -- g");
+        lv_label_set_text(lbl_weight, w_buf);
+    }
+    lv_obj_align(lbl_weight, LV_ALIGN_TOP_LEFT, 0, 28);
+
+    /* ── Tare / Read buttons (y=68, h=80, 4 px gap) ─────────────────────── */
+    make_btn(scr, "Tare", 0,   68, 148, 80, on_tare);
+    make_btn(scr, "Read", 152, 68, 148, 80, on_read_weight);
+
+    /* ── Status label (y=156) ────────────────────────────────────────────── */
+    lbl_status = lv_label_create(scr);
+    lv_label_set_text(lbl_status, "");
+    lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 156);
+}
+
+/*
+ * Home Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  0  status label "IDLE • Seacoast Inoculator"
+ *  y= 20  [Automated Functions  300×60]
+ *  y= 86  [Scale                300×60]
+ *  y=152  [Operations           300×60]
+ */
 void ui_show_home(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
 
-    /* Nullify ops-screen labels so async handlers don't touch freed widgets */
+    /* Nullify all async-update handles so stale pointer writes can't crash */
     s_ops_lbl_status = NULL;
     s_ops_lbl_vacuum = NULL;
+    s_dose_lbl_status = NULL;
+    s_dose_lbl_progress = NULL;
+    s_dose_lbl_retries = NULL;
+    s_dose_bar = NULL;
+    s_dose_lbl_innoc = NULL;
+    s_dose_target_ug = 0;
+    lbl_weight = NULL;
 
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
@@ -562,48 +662,10 @@ void ui_show_home(void)
     lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* 2-column × 4-row button grid */
-    lv_obj_t *cont = lv_obj_create(scr);
-    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(cont, 300, 210);
-    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, 0);
-
-    lv_obj_set_style_pad_all(cont, 6, 0);
-    lv_obj_set_style_pad_row(cont, 6, 0);
-    lv_obj_set_style_pad_column(cont, 6, 0);
-    lv_obj_set_layout(cont, LV_LAYOUT_GRID);
-
-    static lv_coord_t col_dsc[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
-
-    lv_obj_t *b_fwd = make_big_btn(cont, "Forward", on_fwd);
-    lv_obj_t *b_rev = make_big_btn(cont, "Backward", on_rev);
-    lv_obj_t *b_dose = make_big_btn(cont, "Dose", on_dose);
-    lv_obj_t *b_tare = make_big_btn(cont, "Tare", on_tare);
-    lv_obj_t *b_setup = make_big_btn(cont, "Setup/Load", on_seq_setup_load);
-    lv_obj_t *b_start = make_big_btn(cont, "Start", on_seq_start);
-    lv_obj_t *b_abort = make_big_btn(cont, "Abort", on_seq_abort);
-    lv_obj_t *b_ops = make_big_btn(cont, "Operations", on_ops_page);
-
-    lv_obj_set_grid_cell(b_fwd, LV_GRID_ALIGN_STRETCH, 0, 1,
-                         LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_rev, LV_GRID_ALIGN_STRETCH, 1, 1,
-                         LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_dose, LV_GRID_ALIGN_STRETCH, 0, 1,
-                         LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 1, 1,
-                         LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_set_grid_cell(b_setup, LV_GRID_ALIGN_STRETCH, 0, 1,
-                         LV_GRID_ALIGN_STRETCH, 2, 1);
-    lv_obj_set_grid_cell(b_start, LV_GRID_ALIGN_STRETCH, 1, 1,
-                         LV_GRID_ALIGN_STRETCH, 2, 1);
-    lv_obj_set_grid_cell(b_abort, LV_GRID_ALIGN_STRETCH, 0, 1,
-                         LV_GRID_ALIGN_STRETCH, 3, 1);
-    lv_obj_set_grid_cell(b_ops, LV_GRID_ALIGN_STRETCH, 1, 1,
-                         LV_GRID_ALIGN_STRETCH, 3, 1);
+    /* Three large navigation buttons */
+    make_btn(scr, "Automated Functions", 0,   20, 300, 60, on_auto_page);
+    make_btn(scr, "Scale",               0,   86, 300, 60, on_scale_page);
+    make_btn(scr, "Operations",          0,  152, 300, 60, on_ops_page);
 }
 
 /*
