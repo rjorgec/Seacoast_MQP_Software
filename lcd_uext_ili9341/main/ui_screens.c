@@ -27,6 +27,9 @@ static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without i
 static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
 static uint16_t s_weight_req_seq = 0u; /* 0 = no in-flight read request */
 
+/* Scale screen auto-refresh timer — non-NULL only while the Scale screen is active */
+static lv_timer_t *s_scale_timer = NULL;
+
 /* Operations screen async-update labels — NULL when not on that screen */
 static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
 static lv_obj_t *s_ops_lbl_vacuum = NULL; /* vacuum pump status + RPM */
@@ -110,6 +113,26 @@ static void on_auto_page(lv_event_t *e)
     (void)e;
     ui_show_auto();
     ESP_LOGI(TAG, "Automated Functions pressed");
+}
+
+static void scale_auto_read_cb(lv_timer_t *t)
+{
+    (void)t;
+    static const pl_hx711_measure_t req = {.interval_us = 500000}; /* 500 ms measurement window */
+    (void)pico_link_send(MSG_HX711_MEASURE, &req, sizeof(req), NULL);
+}
+
+static void scale_timer_stop(void)
+{
+    if (s_scale_timer)
+    {
+#if defined(LVGL_VERSION_MAJOR) && (LVGL_VERSION_MAJOR >= 9)
+        lv_timer_delete(s_scale_timer);
+#else
+        lv_timer_del(s_scale_timer);
+#endif
+        s_scale_timer = NULL;
+    }
 }
 
 static void on_scale_page(lv_event_t *e)
@@ -551,6 +574,9 @@ void ui_show_auto(void)
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
 
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
+
     /* Nullify async-update handles on unrelated screens */
     s_ops_lbl_status = NULL;
     s_ops_lbl_vacuum = NULL;
@@ -598,6 +624,9 @@ void ui_show_scale(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Delete any stale timer before creating a new one (re-entry guard) */
+    scale_timer_stop();
 
     /* Nullify unrelated async handles */
     s_ops_lbl_status = NULL;
@@ -649,6 +678,11 @@ void ui_show_scale(void)
     lv_label_set_text(lbl_status, "");
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 156);
+
+    /* ── Auto-refresh timer: request a new reading every 2 s ────────────── */
+    s_scale_timer = lv_timer_create(scale_auto_read_cb, 2000, NULL);
+    /* Trigger an immediate first read so the display is not stale on entry */
+    scale_auto_read_cb(s_scale_timer);
 }
 
 /*
@@ -663,6 +697,9 @@ void ui_show_home(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Nullify all async-update handles so stale pointer writes can't crash */
     s_ops_lbl_status = NULL;
@@ -713,6 +750,9 @@ void ui_show_operations(void)
     lv_obj_clean(scr);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Weight label not present on this screen */
     lbl_weight = NULL;
@@ -851,11 +891,16 @@ static void on_dose_start(lv_event_t *e)
 static void on_dose_abort(lv_event_t *e)
 {
     (void)e;
-    /* Close flaps to stop material flow immediately; the Pico's spawn timer
-     * will exhaust its agitation retries and send SPAWN_STATUS_BAG_EMPTY. */
-    esp_err_t err = motor_flap_close();
-    set_status(err == ESP_OK ? "Aborting\xe2\x80\xa6" : "Abort FAILED");
-    ESP_LOGI(TAG, "Dose abort (%s)", esp_err_to_name(err));
+    /* Send MSG_CTRL_STOP so the Pico aborts the spawn state machine,
+     * stops the timer, stops flaps, and fast-closes — see uart_server.c
+     * MSG_CTRL_STOP handler. */
+    uint8_t nack = 0;
+    esp_err_t err = pico_link_send_rpc(MSG_CTRL_STOP, NULL, 0,
+                                       2000, /* 2 s timeout */
+                                       &nack);
+    set_status(err == ESP_OK ? "Aborted" : "Abort FAILED");
+    ESP_LOGI(TAG, "Dose abort via MSG_CTRL_STOP (%s nack=%u)",
+             esp_err_to_name(err), nack);
 }
 
 /* ── Dosing screen — spawn-status async update ───────────────────────────── */
@@ -962,6 +1007,9 @@ void ui_show_dosing(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Nullify all async-update handles so stale pointer writes can't crash. */
     s_ops_lbl_status = NULL;
