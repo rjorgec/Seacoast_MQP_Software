@@ -1228,7 +1228,10 @@ static void handle_stepper_enable(uint16_t seq, const uint8_t *payload, uint16_t
 
 static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
-    if (len != (uint16_t)sizeof(pl_stepper_stepjob_t))
+    const uint16_t expected_new = (uint16_t)sizeof(pl_stepper_stepjob_t);
+    const uint16_t expected_old = (uint16_t)(sizeof(pl_stepper_stepjob_t) - sizeof(uint16_t));
+
+    if (len != expected_new && len != expected_old)
     {
         send_nack(seq, NACK_BAD_LEN);
         return;
@@ -1241,15 +1244,22 @@ static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_
     }
 
     const pl_stepper_stepjob_t *p = (const pl_stepper_stepjob_t *)payload;
+    uint16_t torque_limit = 0u;
+    if (len == expected_new)
+    {
+        torque_limit = p->torque_limit;
+    }
+
     int32_t target = (p->dir == 0) ? (int32_t)p->steps : -(int32_t)p->steps;
 
-    printf("Stepper: %lu steps dir=%u delay=%lu us\n",
+        printf("Stepper: %lu steps dir=%u delay=%lu us torque_limit=%u\n",
            (unsigned long)p->steps,
            (unsigned)p->dir,
-           (unsigned long)p->step_delay_us);
+           (unsigned long)p->step_delay_us,
+           (unsigned)torque_limit);
 
     /* Start motion on device 0 (non-blocking) */
-    if (!drv8434s_motion_start(&s_motion, 0u, target, 0u))
+    if (!drv8434s_motion_start(&s_motion, 0u, target, torque_limit))
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -1558,7 +1568,7 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
         return true;
     }
 
-    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, 0u))
+    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, STEPPER_SOFT_TORQUE_LIMIT))
     {
         send_nack(seq, NACK_UNKNOWN);
         return false;
@@ -2494,6 +2504,52 @@ static void init_drv8434s_chain(void)
 
     printf("uart_server: DRV8434S all %u device(s) enabled (EN_OUT=1)\n",
            (unsigned)s_stepper_chain.cfg.n_devices);
+
+    /* Ensure the chain is not in a faulted state at startup. */
+    (void)drv8434s_chain_global_clear_faults(&s_stepper_chain);
+
+    /* Configure each device for Smart-Tune Ripple mode + stall detection. */
+    for (uint8_t k = 0; k < s_stepper_chain.cfg.n_devices; ++k)
+    {
+        /* Configure fault reporting (so stall detection is allowed by default). */
+        (void)drv8434s_chain_set_fault_config(&s_stepper_chain, k,
+                                             DRV8434S_FAULT_CFG_STL_REP,
+                                             NULL);
+
+        /* Smart-tune ripple decay is required for TRQ_COUNT to update. */
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL2,
+                                        DRV8434S_CTRL2_DECAY_MASK,
+                                        (uint8_t)DRV8434S_DECAY_SMART_TUNE_RIPPLE,
+                                        NULL);
+
+        /* Enable stall detection (EN_STL). */
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL5,
+                                        DRV8434S_CTRL5_EN_STL,
+                                        DRV8434S_CTRL5_EN_STL,
+                                        NULL);
+
+        /* Set stall threshold to minimum (1) so TRQ_COUNT updates.
+         * When set to 0 the device may not update torque count at all.
+         * A real stall will still produce TRQ_COUNT=0 and can be detected
+         * by our soft limit logic. */
+        (void)drv8434s_chain_write_reg(&s_stepper_chain, k,
+                                      DRV8434S_REG_CTRL6, 1u, NULL);
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL7,
+                                        DRV8434S_CTRL7_STALL_TH_HI_MASK,
+                                        0u,
+                                        NULL);
+
+        /* Enable torque-count scaling (optional but matches datasheet note).
+         * This improves resolution for low-torque behavior. */
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL7,
+                                        DRV8434S_CTRL7_TRQ_SCALE,
+                                        DRV8434S_CTRL7_TRQ_SCALE,
+                                        NULL);
+    }
 
     /* Initialise the non-blocking motion engine.
      * torque_sample_div=10 → sample torque every 10th tick. */

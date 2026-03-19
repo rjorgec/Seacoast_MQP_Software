@@ -168,13 +168,13 @@
 
 /* Arm stepper (device 0) */
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS 500 /* steps to press attachment */
+#define ARM_STEPS_PRESS -3500 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1 2000 /* absolute position 1 */
+#define ARM_STEPS_POS1 0 /* absolute position 1 */
 #endif
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2 5000 /* absolute position 2 */
+#define ARM_STEPS_POS2 500 /* absolute position 2 */
 #endif
 #ifndef ARM_PRESS_STALL_WINDOW_STEPS
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
@@ -324,17 +324,17 @@
 /* ================================================================== */
 
 #ifndef STEPPER_DEV_ROT_ARM
-#define STEPPER_DEV_ROT_ARM 1 /* Rotary suction arm (MSG_ARM_MOVE) */
+#define STEPPER_DEV_ROT_ARM 0 /* Rotary suction arm (MSG_ARM_MOVE) */
 #endif
 // #ifndef STEPPER_DEV_LIN_ARM
 // #define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
 // #endif
 #ifndef STEPPER_DEV_TURNTABLE
-#define STEPPER_DEV_TURNTABLE 2 /* Turntable / platform */
+#define STEPPER_DEV_TURNTABLE 1 /* Turntable / platform */
 #endif
 /* Uncomment each entry and bump DRV8434S_N_DEVICES when wired: */
 #ifndef STEPPER_DEV_AGITATOR
-#define STEPPER_DEV_AGITATOR 0 /* Agitator eccentric arm */
+#define STEPPER_DEV_AGITATOR 2 /* Agitator eccentric arm */
 #endif
 // #define STEPPER_DEV_HW_CARRIAGE 4  /* Hot wire carriage traverse */
 // #define STEPPER_DEV_INDEXER     5  /* Bag depth/eject rack (indexer) */
@@ -342,6 +342,10 @@
 /* Default step delay used by the high-level stepper handlers (µs per step). */
 #ifndef STEPPER_DEFAULT_STEP_DELAY_US
 #define STEPPER_DEFAULT_STEP_DELAY_US 1000u
+#endif
+
+#ifndef STEPPER_SOFT_TORQUE_LIMIT
+#define STEPPER_SOFT_TORQUE_LIMIT 100u /* 0 = disabled */
 #endif
 
 /* ================================================================== */

@@ -133,6 +133,7 @@ extern "C"
         uint8_t dir;
         uint32_t steps;
         uint32_t step_delay_us;
+        uint16_t torque_limit; /* soft torque limit (0 = disabled) */
     } pl_stepper_stepjob_t;
 
     typedef struct __attribute__((packed))
