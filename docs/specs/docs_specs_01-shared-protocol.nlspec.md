@@ -66,7 +66,7 @@ typedef struct __attribute__((packed)) {
 | 0x10 | `MSG_MOTOR_DRV8263_START_MON` | ESP → Pico | `pl_drv8263_start_mon_t` (12 bytes) | Start DRV8263 motor with current monitoring |
 | 0x11 | `MSG_MOTOR_DRV8263_STOP_MON` | ESP → Pico | none (len=0) | Stop DRV8263 motor and monitoring |
 | 0x20 | `MSG_MOTOR_STEPPER_ENABLE` | ESP → Pico | `pl_stepper_enable_t` (1 byte) | Enable/disable DRV8434S stepper drivers |
-| 0x21 | `MSG_MOTOR_STEPPER_STEPJOB` | ESP → Pico | `pl_stepper_stepjob_t` (9 bytes) | Execute a raw step job |
+| 0x21 | `MSG_MOTOR_STEPPER_STEPJOB` | ESP → Pico | `pl_stepper_stepjob_t` (11 bytes) | Execute a raw step job (includes soft torque limit) |
 | 0x28 | `MSG_HX711_TARE` | ESP → Pico | none (len=0) | Zero the load cell |
 | 0x29 | `MSG_HX711_MEASURE` | ESP → Pico | `pl_hx711_measure_t` (4 bytes) | Request a weight reading; Pico responds with ACK containing `pl_hx711_mass_t` |
 | 0x30 | `MSG_CTRL_TARE` | ESP → Pico | none | Control-level tare command |
@@ -220,7 +220,7 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 | `pl_hx711_measure_t` | 4 | `interval_us:u32` |
 | `pl_hx711_mass_t` | 8 | `mass_ug:i32, unit:u8, _rsvd[3]:u8` |
 | `pl_stepper_enable_t` | 1 | `enable:u8` |
-| `pl_stepper_stepjob_t` | 9 | `dir:u8, steps:u32, step_delay_us:u32` |
+| `pl_stepper_stepjob_t` | 11 | `dir:u8, steps:u32, step_delay_us:u32, torque_limit:u16` |
 | `pl_nack_t` | 1 | `code:u8` |
 | `pl_arm_move_t` | 1 | `position:u8` (arm_pos_t) |
 | `pl_rack_move_t` | 1 | `position:u8` (rack_pos_t) |
