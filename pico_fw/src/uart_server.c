@@ -24,6 +24,10 @@
 #include "shared/proto/proto.h"
 #include "shared/proto/cobs.h"
 
+#ifndef STEPPER_SOFT_TORQUE_LIMIT
+#define STEPPER_SOFT_TORQUE_LIMIT PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT
+#endif
+
 /* ── Frame-level constants ─────────────────────────────────────────────────── */
 
 #define UART_RX_RING_SIZE 512u
@@ -756,14 +760,29 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
 #ifdef STEPPER_DEV_AGITATOR
                 if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
                 {
-                    drv8434s_motion_job_t agit_job = {0};
-                    agit_job.dev_idx       = (uint8_t)STEPPER_DEV_AGITATOR;
-                    agit_job.steps         = (uint32_t)AGITATOR_KNEAD_STEPS;
-                    agit_job.reverse       = false;
-                    agit_job.step_delay_us = (uint32_t)AGITATOR_STEP_DELAY_US;
-                    (void)drv8434s_motion_start(&s_motion, &agit_job);
-                    printf("Agitator: started knead motion (%u steps)\n",
-                           (unsigned)AGITATOR_KNEAD_STEPS);
+                    int32_t agit_steps = (int32_t)AGITATOR_KNEAD_STEPS;
+                    if (!drv8434s_motion_start(&s_motion,
+                                               (uint8_t)STEPPER_DEV_AGITATOR,
+                                               agit_steps,
+                                               (uint16_t)STEPPER_SOFT_TORQUE_LIMIT))
+                    {
+                        printf("Agitator: motion start failed\n");
+                    }
+                    else
+                    {
+                        if (!ensure_step_timer_running())
+                        {
+                            drv8434s_motion_cancel(&s_motion,
+                                                   (uint8_t)STEPPER_DEV_AGITATOR,
+                                                   NULL);
+                            printf("Agitator: failed to start step timer\n");
+                        }
+                        else
+                        {
+                            printf("Agitator: started knead motion (%u steps)\n",
+                                   (unsigned)AGITATOR_KNEAD_STEPS);
+                        }
+                    }
                 }
                 else
                 {
@@ -1479,20 +1498,26 @@ static void stepper_completion_tick(void)
         if (job_done || timeout)
         {
             motion_result_t result;
+            int32_t steps_achieved = 0;
 
             if (timeout && !job_done)
             {
                 /* Still running but deadline exceeded — cancel it. */
-                drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_ROT_ARM, NULL);
+                drv8434s_motion_result_t cancelled;
+                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_ROT_ARM,
+                                           &cancelled))
+                {
+                    steps_achieved = cancelled.steps_achieved;
+                }
                 result = MOTION_TIMEOUT;
             }
             else
             {
+                steps_achieved = s_motion.jobs[STEPPER_DEV_ROT_ARM].steps_achieved;
                 drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_ROT_ARM].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
-                    s_arm_pos_steps = s_arm_pending.target_steps;
                 }
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
@@ -1509,6 +1534,8 @@ static void stepper_completion_tick(void)
                     result = MOTION_FAULT;
                 }
             }
+
+            s_arm_pos_steps += steps_achieved;
 
             send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
             s_arm_pending.pending = false;
@@ -1527,19 +1554,25 @@ static void stepper_completion_tick(void)
         if (job_done || timeout)
         {
             motion_result_t result;
+            int32_t steps_achieved = 0;
 
             if (timeout && !job_done)
             {
-                drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_LIN_ARM, NULL);
+                drv8434s_motion_result_t cancelled;
+                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_LIN_ARM,
+                                           &cancelled))
+                {
+                    steps_achieved = cancelled.steps_achieved;
+                }
                 result = MOTION_TIMEOUT;
             }
             else
             {
+                steps_achieved = s_motion.jobs[STEPPER_DEV_LIN_ARM].steps_achieved;
                 drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_LIN_ARM].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
-                    s_rack_pos_steps = s_rack_pending.target_steps;
                 }
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
@@ -1556,6 +1589,8 @@ static void stepper_completion_tick(void)
                     result = MOTION_FAULT;
                 }
             }
+
+            s_rack_pos_steps += steps_achieved;
 
             send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
             s_rack_pending.pending = false;
@@ -1574,19 +1609,25 @@ static void stepper_completion_tick(void)
         if (job_done || timeout)
         {
             motion_result_t result;
+            int32_t steps_achieved = 0;
 
             if (timeout && !job_done)
             {
-                drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE, NULL);
+                drv8434s_motion_result_t cancelled;
+                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE,
+                                           &cancelled))
+                {
+                    steps_achieved = cancelled.steps_achieved;
+                }
                 result = MOTION_TIMEOUT;
             }
             else
             {
+                steps_achieved = s_motion.jobs[STEPPER_DEV_TURNTABLE].steps_achieved;
                 drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_TURNTABLE].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
-                    s_turntable_pos_steps = s_turntable_pending.target_steps;
                 }
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
@@ -1603,6 +1644,8 @@ static void stepper_completion_tick(void)
                     result = MOTION_FAULT;
                 }
             }
+
+            s_turntable_pos_steps += steps_achieved;
 
             send_motion_done(SUBSYS_TURNTABLE, result, s_turntable_pos_steps);
             s_turntable_pending.pending = false;

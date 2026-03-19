@@ -344,10 +344,6 @@
 #define STEPPER_DEFAULT_STEP_DELAY_US 1000u
 #endif
 
-#ifndef STEPPER_SOFT_TORQUE_LIMIT
-#define STEPPER_SOFT_TORQUE_LIMIT 100u /* 0 = disabled */
-#endif
-
 /* ================================================================== */
 /*  HX711 load cell calibration                                        */
 /* ================================================================== */

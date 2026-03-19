@@ -25,6 +25,7 @@ static const char *TAG = "ui_screens";
 static lv_obj_t *lbl_status = NULL; /* updated by ui_status_set() / set_status() */
 static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without it */
 static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
+static uint16_t s_weight_req_seq = 0u; /* 0 = no in-flight read request */
 
 /* Operations screen async-update labels — NULL when not on that screen */
 static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
@@ -161,6 +162,7 @@ static void on_read_weight(lv_event_t *e)
                                    &seq);
     if (err == ESP_OK)
     {
+        s_weight_req_seq = seq;
         set_status("Weight request sent...");
         ESP_LOGI(TAG, "Weight request sent (seq=%u)", seq);
     }
@@ -366,31 +368,50 @@ static void on_vacuum2_off(lv_event_t *e)
 void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
                                 const uint8_t *payload, uint16_t len)
 {
-    (void)seq;
-
-    if (msg_type == MSG_HX711_MEASURE && len == sizeof(pl_hx711_mass_t))
+    if (msg_type == MSG_HX711_MEASURE &&
+        payload != NULL &&
+        len >= sizeof(pl_hx711_mass_t))
     {
         pl_hx711_mass_t mass_data;
         memcpy(&mass_data, payload, sizeof(mass_data));
 
         float weight_g = (float)mass_data.mass_ug / 1000000.0f;
         s_last_weight_g = weight_g;
+        s_weight_req_seq = 0u;
         ESP_LOGI(TAG, "Received weight: %.3f g (unit=%u)", weight_g,
                  mass_data.unit);
 
+        char weight_str[32];
+        snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g", weight_g);
+
+        lvgl_port_lock(0);
         if (lbl_weight)
         {
-            char weight_str[32];
-            snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g",
-                     weight_g);
-            lvgl_port_lock(0);
             lv_label_set_text(lbl_weight, weight_str);
-            lvgl_port_unlock();
         }
+        lvgl_port_unlock();
 
         char status_buf[64];
         snprintf(status_buf, sizeof(status_buf), "Weight: %.2f g", weight_g);
         set_status(status_buf);
+        return;
+    }
+
+    /* If the Pico rejects a read request, surface it on the Scale screen. */
+    if (msg_type == MSG_NACK &&
+        payload != NULL &&
+        len >= sizeof(pl_nack_t) &&
+        s_weight_req_seq != 0u &&
+        seq == s_weight_req_seq)
+    {
+        const pl_nack_t *nack = (const pl_nack_t *)payload;
+        char status_buf[64];
+        snprintf(status_buf, sizeof(status_buf), "Weight read NACK (code=%u)",
+                 (unsigned)nack->code);
+        set_status(status_buf);
+        ESP_LOGW(TAG, "Weight read NACK for seq=%u code=%u",
+                 (unsigned)seq, (unsigned)nack->code);
+        s_weight_req_seq = 0u;
     }
 }
 

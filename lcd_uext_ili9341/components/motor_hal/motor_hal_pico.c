@@ -86,7 +86,7 @@ esp_err_t motor_linact_stop(void)
 // This value is sent over UART to the Pico and used by the motion engine
 // to stop a move when torque drops below the threshold.
 #ifndef STEPPER_SOFT_TORQUE_LIMIT
-#define STEPPER_SOFT_TORQUE_LIMIT 300u
+#define STEPPER_SOFT_TORQUE_LIMIT PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT
 #endif
 
 esp_err_t motor_stepper_enable(bool en)

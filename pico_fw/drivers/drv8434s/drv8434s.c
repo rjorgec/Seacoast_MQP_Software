@@ -1073,6 +1073,11 @@ bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
     if (target_steps == 0)
         return true; // Nothing to do
 
+    /* Clear any latched fault state from prior motions before arming
+     * a new job; otherwise the first tick can immediately fault out. */
+    if (!drv8434s_chain_clear_faults(motion->chain, dev_idx, NULL))
+        return false;
+
     memset(job, 0, sizeof(*job));
     job->active = true;
     job->reverse = (target_steps < 0);
