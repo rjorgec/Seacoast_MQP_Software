@@ -966,6 +966,15 @@ bool drv8434s_chain_read_torque_count(drv8434s_chain_t *chain,
                                  &high, status_out))
         return false;
 
+#ifdef TUNING
+    if (low == 0xFF && (high & DRV8434S_CTRL9_TRQ_COUNT_HI_MASK) == DRV8434S_CTRL9_TRQ_COUNT_HI_MASK)
+    {
+        // Common symptom of a floating / unresponsive SPI MISO line: all 1s.
+        printf("DRV8434S[%u] torque read = 0xFFF (raw: 0x%02X 0x%02X)\n",
+               dev_idx, low, high);
+    }
+#endif
+
     *torque_out = ((uint16_t)(high & DRV8434S_CTRL9_TRQ_COUNT_HI_MASK) << 8) | low;
     return true;
 }
@@ -1063,6 +1072,11 @@ bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
 
     if (target_steps == 0)
         return true; // Nothing to do
+
+    /* Clear any latched fault state from prior motions before arming
+     * a new job; otherwise the first tick can immediately fault out. */
+    if (!drv8434s_chain_clear_faults(motion->chain, dev_idx, NULL))
+        return false;
 
     memset(job, 0, sizeof(*job));
     job->active = true;
@@ -1204,18 +1218,12 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
             if (!job->active || job->torque_limit == 0)
                 continue;
 
-            // Skip if already scheduled to finish
-            bool already_done = false;
-            for (uint8_t f = 0; f < finish_count; ++f)
+            // If already faulted, leave as-is (stall/fault takes precedence).
+            if (job->reason == DRV8434S_MOTION_FAULT ||
+                job->reason == DRV8434S_MOTION_SPI_ERROR)
             {
-                if (finish_list[f] == k)
-                {
-                    already_done = true;
-                    break;
-                }
-            }
-            if (already_done)
                 continue;
+            }
 
             uint16_t trq = 0;
             if (!drv8434s_chain_read_torque_count(chain, k, &trq, NULL))
@@ -1237,17 +1245,49 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
             for (uint8_t b = 0; b < job->trq_buf_count; ++b)
                 sum += job->trq_buf[b];
             uint16_t avg = (uint16_t)(sum / job->trq_buf_count);
+
+            /* Ignore early transients after motion start/restart.
+             * TRQ_COUNT can dip for a short startup window after a prior
+             * torque-stop event even when motion is valid. */
+            uint32_t abs_steps_achieved =
+                (job->steps_achieved < 0) ? (uint32_t)(-job->steps_achieved)
+                                          : (uint32_t)job->steps_achieved;
+            if (abs_steps_achieved < (uint32_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS)
+            {
+                continue;
+            }
+
+            /* Require a full rolling window before making stop decisions. */
+            if (job->trq_buf_count < DRV8434S_MOTION_TRQ_BUF_SIZE)
+            {
+                continue;
+            }
 // Tuning print
 #ifdef TUNING
-            printf("Motor %u with torque %u: [%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]\n", k, avg, job->trq_buf[0], job->trq_buf[1], job->trq_buf[2], job->trq_buf[3], job->trq_buf[4], job->trq_buf[5], job->trq_buf[6], job->trq_buf[7], job->trq_buf[8], job->trq_buf[9]);
+            printf("Motor %u torque avg=%u limit=%u buf=[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]\n",
+                   k, avg, job->torque_limit,
+                   job->trq_buf[0], job->trq_buf[1], job->trq_buf[2], job->trq_buf[3],
+                   job->trq_buf[4], job->trq_buf[5], job->trq_buf[6], job->trq_buf[7],
+                   job->trq_buf[8], job->trq_buf[9]);
 #endif
 
             // TRQ_COUNT = torque margin until stall (0 = stalled).
-            // Trip when average falls at or below the limit.
-            if (avg <= job->torque_limit)
+            // Trip only when average is strictly below the limit.
+            if (avg < job->torque_limit)
             {
                 job->reason = DRV8434S_MOTION_TORQUE_LIMIT;
-                finish_list[finish_count++] = k;
+
+                bool already_listed = false;
+                for (uint8_t f = 0; f < finish_count; ++f)
+                {
+                    if (finish_list[f] == k)
+                    {
+                        already_listed = true;
+                        break;
+                    }
+                }
+                if (!already_listed)
+                    finish_list[finish_count++] = k;
             }
         }
     }
