@@ -1,7 +1,7 @@
 # NLSpec: ESP32-C6 Firmware
 
 ## Version
-0.1.0
+0.1.1
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -101,8 +101,12 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_indexer_move(uint8_t position)` | `MSG_INDEXER_MOVE` | `pl_indexer_move_t{position}` |
 | `motor_linact_start_monitor_dir(dir, speed, low, high, interval)` | `MSG_MOTOR_DRV8263_START_MON` | `pl_drv8263_start_mon_t` (legacy) |
 | `motor_linact_stop_monitor()` | `MSG_MOTOR_DRV8263_STOP_MON` | none (legacy) |
+| `motor_stepper_enable(bool en)` | `MSG_MOTOR_STEPPER_ENABLE` | `pl_stepper_enable_t{enable}` (legacy/raw stepper API) |
+| `motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_delay_us)` | `MSG_MOTOR_STEPPER_STEPJOB` | `pl_stepper_stepjob_t{dir,steps,step_delay_us,torque_limit}` (legacy/raw stepper API) |
 
-All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_send`, not `_rpc`).
+For `motor_stepper_step()`, the fallback `torque_limit` value is sourced from `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` in the shared protocol header (via `STEPPER_SOFT_TORQUE_LIMIT`), keeping ESP and Pico default behavior aligned.
+
+All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_send`, not `_rpc`) except APIs that explicitly use RPC semantics in implementation.
 
 ---
 

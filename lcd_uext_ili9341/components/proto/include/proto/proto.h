@@ -11,6 +11,10 @@ extern "C"
 #define PROTO_MAX_PAYLOAD 128u
 #define PROTO_DELIM 0x00u
 
+/* Shared default for DRV8434S soft torque-limit threshold.
+ * Keep this aligned with the Pico-side protocol header. */
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 300u
+
     /*
      * Wire format endianness is little-endian for all multi-byte fields.
      * ESP32-C6 and RP2040 are both little-endian, so native packed structs
@@ -133,6 +137,7 @@ extern "C"
         uint8_t dir;
         uint32_t steps;
         uint32_t step_delay_us;
+        uint16_t torque_limit; /* soft torque limit (0 = disabled) */
     } pl_stepper_stepjob_t;
 
     typedef struct __attribute__((packed))

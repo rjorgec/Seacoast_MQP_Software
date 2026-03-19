@@ -81,11 +81,11 @@
 // - HX711_DATA_GPIO: Data pin
 
 #ifndef HX711_CLK_GPIO
-#define HX711_CLK_GPIO 15
+#define HX711_CLK_GPIO 14
 #endif
 
 #ifndef HX711_DATA_GPIO
-#define HX711_DATA_GPIO 14
+#define HX711_DATA_GPIO 15
 #endif
 
 #ifndef HX711_DEFAULT_RATE_US
@@ -168,13 +168,13 @@
 
 /* Arm stepper (device 0) */
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS 500 /* steps to press attachment */
+#define ARM_STEPS_PRESS -3500 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1 1000 /* absolute position 1 */
+#define ARM_STEPS_POS1 0 /* absolute position 1 */
 #endif
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2 1500 /* absolute position 2 */
+#define ARM_STEPS_POS2 500 /* absolute position 2 */
 #endif
 #ifndef ARM_PRESS_STALL_WINDOW_STEPS
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
@@ -199,13 +199,13 @@
 #define TURNTABLE_STEPS_A 0
 #endif
 #ifndef TURNTABLE_STEPS_B
-#define TURNTABLE_STEPS_B 400
+#define TURNTABLE_STEPS_B 500
 #endif
 #ifndef TURNTABLE_STEPS_C
-#define TURNTABLE_STEPS_C 800
+#define TURNTABLE_STEPS_C 1000
 #endif
 #ifndef TURNTABLE_STEPS_D
-#define TURNTABLE_STEPS_D 1200
+#define TURNTABLE_STEPS_D 1500
 #endif
 #ifndef TURNTABLE_MOTION_TIMEOUT_MS
 #define TURNTABLE_MOTION_TIMEOUT_MS 8000
@@ -225,7 +225,7 @@
 #define FLAP_CLOSE_SPEED_PWM 3000 /* reduced speed on close */
 #endif
 #ifndef FLAP_CLOSE_TORQUE_TH
-#define FLAP_CLOSE_TORQUE_TH 145 /* ADC counts -- stall/torque threshold */
+#define FLAP_CLOSE_TORQUE_TH 300 /* ADC counts -- stall/torque threshold */
 #endif
 #ifndef FLAP_MONITOR_INTERVAL_MS
 #define FLAP_MONITOR_INTERVAL_MS 20
@@ -326,14 +326,16 @@
 #ifndef STEPPER_DEV_ROT_ARM
 #define STEPPER_DEV_ROT_ARM 0 /* Rotary suction arm (MSG_ARM_MOVE) */
 #endif
-#ifndef STEPPER_DEV_LIN_ARM
-#define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
-#endif
+// #ifndef STEPPER_DEV_LIN_ARM
+// #define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
+// #endif
 #ifndef STEPPER_DEV_TURNTABLE
-#define STEPPER_DEV_TURNTABLE 2 /* Turntable / platform */
+#define STEPPER_DEV_TURNTABLE 1 /* Turntable / platform */
 #endif
 /* Uncomment each entry and bump DRV8434S_N_DEVICES when wired: */
-// #define STEPPER_DEV_AGITATOR    3  /* Agitator eccentric arm */
+#ifndef STEPPER_DEV_AGITATOR
+#define STEPPER_DEV_AGITATOR 2 /* Agitator eccentric arm */
+#endif
 // #define STEPPER_DEV_HW_CARRIAGE 4  /* Hot wire carriage traverse */
 // #define STEPPER_DEV_INDEXER     5  /* Bag depth/eject rack (indexer) */
 
@@ -392,7 +394,8 @@
 #define SPAWN_AGITATE_MS 2000u /* agitation hold-off duration (ms) */
 #endif
 #ifndef SPAWN_STARTUP_FLOW_DETECT_UG
-#define SPAWN_STARTUP_FLOW_DETECT_UG 1000000u /* min µg change to confirm prime flow */
+#define SPAWN_STARTUP_FLOW_DETECT_UG                                           \
+  1000000u /* min µg change to confirm prime flow */
 #endif
 
 /* ── EMA filtering ─────────────────────────────────────────────────── *
@@ -401,7 +404,8 @@
  * Higher = faster response; lower = more noise rejection.              */
 
 #ifndef SPAWN_EMA_ALPHA_X1000
-#define SPAWN_EMA_ALPHA_X1000 250u /* EMA smoothing factor ×1000; range 50–500 */
+#define SPAWN_EMA_ALPHA_X1000                                                  \
+  250u /* EMA smoothing factor ×1000; range 50–500 */
 #endif
 
 /* ── Flow spike clamp ──────────────────────────────────────────────── *
@@ -411,7 +415,7 @@
  * is an implausible spike.                                             */
 
 #ifndef SPAWN_FLOW_SPIKE_CLAMP_UG
-#define SPAWN_FLOW_SPIKE_CLAMP_UG 10000000u /* max believable µg per tick */
+#define SPAWN_FLOW_SPIKE_CLAMP_UG 100000000u /* max believable µg per tick */
 #endif
 
 /* ── Nudge / rate limiting ─────────────────────────────────────────── */
@@ -423,10 +427,16 @@
 #define SPAWN_NUDGE_OPEN_MS 300u /* ms to nudge flap open per control tick */
 #endif
 #ifndef SPAWN_NUDGE_CLOSE_MS
-#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge flap closed per control tick */
+#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge flap closed per control tick  \
+                                   */
 #endif
 #ifndef SPAWN_MAX_OPEN_NUDGES
-#define SPAWN_MAX_OPEN_NUDGES 8u /* max consecutive open nudges with no flow increase */
+#define SPAWN_MAX_OPEN_NUDGES                                                  \
+  8u /* max consecutive open nudges with no flow increase */
+#endif
+#ifndef SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS
+#define SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS                                    \
+  350u /* minimum time before allowing an immediate nudge direction reversal */
 #endif
 
 /* ── Proportional gain thresholds ──────────────────────────────────── */
@@ -441,7 +451,8 @@
 /* ── Homing (optional re-zero to closed endpoint before dose) ──────── */
 
 #ifndef SPAWN_HOME_TIMEOUT_MS
-#define SPAWN_HOME_TIMEOUT_MS 6000u /* max time to home flaps (ms); ~2× full stroke */
+#define SPAWN_HOME_TIMEOUT_MS                                                  \
+  6000u /* max time to home flaps (ms); ~2× full stroke */
 #endif
 
 /* ── Close confirmation ─────────────────────────────────────────────── *
@@ -450,7 +461,8 @@
  * anyway.                                                               */
 
 #ifndef SPAWN_CLOSE_CONFIRM_TIMEOUT_MS
-#define SPAWN_CLOSE_CONFIRM_TIMEOUT_MS 6000u /* ms to wait for close endpoint detect */
+#define SPAWN_CLOSE_CONFIRM_TIMEOUT_MS                                         \
+  6000u /* ms to wait for close endpoint detect */
 #endif
 
 /* ── Fast-close PWM ─────────────────────────────────────────────────── *
@@ -459,7 +471,8 @@
  * command is issued.                                                   */
 
 #ifndef SPAWN_FAST_CLOSE_PWM
-#define SPAWN_FAST_CLOSE_PWM 4095u /* max PWM for fast close (safe if torque monitoring active) */
+#define SPAWN_FAST_CLOSE_PWM                                                   \
+  4095u /* max PWM for fast close (safe if torque monitoring active) */
 #endif
 
 /* ── Estimated close latency (for Finish A overshoot prediction) ────── *
@@ -473,20 +486,26 @@
 
 /* ── Finish Mode A: close-early + top-off ───────────────────────────── *
  * Close when:  remaining_ug < predicted_in_flight_ug + CLOSE_EARLY_MARGIN_UG *
- * predicted_in_flight_ug = (ema_flow_ug_per_tick * SPAWN_CLOSE_LATENCY_MS) / SPAWN_TIMER_PERIOD_MS */
+ * predicted_in_flight_ug = (ema_flow_ug_per_tick * SPAWN_CLOSE_LATENCY_MS) /
+ * SPAWN_TIMER_PERIOD_MS */
 
 #ifndef SPAWN_CLOSE_EARLY_MARGIN_UG
-#define SPAWN_CLOSE_EARLY_MARGIN_UG 500000u /* extra safety margin (µg) for early close */
+#define SPAWN_CLOSE_EARLY_MARGIN_UG                                            \
+  500000u /* extra safety margin (µg) for early close */
 #endif
-/* Top-off: issue small open pulses if final mass < target - TOPOFF_TOLERANCE_UG */
+/* Top-off: issue small open pulses if final mass < target - TOPOFF_TOLERANCE_UG
+ */
 #ifndef SPAWN_TOPOFF_TOLERANCE_UG
-#define SPAWN_TOPOFF_TOLERANCE_UG 1000000u /* undershoot tolerance for top-off (µg = 1 g) */
+#define SPAWN_TOPOFF_TOLERANCE_UG                                              \
+  1000000u /* undershoot tolerance for top-off (µg = 1 g) */
 #endif
 #ifndef SPAWN_TOPOFF_PULSE_MS
-#define SPAWN_TOPOFF_PULSE_MS 80u /* duration of each top-off open nudge (ms) */
+#define SPAWN_TOPOFF_PULSE_MS 80u /* duration of each top-off open nudge (ms)  \
+                                   */
 #endif
 #ifndef SPAWN_TOPOFF_MAX_PULSES
-#define SPAWN_TOPOFF_MAX_PULSES 5u /* max top-off attempts before declaring done */
+#define SPAWN_TOPOFF_MAX_PULSES                                                \
+  5u /* max top-off attempts before declaring done */
 #endif
 /* Pause between top-off open and re-close to let weight settle (ms) */
 #ifndef SPAWN_TOPOFF_SETTLE_MS
@@ -498,14 +517,17 @@
  * nudge duration so the flap barely trickles.                          */
 
 #ifndef SPAWN_LOWFLOW_THRESHOLD_UG
-#define SPAWN_LOWFLOW_THRESHOLD_UG 5000000u /* enter low-flow taper when ≤ 5 g remain */
+#define SPAWN_LOWFLOW_THRESHOLD_UG                                             \
+  5000000u /* enter low-flow taper when ≤ 5 g remain */
 #endif
 #ifndef SPAWN_LOWFLOW_NUDGE_MS
-#define SPAWN_LOWFLOW_NUDGE_MS 80u /* reduced nudge duration in low-flow phase (ms) */
+#define SPAWN_LOWFLOW_NUDGE_MS                                                 \
+  80u /* reduced nudge duration in low-flow phase (ms) */
 #endif
 /* Close fully when remaining_ug < CLOSE_THRESHOLD_UG (within low-flow phase) */
 #ifndef SPAWN_CLOSE_THRESHOLD_UG
-#define SPAWN_CLOSE_THRESHOLD_UG 500000u /* 0.5 g — issue final close from low-flow */
+#define SPAWN_CLOSE_THRESHOLD_UG                                               \
+  500000u /* 0.5 g — issue final close from low-flow */
 #endif
 
 /* ================================================================== */

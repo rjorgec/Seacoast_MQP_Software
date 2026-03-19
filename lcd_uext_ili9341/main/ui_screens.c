@@ -25,6 +25,11 @@ static const char *TAG = "ui_screens";
 static lv_obj_t *lbl_status = NULL; /* updated by ui_status_set() / set_status() */
 static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without it */
 static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
+static uint16_t s_weight_req_seq = 0u; /* 0 = no in-flight read request */
+static uint32_t s_weight_req_interval_us = 0u;
+
+/* Scale screen auto-refresh timer — non-NULL only while the Scale screen is active */
+static lv_timer_t *s_scale_timer = NULL;
 
 /* Operations screen async-update labels — NULL when not on that screen */
 static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
@@ -57,11 +62,30 @@ static void set_status(const char *s)
     ui_status_set(s);
 }
 
+static bool sequence_manual_actions_blocked(void)
+{
+    switch (sys_sequence_get_state())
+    {
+    case SYS_IDLE:
+    case SYS_SPAWN_EMPTY:
+    case SYS_ERROR:
+    case SYS_ESTOP:
+        return false;
+    default:
+        return true;
+    }
+}
+
 /* ── Home-screen button callbacks ────────────────────────────────────────── */
 
 static void on_dose(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     ui_show_dosing();
     ESP_LOGI(TAG, "DOSE pressed");
 }
@@ -76,6 +100,11 @@ static void on_home(lv_event_t *e)
 static void on_ops_page(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     ui_show_operations();
     ESP_LOGI(TAG, "Operations pressed");
 }
@@ -85,6 +114,26 @@ static void on_auto_page(lv_event_t *e)
     (void)e;
     ui_show_auto();
     ESP_LOGI(TAG, "Automated Functions pressed");
+}
+
+static void scale_auto_read_cb(lv_timer_t *t)
+{
+    (void)t;
+    static const pl_hx711_measure_t req = {.interval_us = 500000}; /* 500 ms measurement window */
+    (void)pico_link_send(MSG_HX711_MEASURE, &req, sizeof(req), NULL);
+}
+
+static void scale_timer_stop(void)
+{
+    if (s_scale_timer)
+    {
+#if defined(LVGL_VERSION_MAJOR) && (LVGL_VERSION_MAJOR >= 9)
+        lv_timer_delete(s_scale_timer);
+#else
+        lv_timer_del(s_scale_timer);
+#endif
+        s_scale_timer = NULL;
+    }
 }
 
 static void on_scale_page(lv_event_t *e)
@@ -97,6 +146,11 @@ static void on_scale_page(lv_event_t *e)
 static void on_tare(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     uint8_t nack_code = 0;
     esp_err_t err = pico_link_send_rpc(MSG_HX711_TARE,
                                        NULL, 0,
@@ -132,6 +186,8 @@ static void on_read_weight(lv_event_t *e)
                                    &seq);
     if (err == ESP_OK)
     {
+        s_weight_req_seq = seq;
+        s_weight_req_interval_us = measure_payload.interval_us;
         set_status("Weight request sent...");
         ESP_LOGI(TAG, "Weight request sent (seq=%u)", seq);
     }
@@ -161,16 +217,15 @@ static void on_start(lv_event_t *e)
     ESP_LOGI(TAG, "Start pressed (%s)", esp_err_to_name(err));
 }
 
-static void on_pause(lv_event_t *e)
+static void on_seq_start(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_PAUSE};
-    bool ok = control_send(&cmd);
-    set_status(ok ? "PAUSE sent" : "PAUSE failed");
-    ESP_LOGI(TAG, "Pause pressed (send=%d)", (int)ok);
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_START);
+    set_status(err == ESP_OK ? "SEQ: START sent" : "SEQ: START failed");
+    ESP_LOGI(TAG, "Sequence start (%s)", esp_err_to_name(err));
 }
 
-static void on_stop(lv_event_t *e)
+static void on_seq_abort(lv_event_t *e)
 {
     (void)e;
     ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
@@ -338,31 +393,84 @@ static void on_vacuum2_off(lv_event_t *e)
 void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
                                 const uint8_t *payload, uint16_t len)
 {
-    (void)seq;
-
-    if (msg_type == MSG_HX711_MEASURE && len == sizeof(pl_hx711_mass_t))
+    if (msg_type == MSG_HX711_MEASURE && payload != NULL)
     {
-        pl_hx711_mass_t mass_data;
-        memcpy(&mass_data, payload, sizeof(mass_data));
+        if (len == sizeof(pl_hx711_measure_t) && s_weight_req_seq != 0u && seq == s_weight_req_seq)
+        {
+            uint32_t echoed_interval_us = 0u;
+            memcpy(&echoed_interval_us, payload, sizeof(echoed_interval_us));
+            if (echoed_interval_us == s_weight_req_interval_us)
+            {
+                /* UART loopback/echo case: request came back as RX frame.
+                 * This is not a weight response. */
+                ESP_LOGW(TAG, "Ignored echoed HX711 request (seq=%u interval_us=%lu)",
+                         (unsigned)seq, (unsigned long)echoed_interval_us);
+                set_status("HX711 echo detected (check Pico->ESP RX path)");
+                s_weight_req_seq = 0u;
+                return;
+            }
+        }
 
-        float weight_g = (float)mass_data.mass_ug / 1000000.0f;
+        int32_t mass_ug = 0;
+        uint8_t unit = 0u;
+
+        if (len >= sizeof(pl_hx711_mass_t))
+        {
+            pl_hx711_mass_t mass_data;
+            memcpy(&mass_data, payload, sizeof(mass_data));
+            mass_ug = mass_data.mass_ug;
+            unit = mass_data.unit;
+        }
+        else if (len >= sizeof(int32_t))
+        {
+            /* Legacy Pico payload: mass only (int32_t micrograms). */
+            memcpy(&mass_ug, payload, sizeof(mass_ug));
+            ESP_LOGW(TAG, "Received legacy HX711 payload len=%u (mass only)",
+                     (unsigned)len);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Invalid HX711 payload len=%u", (unsigned)len);
+            return;
+        }
+
+        float weight_g = (float)mass_ug / 1000000.0f;
         s_last_weight_g = weight_g;
+        s_weight_req_seq = 0u;
         ESP_LOGI(TAG, "Received weight: %.3f g (unit=%u)", weight_g,
-                 mass_data.unit);
+                 unit);
 
+        char weight_str[32];
+        snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g", weight_g);
+
+        lvgl_port_lock(0);
         if (lbl_weight)
         {
-            char weight_str[32];
-            snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g",
-                     weight_g);
-            lvgl_port_lock(0);
             lv_label_set_text(lbl_weight, weight_str);
-            lvgl_port_unlock();
         }
+        lvgl_port_unlock();
 
         char status_buf[64];
         snprintf(status_buf, sizeof(status_buf), "Weight: %.2f g", weight_g);
         set_status(status_buf);
+        return;
+    }
+
+    /* If the Pico rejects a read request, surface it on the Scale screen. */
+    if (msg_type == MSG_NACK &&
+        payload != NULL &&
+        len >= sizeof(pl_nack_t) &&
+        s_weight_req_seq != 0u &&
+        seq == s_weight_req_seq)
+    {
+        const pl_nack_t *nack = (const pl_nack_t *)payload;
+        char status_buf[64];
+        snprintf(status_buf, sizeof(status_buf), "Weight read NACK (code=%u)",
+                 (unsigned)nack->code);
+        set_status(status_buf);
+        ESP_LOGW(TAG, "Weight read NACK for seq=%u code=%u",
+                 (unsigned)seq, (unsigned)nack->code);
+        s_weight_req_seq = 0u;
     }
 }
 
@@ -502,6 +610,9 @@ void ui_show_auto(void)
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
 
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
+
     /* Nullify async-update handles on unrelated screens */
     s_ops_lbl_status = NULL;
     s_ops_lbl_vacuum = NULL;
@@ -549,6 +660,9 @@ void ui_show_scale(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Delete any stale timer before creating a new one (re-entry guard) */
+    scale_timer_stop();
 
     /* Nullify unrelated async handles */
     s_ops_lbl_status = NULL;
@@ -600,6 +714,8 @@ void ui_show_scale(void)
     lv_label_set_text(lbl_status, "");
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 156);
+
+    /* Manual read only: do not auto-poll the Pico from this screen. */
 }
 
 /*
@@ -614,6 +730,9 @@ void ui_show_home(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Nullify all async-update handles so stale pointer writes can't crash */
     s_ops_lbl_status = NULL;
@@ -664,6 +783,9 @@ void ui_show_operations(void)
     lv_obj_clean(scr);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Weight label not present on this screen */
     lbl_weight = NULL;
@@ -802,11 +924,16 @@ static void on_dose_start(lv_event_t *e)
 static void on_dose_abort(lv_event_t *e)
 {
     (void)e;
-    /* Close flaps to stop material flow immediately; the Pico's spawn timer
-     * will exhaust its agitation retries and send SPAWN_STATUS_BAG_EMPTY. */
-    esp_err_t err = motor_flap_close();
-    set_status(err == ESP_OK ? "Aborting\xe2\x80\xa6" : "Abort FAILED");
-    ESP_LOGI(TAG, "Dose abort (%s)", esp_err_to_name(err));
+    /* Send MSG_CTRL_STOP so the Pico aborts the spawn state machine,
+     * stops the timer, stops flaps, and fast-closes — see uart_server.c
+     * MSG_CTRL_STOP handler. */
+    uint8_t nack = 0;
+    esp_err_t err = pico_link_send_rpc(MSG_CTRL_STOP, NULL, 0,
+                                       2000, /* 2 s timeout */
+                                       &nack);
+    set_status(err == ESP_OK ? "Aborted" : "Abort FAILED");
+    ESP_LOGI(TAG, "Dose abort via MSG_CTRL_STOP (%s nack=%u)",
+             esp_err_to_name(err), nack);
 }
 
 /* ── Dosing screen — spawn-status async update ───────────────────────────── */
@@ -913,6 +1040,9 @@ void ui_show_dosing(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Nullify all async-update handles so stale pointer writes can't crash. */
     s_ops_lbl_status = NULL;
