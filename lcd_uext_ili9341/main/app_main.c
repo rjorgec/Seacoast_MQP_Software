@@ -1,6 +1,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "nvs_flash.h"
 
 #include "display.h"
@@ -71,6 +72,18 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
         break;
     case MSG_HX711_MEASURE:
         ESP_LOGI("app_main", "RX HX711_MEASURE seq=%u len=%u", (unsigned)seq, (unsigned)len);
+        if (len >= 4 && pl != NULL)
+        {
+            int32_t first_4_bytes = 0;
+            memcpy(&first_4_bytes, pl, 4);
+            ESP_LOGI("app_main", 
+                     "  First 4 bytes (little-endian int32): %ld (0x%08lx) micrograms = %.3f g", 
+                     (long)first_4_bytes, (unsigned long)first_4_bytes, (float)first_4_bytes / 1000000.0f);
+        }
+        if (len >= 5 && pl != NULL)
+        {
+            ESP_LOGI("app_main", "  Byte 4 (unit): 0x%02x (%u)", pl[4], pl[4]);
+        }
         ui_screens_pico_rx_handler(type, seq, pl, len);
         break;
     case MSG_NACK:

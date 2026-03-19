@@ -610,6 +610,13 @@ typedef void (*drv8434s_motion_done_cb_t)(
 // 3 samples is enough to filter noise while still reacting quickly.
 #define DRV8434S_MOTION_TRQ_BUF_SIZE 3u
 
+// Ignore torque-limit trips for the first N achieved steps of each job.
+// This avoids false stops from transient low TRQ_COUNT readings immediately
+// after restarting motion from a prior stall/torque-limit stop.
+#ifndef DRV8434S_MOTION_TORQUE_BLANK_STEPS
+#define DRV8434S_MOTION_TORQUE_BLANK_STEPS 20u
+#endif
+
 // Per-device motion job state.  Managed internally by the motion engine.
 typedef struct {
   int32_t steps_remaining; // Absolute count, decrements each tick
