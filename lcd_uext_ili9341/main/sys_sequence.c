@@ -255,7 +255,7 @@ static void seq_task(void *arg)
             else if (cmd == SYS_CMD_ABORT && s_state != SYS_IDLE)
             {
                 safe_stop_all();
-                set_state(SYS_ERROR);
+                set_state(SYS_IDLE);
             }
         }
 
