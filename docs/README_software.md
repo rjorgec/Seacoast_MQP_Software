@@ -167,20 +167,31 @@ Every ESP→Pico command receives an immediate `MSG_ACK` (0x80) or `MSG_NACK` (0
 
 ```
 Home Screen
-├── Operations Screen   (manual actuator control + status display)
-├── Dosing Screen       (LEGACY — manual spawn dosing, see dosing.h)
-└── Sequence Screen     (NEW — sys_sequence.c whiteboard process flow)
+├── Automated Functions Screen  (sys_sequence.c — supervised inoculation)
+├── Scale Screen                (HX711 weight readout + tare)
+├── Operations Screen           (manual actuator control + status display)
+└── Dosing Screen               (LEGACY — manual spawn dosing for isolated testing)
 ```
+
+### Automated Functions Screen buttons
+
+Setup/Load | Start | Abort
+
+- **Setup/Load** — `sys_sequence_send_cmd(SYS_CMD_SETUP_LOAD)`: moves all subsystems to loading positions, waits for Start.
+- **Start** — `sys_sequence_send_cmd(SYS_CMD_START)`: begins the full inoculation cycle.
+- **Abort** — `sys_sequence_send_cmd(SYS_CMD_ABORT)`: safe-stops all actuators and returns the sequence to `SYS_IDLE`, immediately re-enabling manual controls. _(Note: an earlier implementation incorrectly targeted the legacy control task queue; the correct target is the sequence task queue.)_
+
+### Dosing Screen buttons
+
+Start Dose | Abort
+
+- **Start Dose** — `pico_link_send_rpc(MSG_DISPENSE_SPAWN, …)`: starts Pico-side closed-loop spawn dispensing.
+- **Abort** — `pico_link_send_rpc(MSG_CTRL_STOP, …)`: sends `MSG_CTRL_STOP` to the Pico to abort the spawn state machine, stop the dosing timer, and fast-close flaps. Closing flaps alone via `motor_flap_close()` is insufficient — the Pico spawn SM continues running until `MSG_CTRL_STOP` is received.
 
 ### Operations Screen buttons
 
 Flap Open/Close | Arm Home/Press/Pos1/Pos2 | Rack Home/Extend/Press |  
 Turntable Pos A/B/C/D | HotWire ON/OFF | Vacuum ON/OFF | Turntable Home
-
-### Sequence Screen buttons
-
-Setup/Load | Start | Abort | Replace Spawn  
-State label | Bag counter
 
 ---
 

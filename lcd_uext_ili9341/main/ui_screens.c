@@ -730,9 +730,10 @@ void ui_show_scale(void)
  * Home Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
  *
  *  y=  0  status label "IDLE • Seacoast Inoculator"
- *  y= 20  [Automated Functions  300×60]
- *  y= 86  [Scale                300×60]
- *  y=152  [Operations           300×60]
+ *  y= 20  [Automated Functions  300×46]
+ *  y= 70  [Scale                300×46]
+ *  y=120  [Operations           300×46]
+ *  y=170  [Dosing               300×46]
  */
 void ui_show_home(void)
 {
@@ -761,10 +762,11 @@ void ui_show_home(void)
     lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* Three large navigation buttons */
-    make_btn(scr, "Automated Functions", 0,   20, 300, 60, on_auto_page);
-    make_btn(scr, "Scale",               0,   86, 300, 60, on_scale_page);
-    make_btn(scr, "Operations",          0,  152, 300, 60, on_ops_page);
+    /* Four navigation buttons */
+    make_btn(scr, "Automated Functions", 0,   20, 300, 46, on_auto_page);
+    make_btn(scr, "Scale",               0,   70, 300, 46, on_scale_page);
+    make_btn(scr, "Operations",          0,  120, 300, 46, on_ops_page);
+    make_btn(scr, "Dosing",              0,  170, 300, 46, on_dose);
 }
 
 /*
