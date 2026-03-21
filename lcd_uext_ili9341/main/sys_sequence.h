@@ -57,6 +57,7 @@ extern "C"
         SYS_CMD_ABORT = 2,         /**< "Abort" button pressed */
         SYS_CMD_REPLACE_SPAWN = 3, /**< "Replace Spawn" button pressed */
         SYS_CMD_ESTOP = 4,         /**< Emergency stop */
+        SYS_CMD_OPEN_BAG = 5,      /**< Run the bag-opening sub-sequence only */
     } sys_cmd_t;
 
     /* ── Public API ────────────────────────────────────────────────────────────── */

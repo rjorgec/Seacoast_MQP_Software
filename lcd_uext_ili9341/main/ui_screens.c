@@ -217,6 +217,19 @@ static void on_start(lv_event_t *e)
     ESP_LOGI(TAG, "Start pressed (%s)", esp_err_to_name(err));
 }
 
+static void on_open_bag(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_OPEN_BAG);
+    if (err == ESP_OK)
+        set_status("Open Bag started");
+    else if (err == ESP_ERR_INVALID_STATE)
+        set_status("Open Bag only from IDLE");
+    else
+        set_status("Open Bag FAILED");
+    ESP_LOGI(TAG, "Open Bag (%s)", esp_err_to_name(err));
+}
+
 static void on_seq_start(lv_event_t *e)
 {
     (void)e;
@@ -612,9 +625,10 @@ static lv_obj_t *make_btn(lv_obj_t *scr, const char *txt,
  *
  *  y=  2  "Automated Functions"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
  *  y= 20  status label (colour = white)
- *  y= 42  [Setup / Load  300×56]
- *  y=104  [Dose          300×56]
- *  y=166  [Start         300×56]
+ *  y= 42  [Setup / Load  300x40]
+ *  y= 86  [Open Bag      300x40]
+ *  y=130  [Dose          300x40]
+ *  y=174  [Start         300x40]
  */
 void ui_show_auto(void)
 {
@@ -653,10 +667,11 @@ void ui_show_auto(void)
     lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 20);
 
-    /* ── Three large action buttons ──────────────────────────────────────── */
-    make_btn(scr, "Setup / Load", 0, 42, 300, 56, on_setup_load);
-    make_btn(scr, "Dose",         0, 104, 300, 56, on_dose);
-    make_btn(scr, "Start",        0, 166, 300, 56, on_start);
+    /* ── Four action buttons ─────────────────────────────────────────────── */
+    make_btn(scr, "Setup / Load", 0, 42, 300, 40, on_setup_load);
+    make_btn(scr, "Open Bag",     0, 86, 300, 40, on_open_bag);
+    make_btn(scr, "Dose",         0, 130, 300, 40, on_dose);
+    make_btn(scr, "Start",        0, 174, 300, 40, on_start);
 }
 
 /*

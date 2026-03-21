@@ -71,6 +71,7 @@ static volatile uint8_t s_last_motion_result = 0u;
 
 /* Last spawn status from MSG_SPAWN_STATUS notification */
 static volatile uint8_t s_last_spawn_status = 0u;
+static bool s_open_bag_only = false;
 
 /* ── Internal helpers ──────────────────────────────────────────────────────── */
 
@@ -181,35 +182,42 @@ static sys_cmd_t wait_cmd(TickType_t ticks)
  * @brief Execute the bag opening sub-sequence (within SYS_OPENING_BAG).
  *
  * Steps:
- *  1. Close rot (arm press against bag)
- *  2. Init suck (vacuum pump 1 ON)
- *  3. Over-open rot (swing arm to peel one side)
- *  4. Init suck 2 + extend rack (linear arm)
- *  5. Retract rack slightly (pull bag open)
- *  6. Align rot to interim position
+ *  1. Home rot (arm find physical reference)
+ *  2. Close rot (arm press against bag)
+ *  3. Init suck (vacuum pump 1 ON)
+ *  4. Over-open rot (swing arm to peel one side)
+ *  5. Init suck 2 + extend rack (linear arm)
+ *  6. Retract rack slightly (pull bag open)
+ *  7. Align rot to interim position
  *
  * @return true on success, false if any step fails
  */
 static bool open_bag_sequence(void)
 {
-    ESP_LOGI(TAG, "bag_open: step 1 — arm press");
+    ESP_LOGI(TAG, "bag_open: step 1 — arm home");
+    if (motor_arm_home() != ESP_OK)
+        return false;
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+        return false;
+
+    ESP_LOGI(TAG, "bag_open: step 2 — arm press");
     if (motor_arm_move(ARM_POS_PRESS) != ESP_OK)
         return false;
     if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
         return false;
 
-    ESP_LOGI(TAG, "bag_open: step 2 — vacuum 1 ON");
+    ESP_LOGI(TAG, "bag_open: step 3 — vacuum 1 ON");
     if (motor_vacuum_set(true) != ESP_OK)
         return false;
     vTaskDelay(pdMS_TO_TICKS(500)); /* allow suction to establish */
 
-    ESP_LOGI(TAG, "bag_open: step 3 — over-open arm (ARM_POS_2)");
+    ESP_LOGI(TAG, "bag_open: step 4 — over-open arm (ARM_POS_2)");
     if (motor_arm_move(ARM_POS_2) != ESP_OK)
         return false;
     if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
         return false;
 
-    ESP_LOGI(TAG, "bag_open: step 4 — vacuum 2 ON + extend rack");
+    ESP_LOGI(TAG, "bag_open: step 5 — vacuum 2 ON + extend rack");
     if (motor_vacuum2_set(true) != ESP_OK)
         return false;
     if (motor_rack_move(RACK_POS_EXTEND) != ESP_OK)
@@ -217,13 +225,13 @@ static bool open_bag_sequence(void)
     if (!wait_motion_done(SUBSYS_RACK, SEQ_MOTION_TIMEOUT_MS))
         return false;
 
-    ESP_LOGI(TAG, "bag_open: step 5 — rack press (close lin slightly)");
+    ESP_LOGI(TAG, "bag_open: step 6 — rack press (close lin slightly)");
     if (motor_rack_move(RACK_POS_PRESS) != ESP_OK)
         return false;
     if (!wait_motion_done(SUBSYS_RACK, SEQ_MOTION_TIMEOUT_MS))
         return false;
 
-    ESP_LOGI(TAG, "bag_open: step 6 — align arm (ARM_POS_1, interim)");
+    ESP_LOGI(TAG, "bag_open: step 7 — align arm (ARM_POS_1, interim)");
     if (motor_arm_move(ARM_POS_1) != ESP_OK)
         return false;
     if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
@@ -268,6 +276,7 @@ static void seq_task(void *arg)
             sys_cmd_t c = wait_cmd(portMAX_DELAY);
             if (c == SYS_CMD_SETUP_LOAD)
             {
+                s_open_bag_only = false;
                 set_state(SYS_SETUP_LOAD);
                 /* Open flaps, open arms, rotate platform to trash, tare */
                 ESP_LOGI(TAG, "setup: open flaps");
@@ -297,6 +306,11 @@ static void seq_task(void *arg)
                     set_state(SYS_CUTTING_TIP);
                 else
                     set_state(SYS_IDLE); /* DIAG: NO safe_stop_all() called here! */
+            }
+            else if (c == SYS_CMD_OPEN_BAG)
+            {
+                s_open_bag_only = true;
+                set_state(SYS_OPENING_BAG);
             }
             break;
         }
@@ -377,11 +391,20 @@ static void seq_task(void *arg)
             if (!open_bag_sequence())
             {
                 ESP_LOGE(TAG, "bag opening sub-sequence failed");
+                s_open_bag_only = false;
                 safe_stop_all();
                 set_state(SYS_ERROR);
                 break;
             }
-            set_state(SYS_INOCULATING);
+            if (s_open_bag_only)
+            {
+                s_open_bag_only = false;
+                set_state(SYS_IDLE);
+            }
+            else
+            {
+                set_state(SYS_INOCULATING);
+            }
             break;
         }
 
@@ -578,6 +601,13 @@ esp_err_t sys_sequence_init(void)
 
 esp_err_t sys_sequence_send_cmd(sys_cmd_t cmd)
 {
+    if (cmd == SYS_CMD_OPEN_BAG && s_state != SYS_IDLE)
+    {
+        ESP_LOGW(TAG, "send_cmd: open bag only allowed from IDLE (state=%s)",
+                 sys_sequence_state_name(s_state));
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (xQueueSend(s_cmd_queue, &cmd, pdMS_TO_TICKS(50)) != pdTRUE)
     {
         ESP_LOGW(TAG, "send_cmd: queue full, dropping cmd %d", (int)cmd);
