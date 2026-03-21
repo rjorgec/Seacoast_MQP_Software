@@ -14,7 +14,7 @@ extern "C"
 /* Shared default for DRV8434S soft torque-limit threshold.
  * Both ESP and Pico firmware should source their fallback from this symbol
  * so the UART payload default cannot drift between projects. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 300u
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u //300u tripped too easily
 
     /*
      * Wire format endianness is little-endian for all multi-byte fields.
@@ -57,6 +57,7 @@ extern "C"
         MSG_SPAWN_STATUS = 0x4A,     /* Pico→ESP: spawn dosing status (unsolicited) */
         MSG_HOTWIRE_TRAVERSE = 0x4B, /* ESP→Pico: traverse hot wire carriage stepper */
         MSG_INDEXER_MOVE = 0x4C,     /* ESP→Pico: move bag depth/eject rack (indexer) */
+        MSG_ARM_HOME = 0x4D,         /* ESP→Pico: sensorless home for the rotary arm */
         /* ---- Unsolicited status messages (0x60–0x6F) ---- */
         MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
         MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */

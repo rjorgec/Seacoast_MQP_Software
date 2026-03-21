@@ -73,6 +73,7 @@ static drv8434s_chain_t s_stepper_chain;
 static drv8434s_motion_t s_motion;
 static struct repeating_timer s_step_timer;
 static bool s_step_timer_active;
+static uint32_t s_step_timer_period_us;
 static bool s_stepper_ready;
 static uint32_t s_spi_watchdog_last_ms = 0u; /* timestamp of last idle SPI health check */
 
@@ -118,6 +119,38 @@ static int32_t s_turntable_pos_steps = 0;
 static bool s_turntable_homed = false;
 static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
+typedef enum
+{
+    ARM_HOME_IDLE = 0,
+    ARM_HOME_SEEK,
+    ARM_HOME_BACKOFF,
+} arm_homing_phase_t;
+
+typedef enum
+{
+    ARM_PRESS_RETRY_IDLE = 0,
+    ARM_PRESS_RETRY_PRESSING,
+    ARM_PRESS_RETRY_VERIFY,
+    ARM_PRESS_RETRY_BACKOFF,
+    ARM_PRESS_RETRY_REPRESSING,
+} arm_press_retry_phase_t;
+
+static arm_homing_phase_t s_arm_homing_phase = ARM_HOME_IDLE;
+static bool s_arm_rehome_required = false;
+static bool s_arm_homed = false;
+
+typedef struct
+{
+    arm_press_retry_phase_t phase;
+    uint8_t retries_started;
+    uint16_t baseline_rpm;
+    uint32_t phase_start_ms;
+} arm_press_retry_t;
+
+static arm_press_retry_t s_arm_press_retry = {
+    .phase = ARM_PRESS_RETRY_IDLE,
+};
+
 /* ── Per-device pending motion tracking ────────────────────────────────────── */
 
 typedef struct
@@ -141,6 +174,8 @@ static volatile uint32_t s_vacuum_pulse_count = 0; /* written by GPIO ISR */
 static uint32_t s_vacuum_last_sample_ms = 0;
 static uint32_t s_vacuum_last_status_ms = 0;
 static vacuum_status_code_t s_vacuum_status = VACUUM_OFF;
+static uint16_t s_vacuum_last_rpm = 0u;
+static bool s_vacuum_rpm_valid = false;
 
 /* ── Dosing callback ─────────────────────────────────────────────────────── */
 
@@ -521,7 +556,19 @@ static void spawn_stop_timer(void)
 
 /* Forward declaration — ensure_step_timer_running is defined after the
  * DRV8434S callback section but called from dispense_spawn_callback. */
-static bool ensure_step_timer_running(void);
+static bool ensure_step_timer_running(uint32_t step_delay_us);
+static bool start_stepper_job(uint8_t dev_idx, int32_t relative_steps,
+                              uint16_t torque_limit,
+                              uint16_t torque_blank_steps,
+                              uint32_t step_delay_us);
+static bool start_arm_internal_absolute_move(int32_t target_steps,
+                                             uint16_t torque_limit,
+                                             uint32_t timeout_ms);
+static bool start_arm_internal_relative_move(int32_t relative_steps,
+                                             uint16_t torque_limit,
+                                             uint32_t timeout_ms);
+static bool start_arm_home_backoff(void);
+static void arm_press_retry_tick(void);
 
 static bool dispense_spawn_callback(struct repeating_timer *t)
 {
@@ -796,27 +843,18 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
                 if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
                 {
                     int32_t agit_steps = (int32_t)AGITATOR_KNEAD_STEPS;
-                    if (!drv8434s_motion_start(&s_motion,
-                                               (uint8_t)STEPPER_DEV_AGITATOR,
-                                               agit_steps,
-                                               (uint16_t)STEPPER_SOFT_TORQUE_LIMIT))
+                    if (!start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                                           agit_steps,
+                                           (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
+                                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
                     {
                         printf("Agitator: motion start failed\n");
                     }
                     else
                     {
-                        if (!ensure_step_timer_running())
-                        {
-                            drv8434s_motion_cancel(&s_motion,
-                                                   (uint8_t)STEPPER_DEV_AGITATOR,
-                                                   NULL);
-                            printf("Agitator: failed to start step timer\n");
-                        }
-                        else
-                        {
-                            printf("Agitator: started knead motion (%u steps)\n",
-                                   (unsigned)AGITATOR_KNEAD_STEPS);
-                        }
+                        printf("Agitator: started knead motion (%u steps)\n",
+                               (unsigned)AGITATOR_KNEAD_STEPS);
                     }
                 }
                 else
@@ -1353,6 +1391,70 @@ static void stepper_motion_done(void *ctx, uint8_t dev_idx,
      * which cancels the repeating timer automatically. */
 }
 
+static bool arm_homing_active(void)
+{
+    return s_arm_homing_phase != ARM_HOME_IDLE;
+}
+
+static void reset_arm_press_retry(void)
+{
+    memset(&s_arm_press_retry, 0, sizeof(s_arm_press_retry));
+    s_arm_press_retry.phase = ARM_PRESS_RETRY_IDLE;
+}
+
+static bool arm_press_retry_active(void)
+{
+    return s_arm_press_retry.phase != ARM_PRESS_RETRY_IDLE;
+}
+
+static bool arm_stepper_control_locked(void)
+{
+    return arm_homing_active() || arm_press_retry_active();
+}
+
+static bool arm_motion_requires_rehome(motion_result_t result)
+{
+    return result == MOTION_STALLED ||
+           result == MOTION_TIMEOUT ||
+           result == MOTION_FAULT ||
+           result == MOTION_SPI_FAULT;
+}
+
+static void finish_arm_motion(motion_result_t result, bool require_rehome)
+{
+    if (require_rehome)
+    {
+        s_arm_rehome_required = true;
+        s_arm_homed = false;
+    }
+
+    if (arm_press_retry_active())
+    {
+        reset_arm_press_retry();
+    }
+
+    send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
+    printf("Arm motion done: result=%u rehome=%u pos=%li\n",
+           (unsigned)result, (unsigned)s_arm_rehome_required,
+           (long)s_arm_pos_steps);
+}
+
+static bool arm_press_retry_should_arm(int32_t target_steps)
+{
+    return target_steps == (int32_t)ARM_STEPS_PRESS &&
+           s_vacuum_on &&
+           s_vacuum_rpm_valid &&
+           (uint32_t)ARM_PRESS_RETRY_MAX_RETRIES > 0u &&
+           (uint32_t)ARM_PRESS_RETRY_BACKOFF_STEPS > 0u &&
+           (uint32_t)ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS > 0u;
+}
+
+static void set_motion_torque_sample_div(uint8_t sample_div)
+{
+    s_motion.torque_sample_div = (sample_div == 0u) ? 1u : sample_div;
+    s_motion.torque_tick_count = 0u;
+}
+
 static bool step_timer_callback(struct repeating_timer *t)
 {
     (void)t;
@@ -1362,6 +1464,7 @@ static bool step_timer_callback(struct repeating_timer *t)
     if (!drv8434s_motion_is_busy(&s_motion))
     {
         s_step_timer_active = false;
+        s_step_timer_period_us = 0u;
         return false;
     }
     return true;
@@ -1369,18 +1472,24 @@ static bool step_timer_callback(struct repeating_timer *t)
 
 /* ── Internal helper: ensure step timer is running ──────────────────────────── */
 
-static bool ensure_step_timer_running(void)
+static bool ensure_step_timer_running(uint32_t step_delay_us)
 {
+    if (step_delay_us == 0u)
+    {
+        step_delay_us = 1u;
+    }
+
     if (s_step_timer_active)
     {
-        return true;
+        return s_step_timer_period_us == step_delay_us;
     }
-    if (!add_repeating_timer_us(-(int64_t)STEPPER_DEFAULT_STEP_DELAY_US,
+    if (!add_repeating_timer_us(-(int64_t)step_delay_us,
                                 step_timer_callback, NULL, &s_step_timer))
     {
         return false;
     }
     s_step_timer_active = true;
+    s_step_timer_period_us = step_delay_us;
     return true;
 }
 
@@ -1402,7 +1511,7 @@ static void stepper_spi_watchdog_tick(void)
         return;
 
     /* Skip watchdog if any motion is currently in progress */
-    if (s_arm_pending.pending || s_rack_pending.pending || s_turntable_pending.pending)
+    if (drv8434s_motion_is_busy(&s_motion))
     {
         /* Reset timer so the watchdog runs after motion completes */
         s_spi_watchdog_last_ms = to_ms_since_boot(get_absolute_time());
@@ -1432,6 +1541,42 @@ static void stepper_spi_watchdog_tick(void)
             (void)drv8434s_chain_clear_faults(&s_stepper_chain, k, NULL);
         }
     }
+}
+
+static motion_result_t motion_result_from_stop_reason(drv8434s_motion_stop_reason_t reason)
+{
+    if (reason == DRV8434S_MOTION_OK)
+    {
+        return MOTION_OK;
+    }
+    if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
+    {
+        return MOTION_STALLED;
+    }
+    if (reason == DRV8434S_MOTION_SPI_ERROR)
+    {
+        return MOTION_SPI_FAULT;
+    }
+    return MOTION_FAULT;
+}
+
+static motion_result_t consume_stepper_motion_result(uint8_t dev_idx, bool timeout,
+                                                     int32_t *steps_achieved_out)
+{
+    *steps_achieved_out = 0;
+
+    if (timeout)
+    {
+        drv8434s_motion_result_t cancelled;
+        if (drv8434s_motion_cancel(&s_motion, dev_idx, &cancelled))
+        {
+            *steps_achieved_out = cancelled.steps_achieved;
+        }
+        return MOTION_TIMEOUT;
+    }
+
+    *steps_achieved_out = s_motion.jobs[dev_idx].steps_achieved;
+    return motion_result_from_stop_reason(s_motion.jobs[dev_idx].reason);
 }
 
 /**
@@ -1563,6 +1708,122 @@ static void flap_sm_tick(void)
     }
 }
 
+static void finish_arm_home(motion_result_t result)
+{
+    reset_arm_press_retry();
+    set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+    s_arm_homing_phase = ARM_HOME_IDLE;
+    s_arm_pending.pending = false;
+    s_arm_homed = (result == MOTION_OK);
+    s_arm_rehome_required = (result != MOTION_OK);
+    send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
+    printf("Arm home done: result=%u homed=%u pos=%li\n",
+           (unsigned)result, (unsigned)s_arm_homed, (long)s_arm_pos_steps);
+}
+
+static void handle_arm_home_completion(motion_result_t result,
+                                       int32_t steps_achieved)
+{
+    if (s_arm_homing_phase == ARM_HOME_SEEK)
+    {
+        if (result == MOTION_STALLED)
+        {
+            s_arm_pos_steps = 0;
+            printf("Arm home: hard stop found, backing off %u steps\n",
+                   (unsigned)ARM_HOME_BACKOFF_STEPS);
+            if (start_arm_home_backoff())
+            {
+                return;
+            }
+            finish_arm_home(MOTION_FAULT);
+            return;
+        }
+
+        if (result == MOTION_OK)
+        {
+            result = MOTION_TIMEOUT;
+        }
+
+        (void)steps_achieved;
+        finish_arm_home(result);
+        return;
+    }
+
+    if (s_arm_homing_phase == ARM_HOME_BACKOFF)
+    {
+        s_arm_pos_steps += steps_achieved;
+        finish_arm_home(result);
+        return;
+    }
+
+    s_arm_pending.pending = false;
+    send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
+}
+
+static bool arm_press_stall_is_success(const stepper_pending_t *pending,
+                                       motion_result_t result)
+{
+    return pending != NULL &&
+           pending->target_steps == (int32_t)ARM_STEPS_PRESS &&
+           result == MOTION_STALLED;
+}
+
+static bool handle_arm_press_retry_completion(motion_result_t result,
+                                              uint32_t now_ms)
+{
+    if (!arm_press_retry_active())
+    {
+        return false;
+    }
+
+    switch (s_arm_press_retry.phase)
+    {
+    case ARM_PRESS_RETRY_PRESSING:
+    case ARM_PRESS_RETRY_REPRESSING:
+        if (result != MOTION_OK)
+        {
+            finish_arm_motion(result, arm_motion_requires_rehome(result));
+            return true;
+        }
+
+        s_arm_press_retry.phase = ARM_PRESS_RETRY_VERIFY;
+        s_arm_press_retry.phase_start_ms = now_ms;
+        printf("Arm press verify: baseline RPM=%u retry=%u/%u\n",
+               (unsigned)s_arm_press_retry.baseline_rpm,
+               (unsigned)s_arm_press_retry.retries_started,
+               (unsigned)ARM_PRESS_RETRY_MAX_RETRIES);
+        return true;
+
+    case ARM_PRESS_RETRY_BACKOFF:
+        if (result != MOTION_OK)
+        {
+            finish_arm_motion(result, arm_motion_requires_rehome(result));
+            return true;
+        }
+
+        s_arm_press_retry.phase = ARM_PRESS_RETRY_REPRESSING;
+        s_arm_press_retry.baseline_rpm = s_vacuum_last_rpm;
+        s_arm_press_retry.phase_start_ms = now_ms;
+
+        if (!start_arm_internal_absolute_move((int32_t)ARM_STEPS_PRESS,
+                                              (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
+                                              (uint32_t)ARM_MOTION_TIMEOUT_MS))
+        {
+            finish_arm_motion(MOTION_FAULT, false);
+            return true;
+        }
+
+        printf("Arm press retry: re-pressing from RPM=%u\n",
+               (unsigned)s_arm_press_retry.baseline_rpm);
+        return true;
+
+    case ARM_PRESS_RETRY_VERIFY:
+    case ARM_PRESS_RETRY_IDLE:
+    default:
+        return false;
+    }
+}
+
 /**
  * @brief Stepper completion tick — detects per-device motion completion and
  *        sends MSG_MOTION_DONE when each pending job finishes or times out.
@@ -1584,50 +1845,49 @@ static void stepper_completion_tick(void)
 
         if (job_done || timeout)
         {
-            motion_result_t result;
             int32_t steps_achieved = 0;
+            motion_result_t result =
+                consume_stepper_motion_result((uint8_t)STEPPER_DEV_ROT_ARM,
+                                              timeout && !job_done,
+                                              &steps_achieved);
 
-            if (timeout && !job_done)
+            if (arm_homing_active())
             {
-                /* Still running but deadline exceeded — cancel it. */
-                drv8434s_motion_result_t cancelled;
-                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_ROT_ARM,
-                                           &cancelled))
-                {
-                    steps_achieved = cancelled.steps_achieved;
-                }
-                result = MOTION_TIMEOUT;
+                handle_arm_home_completion(result, steps_achieved);
             }
             else
             {
-                steps_achieved = s_motion.jobs[STEPPER_DEV_ROT_ARM].steps_achieved;
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_ROT_ARM].reason;
-                if (reason == DRV8434S_MOTION_OK)
+                bool press_target = (s_arm_pending.target_steps == (int32_t)ARM_STEPS_PRESS);
+                s_arm_pos_steps += steps_achieved;
+                s_arm_pending.pending = false;
+
+                if (arm_press_stall_is_success(&s_arm_pending, result))
                 {
+                    printf("Arm press: torque stop treated as success at pos=%li\n",
+                           (long)s_arm_pos_steps);
                     result = MOTION_OK;
                 }
-                else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
+
+                if (handle_arm_press_retry_completion(result, now_ms))
                 {
-                    result = MOTION_STALLED;
+                    return;
                 }
-                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+
+                if (press_target && arm_press_retry_should_arm(s_arm_pending.target_steps))
                 {
-                    /* SPI bus error — distinct from a physical driver fault.
-                     * ESP32 can display "SPI FAULT" vs "STALLED". */
-                    result = MOTION_SPI_FAULT;
+                    s_arm_press_retry.phase = ARM_PRESS_RETRY_VERIFY;
+                    s_arm_press_retry.retries_started = 0u;
+                    s_arm_press_retry.baseline_rpm = s_vacuum_last_rpm;
+                    s_arm_press_retry.phase_start_ms = now_ms;
+                    printf("Arm press verify: baseline RPM=%u retry=%u/%u\n",
+                           (unsigned)s_arm_press_retry.baseline_rpm,
+                           (unsigned)s_arm_press_retry.retries_started,
+                           (unsigned)ARM_PRESS_RETRY_MAX_RETRIES);
+                    return;
                 }
-                else
-                {
-                    result = MOTION_FAULT;
-                }
+
+                finish_arm_motion(result, arm_motion_requires_rehome(result));
             }
-
-            s_arm_pos_steps += steps_achieved;
-
-            send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
-            s_arm_pending.pending = false;
-            printf("Arm motion done: result=%u pos=%li\n",
-                   (unsigned)result, (long)s_arm_pos_steps);
         }
     }
 
@@ -1640,42 +1900,11 @@ static void stepper_completion_tick(void)
 
         if (job_done || timeout)
         {
-            motion_result_t result;
             int32_t steps_achieved = 0;
-
-            if (timeout && !job_done)
-            {
-                drv8434s_motion_result_t cancelled;
-                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_LIN_ARM,
-                                           &cancelled))
-                {
-                    steps_achieved = cancelled.steps_achieved;
-                }
-                result = MOTION_TIMEOUT;
-            }
-            else
-            {
-                steps_achieved = s_motion.jobs[STEPPER_DEV_LIN_ARM].steps_achieved;
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_LIN_ARM].reason;
-                if (reason == DRV8434S_MOTION_OK)
-                {
-                    result = MOTION_OK;
-                }
-                else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
-                {
-                    result = MOTION_STALLED;
-                }
-                else if (reason == DRV8434S_MOTION_SPI_ERROR)
-                {
-                    /* SPI bus error — distinct from a physical driver fault.
-                     * ESP32 can display "SPI FAULT" vs "STALLED". */
-                    result = MOTION_SPI_FAULT;
-                }
-                else
-                {
-                    result = MOTION_FAULT;
-                }
-            }
+            motion_result_t result =
+                consume_stepper_motion_result((uint8_t)STEPPER_DEV_LIN_ARM,
+                                              timeout && !job_done,
+                                              &steps_achieved);
 
             s_rack_pos_steps += steps_achieved;
 
@@ -1695,42 +1924,11 @@ static void stepper_completion_tick(void)
 
         if (job_done || timeout)
         {
-            motion_result_t result;
             int32_t steps_achieved = 0;
-
-            if (timeout && !job_done)
-            {
-                drv8434s_motion_result_t cancelled;
-                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE,
-                                           &cancelled))
-                {
-                    steps_achieved = cancelled.steps_achieved;
-                }
-                result = MOTION_TIMEOUT;
-            }
-            else
-            {
-                steps_achieved = s_motion.jobs[STEPPER_DEV_TURNTABLE].steps_achieved;
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_TURNTABLE].reason;
-                if (reason == DRV8434S_MOTION_OK)
-                {
-                    result = MOTION_OK;
-                }
-                else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
-                {
-                    result = MOTION_STALLED;
-                }
-                else if (reason == DRV8434S_MOTION_SPI_ERROR)
-                {
-                    /* SPI bus error — distinct from a physical driver fault.
-                     * ESP32 can display "SPI FAULT" vs "STALLED". */
-                    result = MOTION_SPI_FAULT;
-                }
-                else
-                {
-                    result = MOTION_FAULT;
-                }
-            }
+            motion_result_t result =
+                consume_stepper_motion_result((uint8_t)STEPPER_DEV_TURNTABLE,
+                                              timeout && !job_done,
+                                              &steps_achieved);
 
             s_turntable_pos_steps += steps_achieved;
 
@@ -1775,6 +1973,9 @@ static void vacuum_sm_tick(void)
         uint16_t rpm = (uint16_t)((pulses * 60000UL) /
                                   ((uint32_t)VACUUM_RPM_SAMPLE_MS * (uint32_t)VACUUM_PULSES_PER_REV));
 
+        s_vacuum_last_rpm = rpm;
+        s_vacuum_rpm_valid = true;
+
         vacuum_status_code_t new_status =
             (rpm < (uint16_t)VACUUM_RPM_BLOCKED_THRESHOLD) ? VACUUM_BLOCKED : VACUUM_OK;
 
@@ -1792,6 +1993,107 @@ static void vacuum_sm_tick(void)
     }
 }
 
+static bool start_arm_internal_absolute_move(int32_t target_steps,
+                                             uint16_t torque_limit,
+                                             uint32_t timeout_ms)
+{
+    int32_t delta = target_steps - s_arm_pos_steps;
+    if (delta == 0)
+    {
+        s_arm_pending.pending = false;
+        s_arm_pending.target_steps = target_steps;
+        return true;
+    }
+
+    return start_arm_internal_relative_move(delta, torque_limit, timeout_ms);
+}
+
+static bool start_arm_internal_relative_move(int32_t relative_steps,
+                                             uint16_t torque_limit,
+                                             uint32_t timeout_ms)
+{
+    int32_t target_steps = s_arm_pos_steps + relative_steps;
+
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_ROT_ARM,
+                           relative_steps,
+                           torque_limit,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
+    {
+        return false;
+    }
+
+    s_arm_pending.pending = true;
+    s_arm_pending.target_steps = target_steps;
+    s_arm_pending.subsys = SUBSYS_ARM;
+    s_arm_pending.start_ms = to_ms_since_boot(get_absolute_time());
+    s_arm_pending.timeout_ms = timeout_ms;
+    s_arm_pending.dev_idx = (uint8_t)STEPPER_DEV_ROT_ARM;
+    return true;
+}
+
+static void arm_press_retry_tick(void)
+{
+    if (s_arm_press_retry.phase != ARM_PRESS_RETRY_VERIFY)
+    {
+        return;
+    }
+
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    uint16_t current_rpm = s_vacuum_last_rpm;
+    uint16_t baseline_rpm = s_arm_press_retry.baseline_rpm;
+    uint16_t rpm_delta = (current_rpm >= baseline_rpm)
+                             ? (uint16_t)(current_rpm - baseline_rpm)
+                             : (uint16_t)(baseline_rpm - current_rpm);
+
+    if (!s_vacuum_on || !s_vacuum_rpm_valid)
+    {
+        printf("Arm press verify: vacuum RPM unavailable, accepting press\n");
+        finish_arm_motion(MOTION_OK, false);
+        return;
+    }
+
+    if (rpm_delta >= (uint16_t)ARM_PRESS_RETRY_RPM_DELTA)
+    {
+        printf("Arm press verify: RPM delta=%u (%u -> %u), press accepted\n",
+               (unsigned)rpm_delta, (unsigned)baseline_rpm, (unsigned)current_rpm);
+        finish_arm_motion(MOTION_OK, false);
+        return;
+    }
+
+    if ((now_ms - s_arm_press_retry.phase_start_ms) <
+        (uint32_t)ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS)
+    {
+        return;
+    }
+
+    if (s_arm_press_retry.retries_started >= (uint8_t)ARM_PRESS_RETRY_MAX_RETRIES)
+    {
+        printf("Arm press verify: no RPM change after %u retry(ies), reporting timeout\n",
+               (unsigned)s_arm_press_retry.retries_started);
+        finish_arm_motion(MOTION_TIMEOUT, false);
+        return;
+    }
+
+    ++s_arm_press_retry.retries_started;
+    s_arm_press_retry.phase = ARM_PRESS_RETRY_BACKOFF;
+    s_arm_press_retry.phase_start_ms = now_ms;
+
+    if (!start_arm_internal_relative_move((int32_t)ARM_PRESS_RETRY_BACKOFF_STEPS,
+                                          0u,
+                                          (uint32_t)ARM_MOTION_TIMEOUT_MS))
+    {
+        finish_arm_motion(MOTION_FAULT, false);
+        return;
+    }
+
+    printf("Arm press verify: RPM delta=%u, retry %u/%u with backoff=%u steps\n",
+           (unsigned)rpm_delta,
+           (unsigned)s_arm_press_retry.retries_started,
+           (unsigned)ARM_PRESS_RETRY_MAX_RETRIES,
+           (unsigned)ARM_PRESS_RETRY_BACKOFF_STEPS);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /*  Existing low-level stepper handlers (unchanged)                            */
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -1805,6 +2107,12 @@ static void handle_stepper_enable(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if (arm_stepper_control_locked())
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -1842,6 +2150,12 @@ static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_
         return;
     }
 
+    if (arm_stepper_control_locked())
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
     const pl_stepper_stepjob_t *p = (const pl_stepper_stepjob_t *)payload;
     uint16_t torque_limit = 0u;
     if (len == expected_new)
@@ -1858,22 +2172,12 @@ static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_
            (unsigned)torque_limit);
 
     /* Start motion on device 0 (non-blocking) */
-    if (!drv8434s_motion_start(&s_motion, 0u, target, torque_limit))
+    if (!start_stepper_job(0u, target, torque_limit,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           p->step_delay_us))
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
-    }
-
-    if (!s_step_timer_active)
-    {
-        if (!add_repeating_timer_us(-(int64_t)p->step_delay_us,
-                                    step_timer_callback, NULL, &s_step_timer))
-        {
-            drv8434s_motion_cancel(&s_motion, 0u, NULL);
-            send_nack(seq, NACK_UNKNOWN);
-            return;
-        }
-        s_step_timer_active = true;
     }
 
     send_ack(seq);
@@ -2130,6 +2434,26 @@ static void handle_flap_close(uint16_t seq)
 
 /* ── Internal helper: start a stepper motion and arm the pending tracker ───── */
 
+static bool start_stepper_job(uint8_t dev_idx, int32_t relative_steps,
+                              uint16_t torque_limit,
+                              uint16_t torque_blank_steps,
+                              uint32_t step_delay_us)
+{
+    if (!drv8434s_motion_start_ex(&s_motion, dev_idx, relative_steps,
+                                  torque_limit, torque_blank_steps))
+    {
+        return false;
+    }
+
+    if (!ensure_step_timer_running(step_delay_us))
+    {
+        drv8434s_motion_cancel(&s_motion, dev_idx, NULL);
+        return false;
+    }
+
+    return true;
+}
+
 static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
                                  stepper_pending_t *pending,
                                  subsystem_id_t subsys, uint32_t timeout_ms,
@@ -2140,6 +2464,12 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
     {
         current_steps = s_arm_pos_steps;
     }
+#ifdef STEPPER_DEV_LIN_ARM
+    else if (dev_idx == (uint8_t)STEPPER_DEV_LIN_ARM)
+    {
+        current_steps = s_rack_pos_steps;
+    }
+#endif
     else if (dev_idx == (uint8_t)STEPPER_DEV_TURNTABLE)
     {
         current_steps = s_turntable_pos_steps;
@@ -2167,15 +2497,11 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
         return true;
     }
 
-    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, STEPPER_SOFT_TORQUE_LIMIT))
+    if (!start_stepper_job(dev_idx, delta,
+                           (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
     {
-        send_nack(seq, NACK_UNKNOWN);
-        return false;
-    }
-
-    if (!ensure_step_timer_running())
-    {
-        drv8434s_motion_cancel(&s_motion, dev_idx, NULL);
         send_nack(seq, NACK_UNKNOWN);
         return false;
     }
@@ -2191,6 +2517,66 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
     return true;
 }
 
+static bool start_arm_home_backoff(void)
+{
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_ROT_ARM,
+                           -(int32_t)ARM_HOME_BACKOFF_STEPS,
+                           0u,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           (uint32_t)ARM_HOME_STEP_DELAY_US))
+    {
+        return false;
+    }
+
+    s_arm_homing_phase = ARM_HOME_BACKOFF;
+    s_arm_pending.target_steps = -(int32_t)ARM_HOME_BACKOFF_STEPS;
+    s_arm_pending.start_ms = to_ms_since_boot(get_absolute_time());
+    s_arm_pending.timeout_ms = (uint32_t)ARM_HOME_TIMEOUT_MS;
+    s_arm_pending.dev_idx = (uint8_t)STEPPER_DEV_ROT_ARM;
+    return true;
+}
+
+static void handle_arm_home(uint16_t seq)
+{
+    if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if (arm_stepper_control_locked() || drv8434s_motion_is_busy(&s_motion))
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    set_motion_torque_sample_div((uint8_t)ARM_HOME_TORQUE_SAMPLE_DIV);
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_ROT_ARM,
+                           (int32_t)ARM_HOME_SEARCH_STEPS,
+                           (uint16_t)ARM_HOME_TORQUE_LIMIT,
+                           (uint16_t)ARM_HOME_TORQUE_BLANK_STEPS,
+                           (uint32_t)ARM_HOME_STEP_DELAY_US))
+    {
+        set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    s_arm_homing_phase = ARM_HOME_SEEK;
+    s_arm_homed = false;
+    s_arm_pending.pending = true;
+    s_arm_pending.target_steps = (int32_t)ARM_HOME_SEARCH_STEPS;
+    s_arm_pending.subsys = SUBSYS_ARM;
+    s_arm_pending.start_ms = to_ms_since_boot(get_absolute_time());
+    s_arm_pending.timeout_ms = (uint32_t)ARM_HOME_TIMEOUT_MS;
+    s_arm_pending.dev_idx = (uint8_t)STEPPER_DEV_ROT_ARM;
+
+    printf("Arm home started: search=%u backoff=%u\n",
+           (unsigned)ARM_HOME_SEARCH_STEPS,
+           (unsigned)ARM_HOME_BACKOFF_STEPS);
+    send_ack(seq);
+}
+
 /**
  * @brief MSG_ARM_MOVE (0x42) — move arm stepper (device 0) to named position.
  */
@@ -2203,6 +2589,12 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if (arm_stepper_control_locked() || s_arm_rehome_required)
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -2228,8 +2620,31 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     printf("Arm move → %li steps\n", (long)target);
-    (void)start_stepper_motion((uint8_t)STEPPER_DEV_ROT_ARM, target, &s_arm_pending,
-                               SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq);
+    if (start_stepper_motion((uint8_t)STEPPER_DEV_ROT_ARM, target, &s_arm_pending,
+                             SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq))
+    {
+        if (arm_press_retry_should_arm(target))
+        {
+            s_arm_press_retry.phase = ARM_PRESS_RETRY_PRESSING;
+            s_arm_press_retry.retries_started = 0u;
+            s_arm_press_retry.baseline_rpm = s_vacuum_last_rpm;
+            s_arm_press_retry.phase_start_ms = to_ms_since_boot(get_absolute_time());
+            printf("Arm press verify armed: baseline RPM=%u retries=%u backoff=%u delta=%u timeout=%u ms\n",
+                   (unsigned)s_arm_press_retry.baseline_rpm,
+                   (unsigned)ARM_PRESS_RETRY_MAX_RETRIES,
+                   (unsigned)ARM_PRESS_RETRY_BACKOFF_STEPS,
+                   (unsigned)ARM_PRESS_RETRY_RPM_DELTA,
+                   (unsigned)ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS);
+        }
+        else
+        {
+            reset_arm_press_retry();
+        }
+    }
+    else
+    {
+        reset_arm_press_retry();
+    }
 }
 
 /**
@@ -2245,6 +2660,12 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if (arm_stepper_control_locked())
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -2301,6 +2722,12 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
         return;
     }
 
+    if (arm_stepper_control_locked())
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
     if (!s_turntable_homed)
     {
         /* Turntable must be homed before any GOTO command. */
@@ -2344,6 +2771,12 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
  */
 static void handle_turntable_home(uint16_t seq)
 {
+    if (arm_stepper_control_locked())
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
     /* Cancel any in-progress turntable motion. */
     if (s_motion.jobs[STEPPER_DEV_TURNTABLE].active)
     {
@@ -2418,6 +2851,8 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
     {
         /* Pump stopped — clear status and notify ESP32 immediately. */
         s_vacuum_status = VACUUM_OFF;
+        s_vacuum_last_rpm = 0u;
+        s_vacuum_rpm_valid = false;
         send_vacuum_status(VACUUM_OFF, 0u);
         printf("Vacuum OFF\n");
     }
@@ -2430,6 +2865,8 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
         uint32_t saved = save_and_disable_interrupts();
         s_vacuum_pulse_count = 0u;
         restore_interrupts(saved);
+        s_vacuum_last_rpm = 0u;
+        s_vacuum_rpm_valid = false;
         printf("Vacuum ON\n");
     }
 
@@ -2504,20 +2941,28 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
         return;
     }
 
+    if (arm_stepper_control_locked())
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
     int32_t steps = (p->direction == 0u)
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
 
-    if (!drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_HW_CARRIAGE,
-                               steps, 0u))
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                           steps,
+                           0u,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
     {
         printf("Hotwire Traverse: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    (void)ensure_step_timer_running();
     printf("Hotwire Traverse: dir=%u steps=%li\n",
            (unsigned)p->direction, (long)steps);
     send_ack(seq);
@@ -2556,6 +3001,12 @@ static void handle_indexer_move(uint16_t seq, const uint8_t *payload, uint16_t l
         return;
     }
 
+    if (arm_stepper_control_locked())
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
     const pl_indexer_move_t *p = (const pl_indexer_move_t *)payload;
     int32_t target_steps;
 
@@ -2587,15 +3038,17 @@ static void handle_indexer_move(uint16_t seq, const uint8_t *payload, uint16_t l
         return;
     }
 
-    if (!drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_INDEXER,
-                               delta, 0u))
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_INDEXER,
+                           delta,
+                           0u,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
     {
         printf("Indexer Move: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    (void)ensure_step_timer_running();
     s_indexer_pos_steps = target_steps;
     printf("Indexer Move: pos=%u delta=%li %s\n",
            (unsigned)p->position, (long)delta,
@@ -2868,6 +3321,11 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
     case MSG_ARM_MOVE:
         printf("Arm Move\n");
         handle_arm_move(hdr.seq, payload, hdr.len);
+        break;
+
+    case MSG_ARM_HOME:
+        printf("Arm Home\n");
+        handle_arm_home(hdr.seq);
         break;
 
     case MSG_RACK_MOVE:
@@ -3198,9 +3656,10 @@ static void init_drv8434s_chain(void)
     }
 
     /* Initialise the non-blocking motion engine.
-     * torque_sample_div=10 → sample torque every 10th tick. */
+     * Default torque sampling divisor comes from board_pins.h. */
     if (!drv8434s_motion_init(&s_motion, &s_stepper_chain,
-                              stepper_motion_done, NULL, 10u))
+                              stepper_motion_done, NULL,
+                              (uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV))
     {
         printf("uart_server: DRV8434S motion engine init failed\n");
         return;
@@ -3299,6 +3758,8 @@ static void init_vacuum(void)
     s_vacuum_last_sample_ms = 0u;
     s_vacuum_last_status_ms = 0u;
     s_vacuum_status = VACUUM_OFF;
+    s_vacuum_last_rpm = 0u;
+    s_vacuum_rpm_valid = false;
 
     printf("uart_server: Vacuum pump ready (TRIGGER=%d RPM_SENSE=%d)\n",
            VACUUM_TRIGGER_PIN, VACUUM_RPM_SENSE_PIN);
@@ -3320,6 +3781,10 @@ void uart_server_init(void)
 
     s_flap_state = FLAP_SM_IDLE;
     s_arm_pos_steps = 0;
+    s_arm_homing_phase = ARM_HOME_IDLE;
+    s_arm_rehome_required = false;
+    s_arm_homed = false;
+    reset_arm_press_retry();
     s_rack_pos_steps = 0;
     s_turntable_pos_steps = 0;
     /* Turntable requires explicit homing before any GOTO command is valid.
@@ -3329,6 +3794,8 @@ void uart_server_init(void)
 
     s_uart = (PICO_UART_ID == 0) ? uart0 : uart1;
     s_uart_ready = false;
+    s_step_timer_active = false;
+    s_step_timer_period_us = 0u;
 
     if (PICO_UART_TX_GPIO < 0 || PICO_UART_RX_GPIO < 0)
     {
@@ -3370,6 +3837,7 @@ void uart_server_poll(void)
     vacuum_sm_tick();
     flap_sm_tick();
     stepper_completion_tick();
+    arm_press_retry_tick();
     stepper_spi_watchdog_tick();
 
     /* ── Drain hardware UART FIFO into the ring buffer ─────────── */

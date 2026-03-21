@@ -623,6 +623,7 @@ typedef struct {
   int32_t steps_achieved;  // Signed accumulator
   int32_t steps_requested; // Original signed request
   uint16_t torque_limit;   // 0 = disabled
+  uint16_t torque_blank_steps;
   uint16_t last_torque_count;
   drv8434s_motion_stop_reason_t reason;
   bool active;
@@ -660,6 +661,11 @@ bool drv8434s_motion_init(drv8434s_motion_t *motion, drv8434s_chain_t *chain,
 // The caller must start a periodic timer that calls drv8434s_motion_tick().
 bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
                            int32_t target_steps, uint16_t torque_limit);
+
+// Extended motion start that overrides the torque blanking window per job.
+bool drv8434s_motion_start_ex(drv8434s_motion_t *motion, uint8_t dev_idx,
+                              int32_t target_steps, uint16_t torque_limit,
+                              uint16_t torque_blank_steps);
 
 // Advance all active motors by one step in a single SPI chain frame.
 // Call this from a repeating timer callback at the desired step rate.

@@ -184,6 +184,22 @@ esp_err_t motor_arm_move(uint8_t pos)
     return err;
 }
 
+esp_err_t motor_arm_home(void)
+{
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_ARM_HOME,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "arm_home rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
 esp_err_t motor_rack_move(uint8_t pos)
 {
     pl_rack_move_t pl = {.position = pos};

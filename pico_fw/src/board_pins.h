@@ -166,21 +166,57 @@
 /*  Stepper position constants (DRV8434S, steps from home)             */
 /* ================================================================== */
 
-/* Arm stepper (device 0) */
+/* Arm stepper (device 0).
+ * All arm positions are measured from the physical home hard-stop found by
+ * MSG_ARM_HOME. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS, so
+ * the idle post-home position is typically negative. */
 #ifndef ARM_STEPS_PRESS
 #define ARM_STEPS_PRESS -3500 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1 0 /* absolute position 1 */
+#define ARM_STEPS_POS1 -500 /* absolute position 1 */
 #endif
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2 500 /* absolute position 2 */
+#define ARM_STEPS_POS2 -100 /* absolute position 2 */
 #endif
 #ifndef ARM_PRESS_STALL_WINDOW_STEPS
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
 #endif
+#ifndef ARM_PRESS_RETRY_MAX_RETRIES
+#define ARM_PRESS_RETRY_MAX_RETRIES 5u /* extra press attempts if vacuum RPM does not change */
+#endif
+#ifndef ARM_PRESS_RETRY_BACKOFF_STEPS
+#define ARM_PRESS_RETRY_BACKOFF_STEPS 150 /* release distance before a retry press */
+#endif
+#ifndef ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS
+#define ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS 300u /* wait this long for an RPM response after press */
+#endif
+#ifndef ARM_PRESS_RETRY_RPM_DELTA
+#define ARM_PRESS_RETRY_RPM_DELTA 2000u /* minimum absolute RPM change that counts as a successful press */
+#endif
 #ifndef ARM_MOTION_TIMEOUT_MS
 #define ARM_MOTION_TIMEOUT_MS 5000
+#endif
+#ifndef ARM_HOME_SEARCH_STEPS
+#define ARM_HOME_SEARCH_STEPS 5000
+#endif
+#ifndef ARM_HOME_STEP_DELAY_US
+#define ARM_HOME_STEP_DELAY_US 4000u //arm speed for home
+#endif
+#ifndef ARM_HOME_TIMEOUT_MS
+#define ARM_HOME_TIMEOUT_MS 15000
+#endif
+#ifndef ARM_HOME_TORQUE_LIMIT
+#define ARM_HOME_TORQUE_LIMIT 120u  //
+#endif
+#ifndef ARM_HOME_TORQUE_BLANK_STEPS
+#define ARM_HOME_TORQUE_BLANK_STEPS 100u
+#endif
+#ifndef ARM_HOME_TORQUE_SAMPLE_DIV
+#define ARM_HOME_TORQUE_SAMPLE_DIV 1u
+#endif
+#ifndef ARM_HOME_BACKOFF_STEPS
+#define ARM_HOME_BACKOFF_STEPS 100
 #endif
 
 /* Rack stepper (device 1) */
@@ -342,6 +378,9 @@
 /* Default step delay used by the high-level stepper handlers (µs per step). */
 #ifndef STEPPER_DEFAULT_STEP_DELAY_US
 #define STEPPER_DEFAULT_STEP_DELAY_US 1000u
+#endif
+#ifndef STEPPER_DEFAULT_TORQUE_SAMPLE_DIV
+#define STEPPER_DEFAULT_TORQUE_SAMPLE_DIV 10u
 #endif
 
 /* ================================================================== */

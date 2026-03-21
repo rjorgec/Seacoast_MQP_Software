@@ -260,6 +260,14 @@ static void on_arm_press(lv_event_t *e)
     ESP_LOGI(TAG, "Arm press (%s)", esp_err_to_name(err));
 }
 
+static void on_arm_home(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_arm_home();
+    set_status(err == ESP_OK ? "Arm: homing..." : "Arm home: FAILED");
+    ESP_LOGI(TAG, "Arm home (%s)", esp_err_to_name(err));
+}
+
 static void on_arm_pos1(lv_event_t *e)
 {
     (void)e;
@@ -522,6 +530,9 @@ void ui_ops_on_motion_done(const pl_motion_done_t *pl)
     case MOTION_FAULT:
         res_name = "FAULT";
         break;
+    case MOTION_SPI_FAULT:
+        res_name = "SPI FAULT";
+        break;
     default:
         res_name = "?";
         break;
@@ -764,7 +775,7 @@ void ui_show_home(void)
  *
  *  y=  0  "Operations"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
  *  y= 22  [Flap Open  148×24]  4  [Flap Close  148×24]
- *  y= 50  [Arm Press  96×24]  4  [Arm Pos 1  96×24]  4  [Arm Pos 2  96×24]
+ *  y= 50  [Arm Home  72×24]  4  [Arm Press 72×24]  4  [Arm Pos 1 72×24]  4  [Arm Pos 2 72×24]
  *  y= 78  [Rack Home  96×24]  4  [Rack Ext   96×24]  4  [Rack Press 96×24]
  *  y=106  [TblHome 56×24] 4 [TblA 56×24] 4 [TblB 56×24] 4 [TblC 56×24] 4 [TblD 56×24]
  *  y=134  [Wire ON  148×24]  4  [Wire OFF  148×24]
@@ -809,9 +820,10 @@ void ui_show_operations(void)
     make_btn(scr, "Flaps Close", 152, 22, 148, 24, on_flap_close);
 
     /* ── Row 2: Arm  (y=50, h=24) ────────────────────────────────────────── */
-    make_btn(scr, "Arm Press", 0, 50, 96, 24, on_arm_press);
-    make_btn(scr, "Arm Pos 1", 100, 50, 96, 24, on_arm_pos1);
-    make_btn(scr, "Arm Pos 2", 200, 50, 96, 24, on_arm_pos2);
+    make_btn(scr, "Arm Home", 0, 50, 72, 24, on_arm_home);
+    make_btn(scr, "Arm Press", 76, 50, 72, 24, on_arm_press);
+    make_btn(scr, "Arm Pos 1", 152, 50, 72, 24, on_arm_pos1);
+    make_btn(scr, "Arm Pos 2", 228, 50, 72, 24, on_arm_pos2);
 
     /* ── Row 3: Rack  (y=78, h=24) ───────────────────────────────────────── */
     make_btn(scr, "Rack Home", 0, 78, 96, 24, on_rack_home);

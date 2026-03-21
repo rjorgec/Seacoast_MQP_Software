@@ -99,6 +99,7 @@ The following compile-time protocol defaults are defined in `shared/proto/proto.
 | 0x4A | `MSG_SPAWN_STATUS` | `pl_spawn_status_t` | 16 | Pico → ESP unsolicited: dosing progress updates |
 | 0x4B | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t` | 1 | Traverse hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE); direction 0=cut, 1=return |
 | 0x4C | `MSG_INDEXER_MOVE` | `pl_indexer_move_t` | 1 | Move bag depth/eject rack (STEPPER_DEV_INDEXER) to named position |
+| 0x4D | `MSG_ARM_HOME` | none (len=0) | 0 | Sensorlessly home the rotary arm against its positive hard stop, then back off |
 
 ### 3.3 Unsolicited Status Messages (0x60–0x6F, Pico → ESP32)
 
