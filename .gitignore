@@ -9,6 +9,7 @@ managed_components/
 # VSCode / editor
 .vscode/*
 !.vscode/tasks.json
+!.vscode/extensions.json
 *.code-workspace
 
 # OS junk
@@ -18,3 +19,6 @@ Thumbs.db
 # Python / tooling caches
 __pycache__/
 *.pyc
+
+# Code Indexing
+*.idx

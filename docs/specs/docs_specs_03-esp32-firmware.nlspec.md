@@ -1,7 +1,7 @@
 # NLSpec: ESP32-C6 Firmware
 
 ## Version
-0.1.0
+0.1.1
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -91,6 +91,7 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_flap_open()` | `MSG_FLAPS_OPEN` | none |
 | `motor_flap_close()` | `MSG_FLAPS_CLOSE` | none |
 | `motor_arm_move(arm_pos_t pos)` | `MSG_ARM_MOVE` | `pl_arm_move_t{position=pos}` |
+| `motor_arm_home(void)` | `MSG_ARM_HOME` | none |
 | `motor_rack_move(rack_pos_t pos)` | `MSG_RACK_MOVE` | `pl_rack_move_t{position=pos}` |
 | `motor_turntable_goto(turntable_pos_t pos)` | `MSG_TURNTABLE_GOTO` | `pl_turntable_goto_t{position=pos}` |
 | `motor_turntable_home()` | `MSG_TURNTABLE_HOME` | none |
@@ -101,8 +102,14 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_indexer_move(uint8_t position)` | `MSG_INDEXER_MOVE` | `pl_indexer_move_t{position}` |
 | `motor_linact_start_monitor_dir(dir, speed, low, high, interval)` | `MSG_MOTOR_DRV8263_START_MON` | `pl_drv8263_start_mon_t` (legacy) |
 | `motor_linact_stop_monitor()` | `MSG_MOTOR_DRV8263_STOP_MON` | none (legacy) |
+| `motor_stepper_enable(bool en)` | `MSG_MOTOR_STEPPER_ENABLE` | `pl_stepper_enable_t{enable}` (legacy/raw stepper API) |
+| `motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_delay_us)` | `MSG_MOTOR_STEPPER_STEPJOB` | `pl_stepper_stepjob_t{dir,steps,step_delay_us,torque_limit}` (legacy/raw stepper API) |
 
-All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_send`, not `_rpc`).
+For `motor_stepper_step()`, the fallback `torque_limit` value is sourced from `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` in the shared protocol header (via `STEPPER_SOFT_TORQUE_LIMIT`), keeping ESP and Pico default behavior aligned.
+
+`motor_arm_home()` is explicit/operator-invoked only. Boot still allows arm moves before the first home for backward compatibility, but after an arm `MOTION_STALLED`, `MOTION_TIMEOUT`, `MOTION_FAULT`, or `MOTION_SPI_FAULT`, later `motor_arm_move()` requests are NACKed until `motor_arm_home()` succeeds.
+
+All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_send`, not `_rpc`) except APIs that explicitly use RPC semantics in implementation.
 
 ---
 
@@ -152,6 +159,7 @@ Home Screen
 |---------|-------------|----------|---------|
 | FLAPS | "Flap Open" | `on_flap_open()` | `motor_flap_open()` |
 | FLAPS | "Flap Close" | `on_flap_close()` | `motor_flap_close()` |
+| ARM | "Arm Home" | `on_arm_home()` | `motor_arm_home()` |
 | ARM | "Arm Press" | `on_arm_press()` | `motor_arm_move(ARM_POS_PRESS)` |
 | ARM | "Arm Pos 1" | `on_arm_pos1()` | `motor_arm_move(ARM_POS_1)` |
 | ARM | "Arm Pos 2" | `on_arm_pos2()` | `motor_arm_move(ARM_POS_2)` |
@@ -165,7 +173,7 @@ Home Screen
 | VACUUM | "Vacuum OFF" | `on_vacuum_off()` | `motor_vacuum_set(false)` |
 | CALIBRATE | "Turntable Home" | `on_tt_home()` | `motor_turntable_home()` |
 
-**Status feedback:** When `MSG_MOTION_DONE` is received, `ui_ops_on_motion_done()` updates the status label with subsystem name and result (e.g., "ARM: OK (4000 steps)" or "FLAPS: TIMEOUT"). When `MSG_VACUUM_STATUS` is received, `ui_ops_on_vacuum_status()` updates the vacuum status label (e.g., "Vacuum: OK 1200 RPM" or "Vacuum: BLOCKED 350 RPM").
+**Status feedback:** When `MSG_MOTION_DONE` is received, `ui_ops_on_motion_done()` updates the status label with subsystem name and result (e.g., "ARM: OK" or "FLAPS: TIMEOUT"). When `MSG_VACUUM_STATUS` is received, `ui_ops_on_vacuum_status()` updates the vacuum status label (e.g., "Vacuum: OK 1200 RPM" or "Vacuum: BLOCKED 350 RPM"). If the arm faults or stalls during a normal move, the operator must use the `"Arm Home"` button before later arm-position buttons will be accepted again.
 
 ### 4.5 Dosing Screen (`ui_show_dosing()`)
 
