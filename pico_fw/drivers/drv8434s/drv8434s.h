@@ -610,12 +610,20 @@ typedef void (*drv8434s_motion_done_cb_t)(
 // 3 samples is enough to filter noise while still reacting quickly.
 #define DRV8434S_MOTION_TRQ_BUF_SIZE 3u
 
+// Ignore torque-limit trips for the first N achieved steps of each job.
+// This avoids false stops from transient low TRQ_COUNT readings immediately
+// after restarting motion from a prior stall/torque-limit stop.
+#ifndef DRV8434S_MOTION_TORQUE_BLANK_STEPS
+#define DRV8434S_MOTION_TORQUE_BLANK_STEPS 20u
+#endif
+
 // Per-device motion job state.  Managed internally by the motion engine.
 typedef struct {
   int32_t steps_remaining; // Absolute count, decrements each tick
   int32_t steps_achieved;  // Signed accumulator
   int32_t steps_requested; // Original signed request
   uint16_t torque_limit;   // 0 = disabled
+  uint16_t torque_blank_steps;
   uint16_t last_torque_count;
   drv8434s_motion_stop_reason_t reason;
   bool active;
@@ -653,6 +661,11 @@ bool drv8434s_motion_init(drv8434s_motion_t *motion, drv8434s_chain_t *chain,
 // The caller must start a periodic timer that calls drv8434s_motion_tick().
 bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
                            int32_t target_steps, uint16_t torque_limit);
+
+// Extended motion start that overrides the torque blanking window per job.
+bool drv8434s_motion_start_ex(drv8434s_motion_t *motion, uint8_t dev_idx,
+                              int32_t target_steps, uint16_t torque_limit,
+                              uint16_t torque_blank_steps);
 
 // Advance all active motors by one step in a single SPI chain frame.
 // Call this from a repeating timer callback at the desired step rate.

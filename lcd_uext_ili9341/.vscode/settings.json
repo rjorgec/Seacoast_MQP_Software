@@ -1,12 +1,22 @@
 {
-    "idf.currentSetup": "/home/daniel/.espressif/v5.5.2/esp-idf",
-    "idf.openOcdConfigs": [
-        "board/esp32c6-builtin.cfg"
-    ],
-    "idf.customExtraVars": {
-        "IDF_TARGET": "esp32c6"
-    },
-    "idf.port": "/dev/ttyACM0",
-    "idf.flashType": "UART",
-    "cmake.sourceDirectory": "/home/daniel/GitHub/Seacoast_MQP_Software/lcd_uext_ili9341"
+  // Path to the ESP-IDF installation.
+  "idf.currentSetup": "/home/ricky/esp/.espressif/v5.5.2/esp-idf",
+
+  // OpenOCD configuration for the ESP32-C6 built-in USB JTAG interface.
+  "idf.openOcdConfigs": [
+    "board/esp32c6-builtin.cfg"
+  ],
+
+  // Lock the IDF target to esp32c6 so 'idf.py set-target' is not needed.
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32c6"
+  },
+
+  // Serial port for idf.py flash / monitor.
+  // Change to match your device: ls /dev/ttyACM* /dev/ttyUSB*
+  // After udev rules are installed, the ESP32-C6 should also appear as /dev/ttyESP32
+  "idf.port": "/dev/ttyACM0",
+
+  // Use UART flashing (no OpenOCD / JTAG needed for basic flash+monitor).
+  "idf.flashType": "UART"
 }

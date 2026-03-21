@@ -1,7 +1,7 @@
 # NLSpec: Raspberry Pi Pico 2 Firmware
 
 ## Version
-0.1.0
+0.1.1
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -25,6 +25,8 @@ The Pico firmware runs bare-metal C on the RP2040 (ARM core of the Pico 2). It i
 | `shared/proto/proto.h` | Protocol definitions (shared with ESP32) |
 | `shared/proto/cobs.c` | COBS encode/decode |
 | `shared/proto/proto_crc.c` | CRC-16-CCITT |
+
+**Stepper torque default source:** The fallback soft torque-limit threshold is defined once in `shared/proto/proto.h` as `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` and consumed by Pico (`STEPPER_SOFT_TORQUE_LIMIT` fallback in `uart_server.c`).
 
 ### 1.2 Execution Model
 
@@ -85,32 +87,46 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Hardware:** DRV8434S on SPI1 daisy-chain, device index 0.
 
-**Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Starts at 0 after boot (assumed home).
+**Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Boot still initializes it to `0` for backward compatibility, but the trusted physical reference is established only by `MSG_ARM_HOME`.
 
-**Behavior:** On `MSG_ARM_MOVE(position)`, compute delta from `s_arm_pos_steps` to target steps, call `drv8434s_motion_start()`. Named positions map to step counts:
+**Behavior:** On `MSG_ARM_MOVE(position)`, compute delta from `s_arm_pos_steps` to target steps and start a DRV8434S motion. If `s_arm_rehome_required == true`, the Pico NACKs `MSG_ARM_MOVE` until `MSG_ARM_HOME` succeeds. Named positions map to step counts from the arm's physical home hard-stop:
 
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
-| ARM_POS_PRESS | `ARM_STEPS_PRESS` | 4000 |
-| ARM_POS_1 | `ARM_STEPS_POS1` | 1000 |
-| ARM_POS_2 | `ARM_STEPS_POS2` | 2500 |
+| ARM_POS_PRESS | `ARM_STEPS_PRESS` | -3500 |
+| ARM_POS_1 | `ARM_STEPS_POS1` | -500 |
+| ARM_POS_2 | `ARM_STEPS_POS2` | -100 |
 
-**Special behavior for ARM_POS_PRESS:** Stall detection is enabled. If stall fires within `ARM_PRESS_STALL_WINDOW_STEPS` (default: 200) of the target, treat as `MOTION_OK` (successful engagement). Otherwise, treat as `MOTION_STALLED`.
+**Press semantics:** A torque-stop while moving to `ARM_POS_PRESS` is treated as a successful press instead of a fault. The Pico keeps the tracked arm position at the actual achieved steps and does not require re-home just because the press hit resistance as intended.
 
-**Timeout:** `ARM_MOVE_TIMEOUT_MS` (default: 10000 ms).
+**Vacuum-assisted retry:** If vacuum RPM telemetry is valid and the vacuum is ON when `ARM_POS_PRESS` starts, the Pico captures the pre-press RPM, waits `ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS` after the press completes, and checks for an absolute RPM change of at least `ARM_PRESS_RETRY_RPM_DELTA`. If no change is detected, the arm backs off by `ARM_PRESS_RETRY_BACKOFF_STEPS` and retries the press, up to `ARM_PRESS_RETRY_MAX_RETRIES`. If all retries are exhausted without an RPM response, the Pico reports `MOTION_TIMEOUT` but does not force re-home.
 
-**Arm State Machine States:** `IDLE`, `MOVING`, `AT_PRESS`, `AT_POS1`, `AT_POS2`, `FAULT`
+**Sensorless homing:** `MSG_ARM_HOME` is explicit/manual. The Pico requires the DRV8434S motion engine to be idle, then seeks in the positive direction by `ARM_HOME_SEARCH_STEPS` using `ARM_HOME_TORQUE_LIMIT`, `ARM_HOME_TORQUE_BLANK_STEPS`, `ARM_HOME_TORQUE_SAMPLE_DIV`, and `ARM_HOME_STEP_DELAY_US`. A torque-stop during the seek is treated as the home hard-stop (`s_arm_pos_steps = 0`), after which the firmware runs a fixed backoff of `ARM_HOME_BACKOFF_STEPS` and reports `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, -ARM_HOME_BACKOFF_STEPS)`.
+
+**Homing failures:** If the seek consumes all `ARM_HOME_SEARCH_STEPS` without a torque-stop, the Pico reports `MOTION_TIMEOUT` and leaves `s_arm_rehome_required = true`. SPI faults, driver faults, and timeouts during seek or backoff also leave the arm requiring re-home.
+
+**Timeouts:** Normal arm moves use `ARM_MOTION_TIMEOUT_MS`; each homing phase uses `ARM_HOME_TIMEOUT_MS`.
+
+**Soft torque-limit default:** For state-based stepper moves (`MSG_ARM_MOVE`, `MSG_RACK_MOVE`, `MSG_TURNTABLE_GOTO`, etc.), Pico uses `STEPPER_SOFT_TORQUE_LIMIT`; if not overridden, this resolves to `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` from the shared protocol header.
+
+**Arm state flags:** `s_arm_homing_phase` (`IDLE`, `SEEK`, `BACKOFF`), `s_arm_homed`, and `s_arm_rehome_required`.
 
 **Transition Table:**
 
 | From | Event | To | Side Effect |
 |------|-------|-----|-------------|
 | IDLE / AT_* | MSG_ARM_MOVE(pos) | MOVING | Compute delta; start step job; ACK |
-| FAULT | MSG_ARM_MOVE(pos) | MOVING | Clear fault; start step job; ACK |
+| IDLE / AT_* / REHOME_REQUIRED | MSG_ARM_HOME | HOMING_SEEK | Require idle DRV8434S engine; start positive seek; ACK |
+| REHOME_REQUIRED | MSG_ARM_MOVE(pos) | REHOME_REQUIRED | NACK until `MSG_ARM_HOME` succeeds |
 | MOVING | Step job complete | AT_PRESS / AT_POS1 / AT_POS2 | Update s_arm_pos_steps; send MOTION_DONE(ARM, OK, steps) |
-| MOVING | Stall detected | FAULT | Send MOTION_DONE(ARM, STALLED, steps) |
-| MOVING | Timeout | FAULT | Cancel motion; send MOTION_DONE(ARM, TIMEOUT, steps) |
+| MOVING | Stall while target is `ARM_POS_PRESS` | AT_PRESS | Update tracked steps; report `MOTION_OK`; do not require re-home |
+| MOVING / AT_PRESS | No RPM change after press verify window | PRESS_RETRY_BACKOFF or AT_PRESS | Back off and retry until `ARM_PRESS_RETRY_MAX_RETRIES` is exhausted; then report `MOTION_TIMEOUT` without forcing re-home |
+| MOVING | Stall / timeout / driver fault / SPI fault on any other arm move | REHOME_REQUIRED | Update tracked steps, send terminal MOTION_DONE, require re-home |
 | MOVING | MSG_ARM_MOVE(new_pos) | MOVING | Cancel current; start new job; ACK |
+| HOMING_SEEK | Torque-stop detected | HOMING_BACKOFF | Set `s_arm_pos_steps = 0`; start fixed backoff |
+| HOMING_SEEK | Search distance exhausted | REHOME_REQUIRED | Send MOTION_DONE(ARM, TIMEOUT, steps) |
+| HOMING_BACKOFF | Step job complete | AT_HOME_RELEASED | Send MOTION_DONE(ARM, OK, `-ARM_HOME_BACKOFF_STEPS`) |
+| HOMING_SEEK / HOMING_BACKOFF | SPI / driver fault / timeout | REHOME_REQUIRED | Send matching MOTION_DONE; reject later `MSG_ARM_MOVE` |
 
 ### 2.3 Rack Stepper (DRV8434S Device 1)
 

@@ -44,6 +44,13 @@ esp_err_t motor_flap_open(void);
 esp_err_t motor_flap_close(void);
 
 /**
+ * @brief Sensorlessly home the arm stepper against its positive hard stop,
+ *        then back off by a fixed amount.
+ * @return ESP_OK if the command was ACK'd, error otherwise.
+ */
+esp_err_t motor_arm_home(void);
+
+/**
  * @brief Move the arm stepper to a named position.
  * @param pos  One of: ARM_POS_PRESS, ARM_POS_1, ARM_POS_2 (arm_pos_t cast to uint8_t)
  * @return ESP_OK if the command was ACK'd, error otherwise.

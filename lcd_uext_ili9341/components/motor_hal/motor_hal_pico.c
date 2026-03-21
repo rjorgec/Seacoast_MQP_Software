@@ -86,7 +86,7 @@ esp_err_t motor_linact_stop(void)
 // This value is sent over UART to the Pico and used by the motion engine
 // to stop a move when torque drops below the threshold.
 #ifndef STEPPER_SOFT_TORQUE_LIMIT
-#define STEPPER_SOFT_TORQUE_LIMIT 300u
+#define STEPPER_SOFT_TORQUE_LIMIT PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT
 #endif
 
 esp_err_t motor_stepper_enable(bool en)
@@ -179,6 +179,22 @@ esp_err_t motor_arm_move(uint8_t pos)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "arm_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_arm_home(void)
+{
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_ARM_HOME,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "arm_home rpc failed (%s), nack=%u",
                  esp_err_to_name(err), (unsigned)nack_code);
     }
     return err;

@@ -147,6 +147,7 @@ See [`shared/proto/proto.h`](../shared/proto/proto.h) for all message IDs and pa
 | 0x49 | `MSG_DISPENSE_SPAWN`    | `pl_innoculate_bag_t`    | Start Pico-side closed-loop dosing  |
 | 0x4B | `MSG_HOTWIRE_TRAVERSE`  | `pl_hotwire_traverse_t`  | Traverse hot wire carriage stepper  |
 | 0x4C | `MSG_INDEXER_MOVE`      | `pl_indexer_move_t`      | Move bag depth/eject rack           |
+| 0x4D | `MSG_ARM_HOME`          | _(none)_                 | Sensorlessly home arm, then back off |
 
 ### Unsolicited Status Messages (Pico → ESP32)
 
@@ -173,7 +174,7 @@ Home Screen
 
 ### Operations Screen buttons
 
-Flap Open/Close | Arm Press/Pos1/Pos2 | Rack Home/Extend/Press |  
+Flap Open/Close | Arm Home/Press/Pos1/Pos2 | Rack Home/Extend/Press |  
 Turntable Pos A/B/C/D | HotWire ON/OFF | Vacuum ON/OFF | Turntable Home
 
 ### Sequence Screen buttons
@@ -196,7 +197,12 @@ All hardware calibration constants are in [`pico_fw/src/board_pins.h`](../pico_f
 | `FLAP_CLOSE_SPEED_PWM`       | 3000     | 12-bit flap close PWM duty                     |
 | `FLAP_CLOSE_TORQUE_TH`       | 145      | ADC counts — torque/stall threshold            |
 | `FLAP_MOTION_TIMEOUT_MS`     | 15000    | Max ms for flap motion before FAULT            |
-| `ARM_STEPS_PRESS`            | 500      | Steps from home to press position              |
+| `ARM_STEPS_PRESS`            | -3500    | Steps from physical arm home hard-stop to press position |
+| `ARM_STEPS_POS1`             | -500     | Steps from physical arm home hard-stop to pos 1 |
+| `ARM_STEPS_POS2`             | -100     | Steps from physical arm home hard-stop to pos 2 |
+| `ARM_HOME_SEARCH_STEPS`      | 5000     | Positive-direction search distance for arm sensorless homing |
+| `ARM_HOME_BACKOFF_STEPS`     | 100      | Fixed release distance after the arm hits home |
+| `ARM_HOME_TORQUE_LIMIT`      | 300      | Torque threshold used to detect the arm hard stop |
 | `RACK_STEPS_EXTEND`          | 800      | Steps from home to extend position             |
 | `TURNTABLE_STEPS_B`          | 400      | Steps from home to accept/bag position         |
 | `HOTWIRE_ENABLE_DUTY`        | 4095     | Full on; current set by external Rsense        |
@@ -211,6 +217,8 @@ Override constants at compile time:
 cmake .. -DPICO_BOARD=pico2 -DARM_STEPS_PRESS=600 -DRACK_STEPS_EXTEND=950
 ```
 
+For the rotary arm, `MSG_ARM_HOME` defines the physical reference: home is the positive hard stop, logical zero is that stall point, and the firmware then releases to `-ARM_HOME_BACKOFF_STEPS`. Retune the named arm positions as zero-or-negative values from that reference.
+
 ---
 
 ## Bring-Up Order
@@ -220,10 +228,11 @@ cmake .. -DPICO_BOARD=pico2 -DARM_STEPS_PRESS=600 -DRACK_STEPS_EXTEND=950
 3. `MSG_TURNTABLE_HOME` → verify step counter zeroes
 4. `MSG_TURNTABLE_GOTO` A→B→C→D
 5. `MSG_RACK_MOVE` HOME (homing via stall), then EXTEND/PRESS
-6. `MSG_ARM_MOVE` PRESS (stall confirmation), then POS1/POS2
-7. `MSG_HOTWIRE_SET` ON/OFF — verify DRV8263 IN1 output
-8. `MSG_VACUUM_SET` ON/OFF — verify RPM telemetry `MSG_VACUUM_STATUS`
-9. Integrate Operations screen, verify all buttons
-10. Calibrate all `board_pins.h` position constants
-11. Test `MSG_DISPENSE_SPAWN` end-to-end with `MSG_SPAWN_STATUS`
-12. Run sys_sequence.c Sequence screen through a full bag cycle
+6. `MSG_ARM_HOME` from several starting positions; verify the arm hits the hard stop and backs off to `-ARM_HOME_BACKOFF_STEPS`
+7. `MSG_ARM_MOVE` PRESS, then POS1/POS2
+8. `MSG_HOTWIRE_SET` ON/OFF — verify DRV8263 IN1 output
+9. `MSG_VACUUM_SET` ON/OFF — verify RPM telemetry `MSG_VACUUM_STATUS`
+10. Integrate Operations screen, verify all buttons including `Arm Home`
+11. Calibrate all `board_pins.h` position constants
+12. Test `MSG_DISPENSE_SPAWN` end-to-end with `MSG_SPAWN_STATUS`
+13. Run sys_sequence.c Sequence screen through a full bag cycle

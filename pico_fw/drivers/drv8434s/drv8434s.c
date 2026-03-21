@@ -1063,6 +1063,15 @@ bool drv8434s_motion_init(drv8434s_motion_t *motion,
 bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
                            int32_t target_steps, uint16_t torque_limit)
 {
+    return drv8434s_motion_start_ex(motion, dev_idx, target_steps,
+                                    torque_limit,
+                                    (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS);
+}
+
+bool drv8434s_motion_start_ex(drv8434s_motion_t *motion, uint8_t dev_idx,
+                              int32_t target_steps, uint16_t torque_limit,
+                              uint16_t torque_blank_steps)
+{
     if (!motion || !motion->chain || dev_idx >= motion->chain->cfg.n_devices)
         return false;
 
@@ -1073,12 +1082,18 @@ bool drv8434s_motion_start(drv8434s_motion_t *motion, uint8_t dev_idx,
     if (target_steps == 0)
         return true; // Nothing to do
 
+    /* Clear any latched fault state from prior motions before arming
+     * a new job; otherwise the first tick can immediately fault out. */
+    if (!drv8434s_chain_clear_faults(motion->chain, dev_idx, NULL))
+        return false;
+
     memset(job, 0, sizeof(*job));
     job->active = true;
     job->reverse = (target_steps < 0);
     job->steps_requested = target_steps;
     job->steps_remaining = job->reverse ? -target_steps : target_steps;
     job->torque_limit = torque_limit;
+    job->torque_blank_steps = torque_blank_steps;
     job->reason = DRV8434S_MOTION_OK;
 
     // Set direction on the device
@@ -1240,6 +1255,23 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
             for (uint8_t b = 0; b < job->trq_buf_count; ++b)
                 sum += job->trq_buf[b];
             uint16_t avg = (uint16_t)(sum / job->trq_buf_count);
+
+            /* Ignore early transients after motion start/restart.
+             * TRQ_COUNT can dip for a short startup window after a prior
+             * torque-stop event even when motion is valid. */
+            uint32_t abs_steps_achieved =
+                (job->steps_achieved < 0) ? (uint32_t)(-job->steps_achieved)
+                                          : (uint32_t)job->steps_achieved;
+            if (abs_steps_achieved < (uint32_t)job->torque_blank_steps)
+            {
+                continue;
+            }
+
+            /* Require a full rolling window before making stop decisions. */
+            if (job->trq_buf_count < DRV8434S_MOTION_TRQ_BUF_SIZE)
+            {
+                continue;
+            }
 // Tuning print
 #ifdef TUNING
             printf("Motor %u torque avg=%u limit=%u buf=[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]\n",
@@ -1250,8 +1282,8 @@ bool drv8434s_motion_tick(drv8434s_motion_t *motion)
 #endif
 
             // TRQ_COUNT = torque margin until stall (0 = stalled).
-            // Trip when average falls at or below the limit.
-            if (avg <= job->torque_limit)
+            // Trip only when average is strictly below the limit.
+            if (avg < job->torque_limit)
             {
                 job->reason = DRV8434S_MOTION_TORQUE_LIMIT;
 

@@ -1,7 +1,7 @@
 # NLSpec: Shared Communication Protocol
 
 ## Version
-0.1.0
+0.1.1
 
 ## Depends On
 Nothing (leaf spec)
@@ -54,6 +54,14 @@ typedef struct __attribute__((packed)) {
 - `seq`: monotonically increasing per-sender. Used to correlate ACK/NACK responses to commands. Wraps at `0xFFFF` → `0x0000`.
 - `len`: number of payload bytes following the header. Must be `<= PROTO_MAX_PAYLOAD` (128). If `len` does not match the expected payload size for the given `type`, the receiver NACKs with `NACK_BAD_LEN`.
 
+### 2.4 Shared Protocol Defaults
+
+The following compile-time protocol defaults are defined in `shared/proto/proto.h` and are the canonical source for both firmware projects unless explicitly overridden by build flags:
+
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` | 300 | Default soft torque-limit threshold for DRV8434S motion commands (`0` disables torque-limit stop) |
+
 ---
 
 ## 3. Message Type Table
@@ -91,6 +99,7 @@ typedef struct __attribute__((packed)) {
 | 0x4A | `MSG_SPAWN_STATUS` | `pl_spawn_status_t` | 16 | Pico → ESP unsolicited: dosing progress updates |
 | 0x4B | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t` | 1 | Traverse hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE); direction 0=cut, 1=return |
 | 0x4C | `MSG_INDEXER_MOVE` | `pl_indexer_move_t` | 1 | Move bag depth/eject rack (STEPPER_DEV_INDEXER) to named position |
+| 0x4D | `MSG_ARM_HOME` | none (len=0) | 0 | Sensorlessly home the rotary arm against its positive hard stop, then back off |
 
 ### 3.3 Unsolicited Status Messages (0x60–0x6F, Pico → ESP32)
 
@@ -244,4 +253,5 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 - [ ] `proto_crc16_ccitt()` computes CRC-16-CCITT (polynomial 0x1021, init 0xFFFF) correctly for at least 3 known test vectors
 - [ ] COBS encode/decode round-trips correctly for payloads of size 0, 1, 64, and 128 bytes
 - [ ] All `#define` constants use `#ifndef` guards
+- [ ] `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` is present in the shared protocol header and used as the fallback default on both Pico and ESP firmware
 - [ ] The header compiles cleanly under both GCC (ARM, Pico SDK) and GCC (RISC-V, ESP-IDF) with `-Wall -Werror`

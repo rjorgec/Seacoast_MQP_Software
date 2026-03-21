@@ -74,6 +74,7 @@ Existing IDs (0x01, 0x10–0x11, 0x20–0x21, 0x28–0x29, 0x30–0x33, 0x80–0
 | 0x45 | `MSG_TURNTABLE_HOME`       | ESP → Pico   | _(none, len=0)_             | Drive turntable to physical endstop via stall detection; zero position counter |
 | 0x46 | `MSG_HOTWIRE_SET`          | ESP → Pico   | `pl_hotwire_set_t`          | Enable or disable hot-wire PWM (DRV8263 hotwire instance, constant current mode) |
 | 0x47 | `MSG_VACUUM_SET`           | ESP → Pico   | `pl_vacuum_set_t`           | Assert or de-assert vacuum pump trigger GPIO |
+| 0x4D | `MSG_ARM_HOME`             | ESP → Pico   | _(none, len=0)_             | Sensorlessly home the arm against its positive hard stop, then back off |
 
 ### 1.2 Unsolicited Status Messages (Pico → ESP32)
 
@@ -96,7 +97,7 @@ All structs are C99-compatible, `__attribute__((packed))`, and use only fixed-wi
 /* Subsystem IDs used in pl_motion_done_t */
 typedef enum __attribute__((packed))
 {
-    SUBSYS_FLAP       = 0,
+    SUBSYS_FLAPS      = 0,
     SUBSYS_ARM        = 1,
     SUBSYS_RACK       = 2,
     SUBSYS_TURNTABLE  = 3,
@@ -106,10 +107,10 @@ typedef enum __attribute__((packed))
 typedef enum __attribute__((packed))
 {
     MOTION_OK             = 0,   /* Completed normally (reached target steps) */
-    MOTION_CURRENT_STOP   = 1,   /* Auto-stopped by current threshold (flap endpoint) */
-    MOTION_STALL          = 2,   /* Stepper stall detected before target */
-    MOTION_TIMEOUT        = 3,   /* Wall-clock timeout elapsed */
-    MOTION_FAULT          = 4,   /* Driver fault pin asserted */
+    MOTION_STALLED        = 1,   /* Stepper stall detected before target */
+    MOTION_TIMEOUT        = 2,   /* Wall-clock timeout elapsed */
+    MOTION_FAULT          = 3,   /* Driver fault pin asserted */
+    MOTION_SPI_FAULT      = 4,   /* SPI communication failure (not a physical stall) */
 } motion_result_t;
 
 /* Arm absolute position identifiers */
@@ -213,7 +214,7 @@ typedef struct __attribute__((packed))
     uint8_t  subsystem;   /* subsystem_id_t */
     uint8_t  result;      /* motion_result_t */
     uint8_t  _rsvd[2];   /* padding — must be 0x00 0x00 */
-    int32_t  steps_done;  /* actual steps completed (meaningless for SUBSYS_FLAP) */
+    int32_t  steps_done;  /* actual steps completed (meaningless for SUBSYS_FLAPS) */
 } pl_motion_done_t;
 ```
 
@@ -264,16 +265,16 @@ static int32_t s_turntable_pos_steps;  /* DRV8434S dev 2 */
 |--------------|------------------------------------------------|------------|-------------|
 | `IDLE`       | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Start DRV8263 FWD at full speed; start timeout timer; ACK |
 | `IDLE`       | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Start DRV8263 REV; start timeout timer; ACK |
-| `OPENING`    | Monitoring auto-stop fires: current drops      | `OPEN`     | Send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_CURRENT_STOP)` |
-| `OPENING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
+| `OPENING`    | Monitoring auto-stop fires: current drops      | `OPEN`     | Send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_CURRENT_STOP)` |
+| `OPENING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_TIMEOUT)` |
 | `OPENING`    | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Restart DRV8263 REV; reset timer; ACK |
 | `OPEN`       | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Start DRV8263 REV; start timer; ACK |
-| `OPEN`       | `MSG_FLAPS_OPEN` received                       | `OPEN`     | Already open — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
-| `CLOSING`    | Monitoring auto-stop fires: current high       | `CLOSED`   | Send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_CURRENT_STOP)` |
-| `CLOSING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
+| `OPEN`       | `MSG_FLAPS_OPEN` received                       | `OPEN`     | Already open — send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_OK)`; ACK |
+| `CLOSING`    | Monitoring auto-stop fires: current high       | `CLOSED`   | Send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_CURRENT_STOP)` |
+| `CLOSING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_TIMEOUT)` |
 | `CLOSING`    | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Restart DRV8263 FWD; reset timer; ACK |
 | `CLOSED`     | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Start DRV8263 FWD; start timer; ACK |
-| `CLOSED`     | `MSG_FLAPS_CLOSE` received                      | `CLOSED`   | Already closed — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
+| `CLOSED`     | `MSG_FLAPS_CLOSE` received                      | `CLOSED`   | Already closed — send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_OK)`; ACK |
 | `FAULT`      | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Clear fault; start DRV8263 FWD; ACK |
 | `FAULT`      | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Clear fault; start DRV8263 REV; ACK |
 
@@ -315,26 +316,24 @@ stateDiagram-v2
 ### 3.2 Arm Stepper State Machine
 
 **Hardware:** DRV8434S device index 0, daisy-chain on SPI0.  
-**Trigger message:** `MSG_ARM_MOVE` (0x42).  
-**Position tracking:** `s_arm_pos_steps` — Pico computes delta from current to target and calls `drv8434s_motion_start()`.
+**Trigger messages:** `MSG_ARM_MOVE` (0x42), `MSG_ARM_HOME` (0x4D).  
+**Position tracking:** `s_arm_pos_steps` — Pico computes delta from current to target and starts a DRV8434S motion job. Boot still initializes `s_arm_pos_steps = 0` for backward compatibility, but the trusted physical reference is established only by `MSG_ARM_HOME`. Named arm positions are measured from the physical home hard-stop reached by homing.
 
 #### State Transition Table
 
-| From State   | Event / Condition                              | To State   | Side Effect |
-|--------------|------------------------------------------------|------------|-------------|
-| `IDLE`       | `MSG_ARM_MOVE(ARM_POS_PRESS)` received         | `MOVING`   | Compute delta to `ARM_STEPS_PRESS`; start step job; ACK |
-| `IDLE`       | `MSG_ARM_MOVE(ARM_POS_1)` received             | `MOVING`   | Compute delta to `ARM_STEPS_POS1`; start step job; ACK |
-| `IDLE`       | `MSG_ARM_MOVE(ARM_POS_2)` received             | `MOVING`   | Compute delta to `ARM_STEPS_POS2`; start step job; ACK |
-| `AT_PRESS`   | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Same as IDLE transitions above |
-| `AT_POS1`    | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Same as IDLE transitions above |
-| `AT_POS2`    | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Same as IDLE transitions above |
-| `FAULT`      | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Clear fault flag; start step job; ACK |
-| `MOVING`     | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_PRESS` / `AT_POS1` / `AT_POS2` | Update `s_arm_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, steps)` |
-| `MOVING`     | `drv8434s_motion_done` cb: stall detected      | `FAULT`    | Send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_STALL, steps)` |
-| `MOVING`     | `ARM_MOVE_TIMEOUT_MS` elapsed                  | `FAULT`    | Cancel motion; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_TIMEOUT, steps)` |
-| `MOVING`     | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Cancel current job; start new job; ACK |
+| From State | Event / Condition | To State | Side Effect |
+|------------|-------------------|----------|-------------|
+| `IDLE` / `AT_PRESS` / `AT_POS1` / `AT_POS2` | `MSG_ARM_MOVE(any)` received | `MOVING` | Compute delta to `ARM_STEPS_*`; start step job; ACK |
+| `IDLE` / `AT_PRESS` / `AT_POS1` / `AT_POS2` / `REHOME_REQUIRED` | `MSG_ARM_HOME` received | `HOMING_SEEK` | Require idle DRV8434S motion engine; start positive seek using `ARM_HOME_*` constants; ACK |
+| `MOVING` | Step job complete | `AT_PRESS` / `AT_POS1` / `AT_POS2` | Update `s_arm_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, steps)` |
+| `MOVING` | Unexpected stall / timeout / driver fault / SPI fault | `REHOME_REQUIRED` | Update tracked steps, send terminal `MSG_MOTION_DONE`, set `s_arm_rehome_required = true` |
+| `REHOME_REQUIRED` | `MSG_ARM_MOVE(any)` received | `REHOME_REQUIRED` | NACK until `MSG_ARM_HOME` succeeds |
+| `HOMING_SEEK` | Torque stop before search distance consumed | `HOMING_BACKOFF` | Treat stop as home hard-stop; set `s_arm_pos_steps = 0`; start relative backoff by `-ARM_HOME_BACKOFF_STEPS` |
+| `HOMING_SEEK` | Search completes without torque stop | `REHOME_REQUIRED` | Send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_TIMEOUT, s_arm_pos_steps)` |
+| `HOMING_SEEK` / `HOMING_BACKOFF` | Timeout / driver fault / SPI fault | `REHOME_REQUIRED` | Send terminal `MSG_MOTION_DONE`; leave arm requiring re-home |
+| `HOMING_BACKOFF` | Backoff completes | `AT_HOME_RELEASED` | Update `s_arm_pos_steps += steps_achieved`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, -ARM_HOME_BACKOFF_STEPS)` |
 
-> **Torque / stall confirmation for press:** When moving to `ARM_POS_PRESS`, stall detection is enabled with a torque threshold. A stall event here means successful engagement — treat as `MOTION_OK` if achieved within `ARM_PRESS_STALL_WINDOW_STEPS` of the target, otherwise `MOTION_STALL`.
+`MSG_ARM_HOME` is explicit/manual only. Homing is exclusive across the DRV8434S chain: if any other motion job is active, the Pico NACKs the request. While homing is active, other stepper starts are also rejected.
 
 #### Arm State Diagram
 
@@ -342,23 +341,31 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> IDLE
 
-    IDLE --> MOVING : MSG_ARM_MOVE received
+    IDLE --> MOVING : MSG_ARM_MOVE
+    IDLE --> HOMING_SEEK : MSG_ARM_HOME
 
-    AT_PRESS --> MOVING : MSG_ARM_MOVE received
-    AT_POS1  --> MOVING : MSG_ARM_MOVE received
-    AT_POS2  --> MOVING : MSG_ARM_MOVE received
-    FAULT    --> MOVING : MSG_ARM_MOVE received - fault cleared
+    AT_PRESS --> MOVING : MSG_ARM_MOVE
+    AT_POS1 --> MOVING : MSG_ARM_MOVE
+    AT_POS2 --> MOVING : MSG_ARM_MOVE
+    AT_PRESS --> HOMING_SEEK : MSG_ARM_HOME
+    AT_POS1 --> HOMING_SEEK : MSG_ARM_HOME
+    AT_POS2 --> HOMING_SEEK : MSG_ARM_HOME
 
-    MOVING --> AT_PRESS : step job complete - target was PRESS
-    MOVING --> AT_POS1  : step job complete - target was POS1
-    MOVING --> AT_POS2  : step job complete - target was POS2
-    MOVING --> FAULT    : stall before target OR timeout
-    MOVING --> MOVING   : new MSG_ARM_MOVE - job restarted
+    MOVING --> AT_PRESS : move complete
+    MOVING --> AT_POS1 : move complete
+    MOVING --> AT_POS2 : move complete
+    MOVING --> REHOME_REQUIRED : stall / timeout / fault / SPI fault
 
-    AT_PRESS --> [*] : MSG_MOTION_DONE sent
-    AT_POS1  --> [*] : MSG_MOTION_DONE sent
-    AT_POS2  --> [*] : MSG_MOTION_DONE sent
-    FAULT    --> [*] : MSG_MOTION_DONE sent
+    REHOME_REQUIRED --> HOMING_SEEK : MSG_ARM_HOME
+    REHOME_REQUIRED --> REHOME_REQUIRED : MSG_ARM_MOVE NACK
+
+    HOMING_SEEK --> HOMING_BACKOFF : torque stop at hard-stop
+    HOMING_SEEK --> REHOME_REQUIRED : no stop / timeout / fault
+    HOMING_BACKOFF --> AT_HOME_RELEASED : backoff complete
+    HOMING_BACKOFF --> REHOME_REQUIRED : timeout / fault
+
+    AT_HOME_RELEASED --> MOVING : MSG_ARM_MOVE
+    AT_HOME_RELEASED --> HOMING_SEEK : MSG_ARM_HOME
 ```
 
 ---
@@ -384,7 +391,7 @@ stateDiagram-v2
 | `HOMING`     | Stall detected at endstop                      | `AT_HOME`   | Set `s_rack_pos_steps = 0`; send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_OK, 0)` |
 | `HOMING`     | `RACK_HOME_TIMEOUT_MS` elapsed, no stall       | `FAULT`     | Stop; send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_TIMEOUT, steps)` |
 | `MOVING`     | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_EXTEND` / `AT_PRESS` | Update `s_rack_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_OK, steps)` |
-| `MOVING`     | Stall detected unexpectedly                    | `FAULT`     | Send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_STALL, steps)` |
+| `MOVING`     | Stall detected unexpectedly                    | `FAULT`     | Send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_STALLED, steps)` |
 | `MOVING`     | `RACK_MOVE_TIMEOUT_MS` elapsed                 | `FAULT`     | Send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_TIMEOUT, steps)` |
 
 #### Rack State Diagram
@@ -443,7 +450,7 @@ stateDiagram-v2
 | `FAULT`          | `MSG_TURNTABLE_HOME` received                  | `HOMING`        | Clear fault; re-home; ACK |
 | `FAULT`          | `MSG_TURNTABLE_GOTO` received                  | `FAULT`         | NACK — re-home required |
 | `MOVING`         | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_A/B/C/D`    | Update `s_turntable_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_OK, steps)` |
-| `MOVING`         | Stall detected                                 | `FAULT`         | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_STALL, steps)` |
+| `MOVING`         | Stall detected                                 | `FAULT`         | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_STALLED, steps)` |
 | `MOVING`         | `TURNTABLE_MOVE_TIMEOUT_MS` elapsed            | `FAULT`         | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_TIMEOUT, steps)` |
 | `MOVING`         | `MSG_TURNTABLE_HOME` received                  | `HOMING`        | Cancel job; re-home; ACK |
 
@@ -599,28 +606,56 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 
 // ── Arm stepper (DRV8434S device 0) ──────────────────────────────────────────
 
-// Steps from arm home (fully retracted) to press position against attachment.
+// Steps from the physical arm home hard-stop reached by MSG_ARM_HOME to the
+// press position. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS,
+// so working positions are often zero or negative after calibration.
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS          4000
+#define ARM_STEPS_PRESS          -3500
 #endif
 
 // Steps from arm home to intermediate position 1.
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1           1000
+#define ARM_STEPS_POS1           -500
 #endif
 
 // Steps from arm home to intermediate position 2.
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2           2500
+#define ARM_STEPS_POS2           -100
 #endif
 
-// Stall detection window for press engagement confirmation.
-// If stall fires within this many steps of ARM_STEPS_PRESS, it is OK.
-#ifndef ARM_PRESS_STALL_WINDOW_STEPS
-#define ARM_PRESS_STALL_WINDOW_STEPS  200
+// Maximum positive-direction search distance for sensorless homing.
+#ifndef ARM_HOME_SEARCH_STEPS
+#define ARM_HOME_SEARCH_STEPS    5000
 #endif
 
-// Maximum time allowed for any arm move before FAULT.
+// Homing move speed and timeout.
+#ifndef ARM_HOME_STEP_DELAY_US
+#define ARM_HOME_STEP_DELAY_US   2000u
+#endif
+
+#ifndef ARM_HOME_TIMEOUT_MS
+#define ARM_HOME_TIMEOUT_MS      15000
+#endif
+
+// Stall-detection tuning for homing.
+#ifndef ARM_HOME_TORQUE_LIMIT
+#define ARM_HOME_TORQUE_LIMIT    300u
+#endif
+
+#ifndef ARM_HOME_TORQUE_BLANK_STEPS
+#define ARM_HOME_TORQUE_BLANK_STEPS 0u
+#endif
+
+#ifndef ARM_HOME_TORQUE_SAMPLE_DIV
+#define ARM_HOME_TORQUE_SAMPLE_DIV 1u
+#endif
+
+// Fixed release distance after a successful homing stall.
+#ifndef ARM_HOME_BACKOFF_STEPS
+#define ARM_HOME_BACKOFF_STEPS   100
+#endif
+
+// Maximum time allowed for any normal arm move before FAULT / REHOME_REQUIRED.
 #ifndef ARM_MOVE_TIMEOUT_MS
 #define ARM_MOVE_TIMEOUT_MS      10000
 #endif
@@ -857,7 +892,7 @@ This is a **new screen** replacing `ui_show_stepper()`. It provides direct contr
 ├──────────────────────────────────────────────────────────┤
 │  FLAPS          [ Flap Open ]     [ Flap Close ]         │
 ├──────────────────────────────────────────────────────────┤
-│  ARM            [ Arm Press ] [ Arm Pos 1 ] [ Arm Pos 2 ]│
+│  ARM   [ Arm Home ] [ Arm Press ] [ Arm Pos 1 ] [ Arm Pos 2 ]│
 ├──────────────────────────────────────────────────────────┤
 │  RACK           [ Rack Home ] [ Rack Extend] [ Rack Press]│
 ├──────────────────────────────────────────────────────────┤
@@ -879,6 +914,7 @@ This is a **new screen** replacing `ui_show_stepper()`. It provides direct contr
 |-------------|----------------------|-----------------------------|--------------------------------------------------|
 | FLAPS       | `"Flap Open"`        | `on_flap_open()`            | `motor_flap_open()` → `MSG_FLAPS_OPEN`            |
 | FLAPS       | `"Flap Close"`       | `on_flap_close()`           | `motor_flap_close()` → `MSG_FLAPS_CLOSE`          |
+| ARM         | `"Arm Home"`         | `on_arm_home()`             | `motor_arm_home()` → `MSG_ARM_HOME`              |
 | ARM         | `"Arm Press"`        | `on_arm_press()`            | `motor_arm_move(ARM_POS_PRESS)` → `MSG_ARM_MOVE` |
 | ARM         | `"Arm Pos 1"`        | `on_arm_pos1()`             | `motor_arm_move(ARM_POS_1)` → `MSG_ARM_MOVE`     |
 | ARM         | `"Arm Pos 2"`        | `on_arm_pos2()`             | `motor_arm_move(ARM_POS_2)` → `MSG_ARM_MOVE`     |
@@ -937,6 +973,12 @@ esp_err_t motor_flap_close(void);
  * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE arrives later asynchronously.
  */
 esp_err_t motor_arm_move(uint8_t position);
+
+/**
+ * @brief Sensorlessly home the arm against its positive hard stop, then back off.
+ * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE arrives later asynchronously.
+ */
+esp_err_t motor_arm_home(void);
 
 /* ── Rack helpers ─────────────────────────────────────────────────────────── */
 
@@ -1051,18 +1093,21 @@ case MSG_MOTION_DONE:
 
 | `subsystem_id` | `result`            | Status label text |
 |----------------|---------------------|-------------------|
-| `SUBSYS_FLAP`  | `MOTION_CURRENT_STOP` | `"Flaps: done"` |
-| `SUBSYS_FLAP`  | `MOTION_OK`         | `"Flaps: done (no-op)"` |
-| `SUBSYS_FLAP`  | `MOTION_TIMEOUT`    | `"Flaps: TIMEOUT"` |
+| `SUBSYS_FLAPS` | `MOTION_CURRENT_STOP` | `"Flaps: done"` |
+| `SUBSYS_FLAPS` | `MOTION_OK`         | `"Flaps: done (no-op)"` |
+| `SUBSYS_FLAPS` | `MOTION_TIMEOUT`    | `"Flaps: TIMEOUT"` |
 | `SUBSYS_ARM`   | `MOTION_OK`         | `"Arm: at position"` |
-| `SUBSYS_ARM`   | `MOTION_STALL`      | `"Arm: STALL"` |
+| `SUBSYS_ARM`   | `MOTION_STALLED`    | `"Arm: STALLED"` |
 | `SUBSYS_ARM`   | `MOTION_TIMEOUT`    | `"Arm: TIMEOUT"` |
+| `SUBSYS_ARM`   | `MOTION_SPI_FAULT`  | `"Arm: SPI FAULT"` |
 | `SUBSYS_RACK`  | `MOTION_OK`         | `"Rack: at position"` |
-| `SUBSYS_RACK`  | `MOTION_STALL`      | `"Rack: STALL"` |
+| `SUBSYS_RACK`  | `MOTION_STALLED`    | `"Rack: STALLED"` |
 | `SUBSYS_RACK`  | `MOTION_TIMEOUT`    | `"Rack: TIMEOUT"` |
+| `SUBSYS_RACK`  | `MOTION_SPI_FAULT`  | `"Rack: SPI FAULT"` |
 | `SUBSYS_TURNTABLE` | `MOTION_OK`     | `"Turntable: at position"` |
-| `SUBSYS_TURNTABLE` | `MOTION_STALL`  | `"Turntable: STALL"` |
+| `SUBSYS_TURNTABLE` | `MOTION_STALLED`| `"Turntable: STALLED"` |
 | `SUBSYS_TURNTABLE` | `MOTION_TIMEOUT`| `"Turntable: TIMEOUT"` |
+| `SUBSYS_TURNTABLE` | `MOTION_SPI_FAULT`| `"Turntable: SPI FAULT"` |
 | any            | `MOTION_FAULT`      | `"DRIVER FAULT"` |
 
 ### 8.3 Sequence Number Policy
@@ -1225,6 +1270,10 @@ case MSG_ARM_MOVE:
     handle_arm_move(hdr.seq, payload, hdr.len);
     break;
 
+case MSG_ARM_HOME:
+    handle_arm_home(hdr.seq);
+    break;
+
 case MSG_RACK_MOVE:
     handle_rack_move(hdr.seq, payload, hdr.len);
     break;
@@ -1274,11 +1323,12 @@ static hotwire_sm_state_t   s_hotwire_sm;
 3. Implement `MSG_TURNTABLE_HOME`, verify stall detection zeros counter.  
 4. Implement `MSG_TURNTABLE_GOTO` A→B→C→D with hardcoded step counts.  
 5. Implement `MSG_RACK_MOVE` HOME (homing), then EXTEND/PRESS.  
-6. Implement `MSG_ARM_MOVE` PRESS (with stall confirmation), then POS1/POS2.  
-7. Implement `MSG_HOTWIRE_SET` — verify constant-current PWM, check Rsense voltage.  
-8. Implement `MSG_VACUUM_SET` + RPM IRQ, verify `MSG_VACUUM_STATUS` telemetry.  
-9. Integrate Operations screen in ESP32 UI, verify all buttons.  
-10. End-to-end calibration of all `board_pins.h` position constants.
+6. Implement `MSG_ARM_HOME`, verify positive-direction seek, torque-stop, and fixed backoff.  
+7. Implement `MSG_ARM_MOVE` PRESS, then POS1/POS2 from the new physical-home reference.  
+8. Implement `MSG_HOTWIRE_SET` — verify constant-current PWM, check Rsense voltage.  
+9. Implement `MSG_VACUUM_SET` + RPM IRQ, verify `MSG_VACUUM_STATUS` telemetry.  
+10. Integrate Operations screen in ESP32 UI, verify all buttons including `Arm Home`.  
+11. End-to-end calibration of all `board_pins.h` position constants.
 
 ---
 

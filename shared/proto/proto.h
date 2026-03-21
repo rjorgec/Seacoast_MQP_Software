@@ -11,6 +11,11 @@ extern "C"
 #define PROTO_MAX_PAYLOAD 128u
 #define PROTO_DELIM 0x00u
 
+/* Shared default for DRV8434S soft torque-limit threshold.
+ * Both ESP and Pico firmware should source their fallback from this symbol
+ * so the UART payload default cannot drift between projects. */
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u //300u tripped too easily
+
     /*
      * Wire format endianness is little-endian for all multi-byte fields.
      * ESP32-C6 and RP2040 are both little-endian, so native packed structs
@@ -52,6 +57,7 @@ extern "C"
         MSG_SPAWN_STATUS = 0x4A,     /* Pico→ESP: spawn dosing status (unsolicited) */
         MSG_HOTWIRE_TRAVERSE = 0x4B, /* ESP→Pico: traverse hot wire carriage stepper */
         MSG_INDEXER_MOVE = 0x4C,     /* ESP→Pico: move bag depth/eject rack (indexer) */
+        MSG_ARM_HOME = 0x4D,         /* ESP→Pico: sensorless home for the rotary arm */
         /* ---- Unsolicited status messages (0x60–0x6F) ---- */
         MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
         MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
@@ -141,13 +147,31 @@ extern "C"
         uint8_t code;
     } pl_nack_t;
 
+    /**
+     * Finish-mode selector for MSG_DISPENSE_SPAWN.
+     * Carried in pl_innoculate_bag_t::flags bit 0.
+     */
+    typedef enum
+    {
+        SPAWN_FINISH_MODE_A = 0, /* close-early + top-off (anti-overshoot) */
+        SPAWN_FINISH_MODE_B = 1, /* low-flow taper near target              */
+    } spawn_finish_mode_t;
+
+    /** Bit definitions for pl_innoculate_bag_t::flags */
+    #define SPAWN_FLAG_FINISH_MODE_B (1u << 0) /* set = Finish B, clear = Finish A */
+    #define SPAWN_FLAG_DO_HOME       (1u << 1) /* set = home flaps to closed before dosing */
+
     typedef struct __attribute__((packed))
     {
         uint16_t bag_mass;      // mass of bag being innoculated
         uint16_t spawn_mass;    // mass of spawn remaining
         uint16_t innoc_percent; // spawn percentage of bag weight (x10)
         uint8_t bag_number;     // how many bags have been innoculated from the same spawn
+        uint8_t flags;          // SPAWN_FLAG_* bitmask (finish mode, homing); 0 = defaults
     } pl_innoculate_bag_t;
+
+    /** Minimum payload length for pl_innoculate_bag_t without flags (legacy). */
+    #define PL_INNOCULATE_BAG_MIN_LEN 7u
 
     typedef enum
     {
