@@ -175,7 +175,7 @@ Home Screen
 - Inoculation percentage selector (spinner or buttons, range 1–500 in tenths of percent, default: 100 = 10.0%)
 - Bag number display (auto-incrementing)
 - "Start Dose" button → `pico_link_send_rpc(MSG_DISPENSE_SPAWN, …)`
-- "Abort" button → `motor_flap_close()` (forces flap close, Pico dose timer detects and terminates)
+- "Abort" button → `motor_flap_close()` + `pico_link_send_rpc(MSG_CTRL_STOP, …)` (closes flaps immediately and signals the Pico spawn SM to transition to ABORTED)
 - Status label — updated by `ui_dosing_on_spawn_status()`:
 
 | `spawn_status_code_t` | Display Text | Color |

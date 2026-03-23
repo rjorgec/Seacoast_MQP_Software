@@ -736,11 +736,31 @@ static void on_dose_start(lv_event_t *e)
 static void on_dose_abort(lv_event_t *e)
 {
     (void)e;
-    /* Close flaps to stop material flow immediately; the Pico's spawn timer
-     * will exhaust its agitation retries and send SPAWN_STATUS_BAG_EMPTY. */
-    esp_err_t err = motor_flap_close();
-    set_status(err == ESP_OK ? "Aborting\xe2\x80\xa6" : "Abort FAILED");
-    ESP_LOGI(TAG, "Dose abort (%s)", esp_err_to_name(err));
+    /* Close flaps immediately to stop material flow on the ESP32 side. */
+    esp_err_t flap_err = motor_flap_close();
+    if (flap_err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Dose abort: motor_flap_close failed: %s",
+                 esp_err_to_name(flap_err));
+    }
+
+    /* Send MSG_CTRL_STOP to the Pico so its spawn state machine transitions
+     * to ABORTED instead of continuing to run. */
+    uint8_t nack = 0;
+    esp_err_t err = pico_link_send_rpc(MSG_CTRL_STOP,
+                                       NULL, 0,
+                                       2000, &nack);
+    if (err == ESP_OK)
+    {
+        set_status(flap_err == ESP_OK ? "Aborted" : "Aborted (flap err)");
+        ESP_LOGI(TAG, "Dose abort: MSG_CTRL_STOP sent");
+    }
+    else
+    {
+        set_status("Abort FAILED");
+        ESP_LOGW(TAG, "Dose abort: MSG_CTRL_STOP failed: %s nack=%u",
+                 esp_err_to_name(err), nack);
+    }
 }
 
 /* ── Dosing screen — spawn-status async update ───────────────────────────── */
