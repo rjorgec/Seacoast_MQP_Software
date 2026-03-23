@@ -10,6 +10,7 @@
 #include "pico/time.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "hardware/spi.h"
 #include "hardware/uart.h"
 
@@ -454,6 +455,8 @@ static void arm_seal_begin_baselining(uint32_t now_ms)
     s_arm_seal.rpm_baseline_sealed = 0u;
     arm_seal_reset_threshold_timers();
 }
+
+static void finish_arm_motion(motion_result_t result, bool require_rehome);
 
 static void arm_seal_mark_lost(arm_seal_reason_t reason)
 {
