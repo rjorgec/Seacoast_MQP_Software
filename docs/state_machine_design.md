@@ -639,7 +639,7 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 
 // Stall-detection tuning for homing.
 #ifndef ARM_HOME_TORQUE_LIMIT
-#define ARM_HOME_TORQUE_LIMIT    300u
+#define ARM_HOME_TORQUE_LIMIT    110u
 #endif
 
 #ifndef ARM_HOME_TORQUE_BLANK_STEPS

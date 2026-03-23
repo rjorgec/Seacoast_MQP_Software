@@ -213,7 +213,7 @@ All hardware calibration constants are in [`pico_fw/src/board_pins.h`](../pico_f
 | `ARM_STEPS_POS2`             | -100     | Steps from physical arm home hard-stop to pos 2 |
 | `ARM_HOME_SEARCH_STEPS`      | 5000     | Positive-direction search distance for arm sensorless homing |
 | `ARM_HOME_BACKOFF_STEPS`     | 100      | Fixed release distance after the arm hits home |
-| `ARM_HOME_TORQUE_LIMIT`      | 300      | Torque threshold used to detect the arm hard stop |
+| `ARM_HOME_TORQUE_LIMIT`      | 110      | Torque threshold used to detect the arm hard stop |
 | `RACK_STEPS_EXTEND`          | 800      | Steps from home to extend position             |
 | `TURNTABLE_STEPS_B`          | 400      | Steps from home to accept/bag position         |
 | `HOTWIRE_ENABLE_DUTY`        | 4095     | Full on; current set by external Rsense        |

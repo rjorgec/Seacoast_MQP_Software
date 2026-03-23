@@ -171,7 +171,7 @@
  * MSG_ARM_HOME. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS, so
  * the idle post-home position is typically negative. */
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS -3500 /* steps to press attachment */
+#define ARM_STEPS_PRESS -3800 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
 #define ARM_STEPS_POS1 -500 /* absolute position 1 */
@@ -183,16 +183,20 @@
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
 #endif
 #ifndef ARM_PRESS_RETRY_MAX_RETRIES
-#define ARM_PRESS_RETRY_MAX_RETRIES 5u /* extra press attempts if vacuum RPM does not change */
+#define ARM_PRESS_RETRY_MAX_RETRIES                                            \
+  5u /* extra press attempts if vacuum RPM does not change */
 #endif
 #ifndef ARM_PRESS_RETRY_BACKOFF_STEPS
-#define ARM_PRESS_RETRY_BACKOFF_STEPS 150 /* release distance before a retry press */
+#define ARM_PRESS_RETRY_BACKOFF_STEPS                                          \
+  150 /* release distance before a retry press */
 #endif
 #ifndef ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS
-#define ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS 300u /* wait this long for an RPM response after press */
+#define ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS                                      \
+  300u /* wait this long for an RPM response after press */
 #endif
 #ifndef ARM_PRESS_RETRY_RPM_DELTA
-#define ARM_PRESS_RETRY_RPM_DELTA 15u /* corrected to observed 10-15 RPM behavior; 2000 was out-of-scale */
+#define ARM_PRESS_RETRY_RPM_DELTA                                              \
+  10u /* corrected to observed 10-15 RPM behavior; 2000 was out-of-scale */
 #endif
 #ifndef ARM_MOTION_TIMEOUT_MS
 #define ARM_MOTION_TIMEOUT_MS 5000
@@ -201,13 +205,13 @@
 #define ARM_HOME_SEARCH_STEPS 5000
 #endif
 #ifndef ARM_HOME_STEP_DELAY_US
-#define ARM_HOME_STEP_DELAY_US 4000u //arm speed for home
+#define ARM_HOME_STEP_DELAY_US 4000u // arm speed for home
 #endif
 #ifndef ARM_HOME_TIMEOUT_MS
 #define ARM_HOME_TIMEOUT_MS 15000
 #endif
 #ifndef ARM_HOME_TORQUE_LIMIT
-#define ARM_HOME_TORQUE_LIMIT 120u  //
+#define ARM_HOME_TORQUE_LIMIT 110u //
 #endif
 #ifndef ARM_HOME_TORQUE_BLANK_STEPS
 #define ARM_HOME_TORQUE_BLANK_STEPS 100u
@@ -501,8 +505,9 @@
 #define SPAWN_NUDGE_OPEN_MS 300u /* ms to nudge flap open per control tick */
 #endif
 #ifndef SPAWN_NUDGE_CLOSE_MS
-#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge flap closed per control tick  \
-                                   */
+#define SPAWN_NUDGE_CLOSE_MS                                                   \
+  200u /* ms to nudge flap closed per control tick                             \
+        */
 #endif
 #ifndef SPAWN_MAX_OPEN_NUDGES
 #define SPAWN_MAX_OPEN_NUDGES                                                  \
@@ -510,7 +515,8 @@
 #endif
 #ifndef SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS
 #define SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS                                    \
-  350u /* minimum time before allowing an immediate nudge direction reversal */
+  350u /* minimum time before allowing an immediate nudge direction reversal   \
+        */
 #endif
 
 /* ── Proportional gain thresholds ──────────────────────────────────── */
@@ -574,8 +580,9 @@
   1000000u /* undershoot tolerance for top-off (µg = 1 g) */
 #endif
 #ifndef SPAWN_TOPOFF_PULSE_MS
-#define SPAWN_TOPOFF_PULSE_MS 80u /* duration of each top-off open nudge (ms)  \
-                                   */
+#define SPAWN_TOPOFF_PULSE_MS                                                  \
+  80u /* duration of each top-off open nudge (ms)                              \
+       */
 #endif
 #ifndef SPAWN_TOPOFF_MAX_PULSES
 #define SPAWN_TOPOFF_MAX_PULSES                                                \
