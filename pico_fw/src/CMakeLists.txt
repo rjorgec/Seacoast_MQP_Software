@@ -22,7 +22,7 @@ project(UART_TEST LANGUAGES C CXX)
 
 pico_sdk_init()
 
-add_executable(${PROJECT_NAME} main.c uart_server.c ../drivers/drv8263/drv8263.c ../../shared/proto/cobs.c ../../shared/proto/proto_crc.c ../drivers/drv8434s/drv8434s.c)
+add_executable(${PROJECT_NAME} main.c)
 
 # Separate build target for stepper-only testing (no UART)
 add_executable(stepper_test
@@ -56,7 +56,7 @@ target_include_directories(stepper_test PRIVATE
 # Add pico-scale library from extern directory
 add_subdirectory(../../extern/pico-scale ${CMAKE_BINARY_DIR}/pico-scale)
 
-target_link_libraries(${PROJECT_NAME} pico_stdlib pico_stdio hardware_gpio hardware_pwm hardware_adc hardware_uart hardware_pio pico-scale hardware_spi)
+target_link_libraries(${PROJECT_NAME} pico_stdlib pico_stdio hardware_gpio)
 
 # stepper_test only needs basic stdlib, gpio & spi
 target_link_libraries(stepper_test pico_stdlib hardware_gpio hardware_spi)

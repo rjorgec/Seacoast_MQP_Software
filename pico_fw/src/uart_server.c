@@ -33,6 +33,8 @@
 #define UART_RX_RING_SIZE 512u
 #define UART_ENCODED_FRAME_MAX 256u
 #define UART_DECODED_FRAME_MAX ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 2u)
+#define VACUUM_RPM_TIMEOUT_MS 500u
+#define VACUUM_RPM_DEBOUNCE_US 200u
 
 /* All tuning #defines are in board_pins.h — see STEPPER_DEFAULT_STEP_DELAY_US,
  * SPAWN_*, AGITATOR_*, HOTWIRE_TRAVERSE_*, INDEXER_* etc. */
@@ -171,6 +173,10 @@ static stepper_pending_t s_turntable_pending;
 
 static bool s_vacuum_on = false;
 static volatile uint32_t s_vacuum_pulse_count = 0; /* written by GPIO ISR */
+static volatile uint32_t s_vacuum_last_pulse_time_us = 0u;
+static volatile uint32_t s_vacuum_last_period_us = 0u;
+static volatile uint64_t s_vacuum_period_sum_us = 0u;
+static volatile uint32_t s_vacuum_period_samples = 0u;
 static uint32_t s_vacuum_last_sample_ms = 0;
 static uint32_t s_vacuum_last_status_ms = 0;
 static vacuum_status_code_t s_vacuum_status = VACUUM_OFF;
@@ -1369,6 +1375,22 @@ static void vacuum_rpm_isr(uint gpio, uint32_t events)
     (void)events;
     if (gpio == (uint)VACUUM_RPM_SENSE_PIN)
     {
+        uint32_t now_us = time_us_32();
+        uint32_t dt_us = now_us - s_vacuum_last_pulse_time_us;
+
+        if ((s_vacuum_last_pulse_time_us != 0u) && (dt_us < VACUUM_RPM_DEBOUNCE_US))
+        {
+            return;
+        }
+
+        if (s_vacuum_last_pulse_time_us != 0u)
+        {
+            s_vacuum_last_period_us = dt_us;
+            s_vacuum_period_sum_us += dt_us;
+            ++s_vacuum_period_samples;
+        }
+
+        s_vacuum_last_pulse_time_us = now_us;
         ++s_vacuum_pulse_count;
     }
 }
@@ -1960,21 +1982,49 @@ static void vacuum_sm_tick(void)
 
     if ((now_ms - s_vacuum_last_sample_ms) >= (uint32_t)VACUUM_RPM_SAMPLE_MS)
     {
-        /* Atomically snapshot and reset the ISR pulse counter. */
+        /* Atomically snapshot period statistics accumulated by the ISR. */
         uint32_t saved = save_and_disable_interrupts();
         uint32_t pulses = s_vacuum_pulse_count;
+        uint32_t last_pulse_time_us = s_vacuum_last_pulse_time_us;
+        uint32_t last_period_us = s_vacuum_last_period_us;
+        uint64_t period_sum_us = s_vacuum_period_sum_us;
+        uint32_t period_samples = s_vacuum_period_samples;
         s_vacuum_pulse_count = 0u;
+        s_vacuum_period_sum_us = 0u;
+        s_vacuum_period_samples = 0u;
         restore_interrupts(saved);
 
-        /*
-         * RPM = (pulses / VACUUM_PULSES_PER_REV) * (60 000 ms/min / sample_ms)
-         *     = pulses * 60000 / (VACUUM_RPM_SAMPLE_MS * VACUUM_PULSES_PER_REV)
-         */
-        uint16_t rpm = (uint16_t)((pulses * 60000UL) /
-                                  ((uint32_t)VACUUM_RPM_SAMPLE_MS * (uint32_t)VACUUM_PULSES_PER_REV));
+        uint16_t rpm = 0u;
+        bool rpm_valid = false;
+
+        if (last_pulse_time_us != 0u)
+        {
+            uint32_t pulse_age_ms = (time_us_32() - last_pulse_time_us) / 1000u;
+            if (pulse_age_ms < VACUUM_RPM_TIMEOUT_MS)
+            {
+                uint32_t avg_period_us = 0u;
+                if (period_samples > 0u)
+                {
+                    avg_period_us = (uint32_t)(period_sum_us / period_samples);
+                }
+                else if (last_period_us > 0u)
+                {
+                    avg_period_us = last_period_us;
+                }
+
+                if (avg_period_us > 0u)
+                {
+                    uint32_t rpm32 = (uint32_t)(60000000ull /
+                                                ((uint64_t)avg_period_us *
+                                                 (uint64_t)VACUUM_PULSES_PER_REV));
+                    rpm = (rpm32 > UINT16_MAX) ? UINT16_MAX : (uint16_t)rpm32;
+                    rpm_valid = true;
+                }
+            }
+        }
 
         s_vacuum_last_rpm = rpm;
-        s_vacuum_rpm_valid = true;
+        s_vacuum_rpm_valid = rpm_valid;
 
         vacuum_status_code_t new_status =
             (rpm < (uint16_t)VACUUM_RPM_BLOCKED_THRESHOLD) ? VACUUM_BLOCKED : VACUUM_OK;
@@ -2861,9 +2911,13 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
         /* Reset sampling timestamps so the first sample fires promptly. */
         s_vacuum_last_sample_ms = to_ms_since_boot(get_absolute_time());
         s_vacuum_last_status_ms = s_vacuum_last_sample_ms;
-        /* Reset pulse counter atomically. */
+        /* Reset pulse timing state atomically. */
         uint32_t saved = save_and_disable_interrupts();
         s_vacuum_pulse_count = 0u;
+        s_vacuum_last_pulse_time_us = 0u;
+        s_vacuum_last_period_us = 0u;
+        s_vacuum_period_sum_us = 0u;
+        s_vacuum_period_samples = 0u;
         restore_interrupts(saved);
         s_vacuum_last_rpm = 0u;
         s_vacuum_rpm_valid = false;
@@ -3755,6 +3809,10 @@ static void init_vacuum(void)
 
     s_vacuum_on = false;
     s_vacuum_pulse_count = 0u;
+    s_vacuum_last_pulse_time_us = 0u;
+    s_vacuum_last_period_us = 0u;
+    s_vacuum_period_sum_us = 0u;
+    s_vacuum_period_samples = 0u;
     s_vacuum_last_sample_ms = 0u;
     s_vacuum_last_status_ms = 0u;
     s_vacuum_status = VACUUM_OFF;
