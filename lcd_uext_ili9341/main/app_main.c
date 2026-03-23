@@ -42,6 +42,7 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
             case SYS_ROTATING_TO_ACCEPT:
             case SYS_INTAKE_WEIGHING:
             case SYS_OPENING_BAG:
+            case SYS_OPEN_RECOVERING:
             case SYS_POST_DOSE:
             case SYS_EJECTING:
             case SYS_ROTATING_TO_INTAKE:
@@ -57,6 +58,14 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
         if (len >= sizeof(pl_vacuum_status_t))
         {
             ui_ops_on_vacuum_status((const pl_vacuum_status_t *)pl);
+        }
+        break;
+    case MSG_ARM_SEAL_EVENT:
+        if (len >= sizeof(pl_arm_seal_event_t))
+        {
+            const pl_arm_seal_event_t *seal = (const pl_arm_seal_event_t *)pl;
+            ui_ops_on_arm_seal_event(seal);
+            sys_sequence_notify_arm_seal_event(seal->event, seal->reason);
         }
         break;
     case MSG_SPAWN_STATUS:

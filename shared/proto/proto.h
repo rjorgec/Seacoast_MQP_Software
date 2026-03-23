@@ -61,6 +61,7 @@ extern "C"
         /* ---- Unsolicited status messages (0x60–0x6F) ---- */
         MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
         MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
+        MSG_ARM_SEAL_EVENT = 0x62, /* Pico→ESP: rotary arm seal transition event */
 
         MSG_ACK = 0x80,
         MSG_NACK = 0x81,
@@ -337,6 +338,37 @@ extern "C"
         uint8_t _rsvd;  /**< reserved */
         uint16_t rpm;   /**< measured RPM (0 if pump off) */
     } pl_vacuum_status_t;
+
+    typedef enum __attribute__((packed))
+    {
+        ARM_SEAL_EVENT_LOST = 0,
+        ARM_SEAL_EVENT_RESTORED = 1,
+    } arm_seal_event_t;
+
+    typedef enum __attribute__((packed))
+    {
+        ARM_SEAL_REASON_TRANSIENT = 0,
+        ARM_SEAL_REASON_STEADY = 1,
+        ARM_SEAL_REASON_STALE_TACH = 2,
+        ARM_SEAL_REASON_UNKNOWN = 3,
+    } arm_seal_reason_t;
+
+    /** MSG_ARM_SEAL_EVENT payload (10 bytes) -- unsolicited Pico->ESP */
+    typedef struct __attribute__((packed))
+    {
+        uint8_t event;        /**< arm_seal_event_t */
+        uint8_t reason;       /**< arm_seal_reason_t */
+        uint16_t rpm_baseline; /**< sealed baseline RPM */
+        uint16_t rpm_filt;    /**< filtered RPM at trigger */
+        int16_t delta_rpm;    /**< rpm_filt - rpm_baseline */
+        uint16_t age_ms;      /**< age of RPM sample used */
+    } pl_arm_seal_event_t;
+
+#if defined(__cplusplus)
+    static_assert(sizeof(pl_arm_seal_event_t) == 10u, "pl_arm_seal_event_t size must be 10");
+#else
+_Static_assert(sizeof(pl_arm_seal_event_t) == 10u, "pl_arm_seal_event_t size must be 10");
+#endif
 
 #ifdef __cplusplus
 }
