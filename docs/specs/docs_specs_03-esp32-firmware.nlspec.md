@@ -129,27 +129,23 @@ All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_se
 
 ```
 Home Screen
-├── Operations Screen   (direct actuator control — manual testing)
-├── Dosing Screen       (LEGACY manual spawn dispensing — see dosing.h)
-├── Sequence Screen     (NEW — sys_sequence.c whiteboard process flow)
-└── (Recipes — future, not specified here)
+├── Automated Functions Screen  (sys_sequence.c — supervised inoculation)
+├── Operations Screen           (direct actuator control — manual testing)
+├── Dosing Screen               (LEGACY manual spawn dispensing — isolated testing)
+└── Scale Screen                (HX711 weight readout + tare)
 ```
 
 ### 4.3 Home Screen (`ui_show_home()`)
 
-**Layout:** Button grid with status labels at bottom.
+**Layout:** Status label at top, four navigation buttons (300 × 46 px each, 4 px gap).
 
 | Widget | Label | Callback | Action |
 |--------|-------|----------|--------|
-| Button | "START" | `on_start()` | Send `CTRL_CMD_START` to control queue |
-| Button | "PAUSE" | `on_pause()` | Send `CTRL_CMD_PAUSE` to control queue |
-| Button | "STOP" | `on_stop()` | Send `CTRL_CMD_STOP` to control queue |
-| Button | "TARE" | `on_tare()` | `pico_link_send_rpc(MSG_HX711_TARE, …)` |
-| Button | "WEIGHT" | `on_read_weight()` | `pico_link_send(MSG_HX711_MEASURE, …)` |
-| Button | "DOSE" | `on_dose()` | Navigate to Dosing screen |
-| Button | "OPERATIONS" | `on_ops_page()` | Navigate to Operations screen |
-| Label | "Weight: -- g" | — | Updated on `MSG_HX711_MEASURE` response |
-| Label | (status bar) | — | Updated by `ui_status_set()` |
+| Label | "IDLE • Seacoast Inoculator" | — | `lbl_status` updated by `ui_status_set()` |
+| Button | "Automated Functions" | `on_auto_page()` | Navigate to Automated Functions screen |
+| Button | "Scale" | `on_scale_page()` | Navigate to Scale screen |
+| Button | "Operations" | `on_ops_page()` | Navigate to Operations screen (blocked while sequence active) |
+| Button | "Dosing" | `on_dose()` | Navigate to Dosing screen (blocked while sequence active) |
 
 ### 4.4 Operations Screen (`ui_show_operations()`)
 
@@ -175,15 +171,29 @@ Home Screen
 
 **Status feedback:** When `MSG_MOTION_DONE` is received, `ui_ops_on_motion_done()` updates the status label with subsystem name and result (e.g., "ARM: OK" or "FLAPS: TIMEOUT"). When `MSG_VACUUM_STATUS` is received, `ui_ops_on_vacuum_status()` updates the vacuum status label (e.g., "Vacuum: OK 1200 RPM" or "Vacuum: BLOCKED 350 RPM"). If the arm faults or stalls during a normal move, the operator must use the `"Arm Home"` button before later arm-position buttons will be accepted again.
 
-### 4.5 Dosing Screen (`ui_show_dosing()`)
+### 4.5 Automated Functions Screen (`ui_show_auto()`)
 
-**Purpose:** Configure and launch Pico-side spawn dosing, display real-time progress.
+**Purpose:** Supervise the full inoculation sequence via `sys_sequence.c`. Disabled while sequence is not active.
+
+**Layout:** Title "Automated Functions", status label, three action buttons.
+
+| Widget | Label | Callback | Action |
+|--------|-------|----------|--------|
+| Button | "Setup / Load" | `on_setup_load()` | `sys_sequence_send_cmd(SYS_CMD_SETUP_LOAD)` |
+| Button | "Start" | `on_seq_start()` | `sys_sequence_send_cmd(SYS_CMD_START)` |
+| Button | "Abort" | `on_seq_abort()` | `sys_sequence_send_cmd(SYS_CMD_ABORT)` → sequence transitions to `SYS_IDLE`; all actuators safe-stopped |
+
+> **Abort routing note:** `on_seq_abort()` sends `SYS_CMD_ABORT` to the sequence task queue via `sys_sequence_send_cmd()`. The sequence task's main loop checks for this command at the top of every iteration and calls `safe_stop_all()` before transitioning back to `SYS_IDLE`, immediately re-enabling manual controls. (An earlier implementation incorrectly sent `CTRL_CMD_STOP` to the legacy control task queue, which had no effect on the sequence state machine.)
+
+### 4.6 Dosing Screen (`ui_show_dosing()`)
+
+**Purpose:** Isolated manual spawn dispensing for testing purposes (LEGACY path — see `dosing.h`). Accessible from Home Screen; blocked while a sequence is active.
 
 **Layout:**
-- Inoculation percentage selector (spinner or buttons, range 1–500 in tenths of percent, default: 100 = 10.0%)
+- Inoculation percentage selector (buttons, range 1–500 in tenths of percent, default: 200 = 20.0%)
 - Bag number display (auto-incrementing)
 - "Start Dose" button → `pico_link_send_rpc(MSG_DISPENSE_SPAWN, …)`
-- "Abort" button → `motor_flap_close()` (forces flap close, Pico dose timer detects and terminates)
+- "Abort" button → `pico_link_send_rpc(MSG_CTRL_STOP, …)` — sends `MSG_CTRL_STOP` to the Pico, which aborts the Pico-side spawn state machine, stops the dosing timer, and fast-closes the flaps. Closing flaps alone via `motor_flap_close()` is insufficient because the Pico spawn SM continues running until it receives `MSG_CTRL_STOP`.
 - Status label — updated by `ui_dosing_on_spawn_status()`:
 
 | `spawn_status_code_t` | Display Text | Color |

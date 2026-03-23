@@ -3,7 +3,6 @@
 #include <string.h>
 
 #include "ui_screens.h"
-#include "control.h"
 #include "sys_sequence.h"
 
 #include "lvgl.h"
@@ -228,10 +227,9 @@ static void on_seq_start(lv_event_t *e)
 static void on_seq_abort(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
-    bool ok = control_send(&cmd);
-    set_status(ok ? "STOP sent" : "STOP failed");
-    ESP_LOGI(TAG, "Stop pressed (send=%d)", (int)ok);
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_ABORT);
+    set_status(err == ESP_OK ? "Abort sent" : "Abort failed");
+    ESP_LOGI(TAG, "Sequence abort (%s)", esp_err_to_name(err));
 }
 
 /* ── Operations-screen button callbacks ──────────────────────────────────── */
@@ -613,8 +611,7 @@ static lv_obj_t *make_btn(lv_obj_t *scr, const char *txt,
  *  y=  2  "Automated Functions"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
  *  y= 20  status label (colour = white)
  *  y= 42  [Setup / Load  300×56]
- *  y=104  [Dose          300×56]
- *  y=166  [Start         300×56]
+ *  y=104  [Start         145×56]  10  [Abort  145×56]
  */
 void ui_show_auto(void)
 {
@@ -653,10 +650,10 @@ void ui_show_auto(void)
     lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 20);
 
-    /* ── Three large action buttons ──────────────────────────────────────── */
-    make_btn(scr, "Setup / Load", 0, 42, 300, 56, on_setup_load);
-    make_btn(scr, "Dose",         0, 104, 300, 56, on_dose);
-    make_btn(scr, "Start",        0, 166, 300, 56, on_start);
+    /* ── Action buttons ─────────────────────────────────────────────────── */
+    make_btn(scr, "Setup / Load", 0,   42, 300, 56, on_setup_load);
+    make_btn(scr, "Start",        0,  104, 145, 56, on_seq_start);
+    make_btn(scr, "Abort",      155,  104, 145, 56, on_seq_abort);
 }
 
 /*
@@ -733,9 +730,10 @@ void ui_show_scale(void)
  * Home Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
  *
  *  y=  0  status label "IDLE • Seacoast Inoculator"
- *  y= 20  [Automated Functions  300×60]
- *  y= 86  [Scale                300×60]
- *  y=152  [Operations           300×60]
+ *  y= 20  [Automated Functions  300×46]
+ *  y= 70  [Scale                300×46]
+ *  y=120  [Operations           300×46]
+ *  y=170  [Dosing               300×46]
  */
 void ui_show_home(void)
 {
@@ -764,10 +762,11 @@ void ui_show_home(void)
     lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* Three large navigation buttons */
-    make_btn(scr, "Automated Functions", 0,   20, 300, 60, on_auto_page);
-    make_btn(scr, "Scale",               0,   86, 300, 60, on_scale_page);
-    make_btn(scr, "Operations",          0,  152, 300, 60, on_ops_page);
+    /* Four navigation buttons */
+    make_btn(scr, "Automated Functions", 0,   20, 300, 46, on_auto_page);
+    make_btn(scr, "Scale",               0,   70, 300, 46, on_scale_page);
+    make_btn(scr, "Operations",          0,  120, 300, 46, on_ops_page);
+    make_btn(scr, "Dosing",              0,  170, 300, 46, on_dose);
 }
 
 /*
