@@ -1,7 +1,7 @@
 # NLSpec: Raspberry Pi Pico 2 Firmware
 
 ## Version
-0.1.1
+0.1.2
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -99,7 +99,7 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Press semantics:** A torque-stop while moving to `ARM_POS_PRESS` is treated as a successful press instead of a fault. The Pico keeps the tracked arm position at the actual achieved steps and does not require re-home just because the press hit resistance as intended.
 
-**Vacuum-assisted retry:** If vacuum RPM telemetry is valid and the vacuum is ON when `ARM_POS_PRESS` starts, the Pico captures the pre-press RPM, waits `ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS` after the press completes, and checks for an absolute RPM change of at least `ARM_PRESS_RETRY_RPM_DELTA`. If no change is detected, the arm backs off by `ARM_PRESS_RETRY_BACKOFF_STEPS` and retries the press, up to `ARM_PRESS_RETRY_MAX_RETRIES`. If all retries are exhausted without an RPM response, the Pico reports `MOTION_TIMEOUT` but does not force re-home.
+**Vacuum-assisted retry:** If vacuum RPM telemetry is valid and the vacuum is ON when `ARM_POS_PRESS` starts, the Pico captures the pre-press RPM, waits `ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS` after the press completes, and checks for an absolute RPM change of at least `ARM_PRESS_RETRY_RPM_DELTA` (default now 15 RPM to match observed scale). If no change is detected, the arm backs off by `ARM_PRESS_RETRY_BACKOFF_STEPS` and retries the press, up to `ARM_PRESS_RETRY_MAX_RETRIES`. If all retries are exhausted without an RPM response, the Pico reports `MOTION_TIMEOUT` but does not force re-home.
 
 **Sensorless homing:** `MSG_ARM_HOME` is explicit/manual. The Pico requires the DRV8434S motion engine to be idle, then seeks in the positive direction by `ARM_HOME_SEARCH_STEPS` using `ARM_HOME_TORQUE_LIMIT`, `ARM_HOME_TORQUE_BLANK_STEPS`, `ARM_HOME_TORQUE_SAMPLE_DIV`, and `ARM_HOME_STEP_DELAY_US`. A torque-stop during the seek is treated as the home hard-stop (`s_arm_pos_steps = 0`), after which the firmware runs a fixed backoff of `ARM_HOME_BACKOFF_STEPS` and reports `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, -ARM_HOME_BACKOFF_STEPS)`.
 
@@ -315,11 +315,49 @@ The main polling loop must call the following on every iteration:
 ```c
 flap_sm_tick();                // polls DRV8263 monitoring_enabled flag, timeout
 vacuum_sm_tick();              // reads RPM counter every VACUUM_RPM_SAMPLE_INTERVAL_MS
+arm_seal_monitor_tick();       // rotary-arm seal monitor (EMA, baseline, LOST/RESTORED edges)
 stepper_completion_tick();     // polls drv8434s_motion active flag for arm/rack/turntable, timeout
 stepper_spi_watchdog_tick();   // reads FAULT register ~2s while idle; logs/clears faults
 ```
 
 These functions are called from within `uart_server_poll()` (or directly in the main loop — implementation choice).
+
+## 4.1 Rotary Arm Seal Monitor (Vacuum RPM, Pico-side)
+
+Purpose: detect suction-cup seal loss during bag opening on the Pico (no high-rate UART telemetry).
+
+Monitor state machine:
+- `SEAL_MON_DISABLED`
+- `SEAL_MON_BASELINING`
+- `SEAL_MON_SEALED_OK`
+- `SEAL_MON_LOST_LATCHED`
+
+Key behavior:
+- Starts baselining after a press command/move sequence while vacuum is ON.
+- Computes `rpm_filt` using EMA (`ARM_SEAL_EMA_ALPHA_X1000`) and sealed baseline via time-window average.
+- Declares LOST on either:
+  - transient trigger (`delta >= ARM_SEAL_TRANSIENT_DELTA_RPM` for `ARM_SEAL_TRANSIENT_DEBOUNCE_MS`)
+  - steady trigger (`delta >= ARM_SEAL_STEADY_DELTA_RPM` for `ARM_SEAL_STEADY_HOLD_MS`)
+  - stale tach while opening-related arm motion (`ARM_SEAL_TACH_STALE_MS`)
+- On LOST:
+  - cancels active arm motion immediately,
+  - keeps stepper outputs enabled (hold position),
+  - sends one `MSG_ARM_SEAL_EVENT(LOST, reason, …)`,
+  - sends `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_STALLED, steps_done)`.
+- LOST is latched; repeated LOST messages are suppressed until recovery.
+- RESTORED is sent once after commanded retry press + re-baseline + restore debounce (`ARM_SEAL_RESTORE_DEBOUNCE_MS`).
+
+Tunables in `board_pins.h` (`#ifndef` guarded defaults):
+- `ARM_SEAL_EMA_ALPHA_X1000` = 250
+- `ARM_SEAL_BASELINE_WINDOW_MS` = 300
+- `ARM_SEAL_BASELINE_MIN_SAMPLES` = 3
+- `ARM_SEAL_BASELINE_TIMEOUT_MS` = 1000
+- `ARM_SEAL_TRANSIENT_DELTA_RPM` = 60
+- `ARM_SEAL_TRANSIENT_DEBOUNCE_MS` = 80
+- `ARM_SEAL_STEADY_DELTA_RPM` = 15
+- `ARM_SEAL_STEADY_HOLD_MS` = 800
+- `ARM_SEAL_TACH_STALE_MS` = 200
+- `ARM_SEAL_RESTORE_DEBOUNCE_MS` = 200
 
 ---
 
@@ -359,6 +397,8 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 ### 6.1 Subsystem State Machines
 - [ ] Flap state machine implements all transitions in Section 2.1 table
 - [ ] Arm state machine implements all transitions in Section 2.2 table
+- [ ] Rotary arm seal monitor emits exactly one LOST and one RESTORED edge per incident/recovery cycle
+- [ ] Seal-loss cancellation sends both `MSG_ARM_SEAL_EVENT(LOST, …)` and `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_STALLED, steps_done)`
 - [ ] Rack state machine implements all transitions including homing via stall
 - [ ] Turntable state machine enforces UNCALIBRATED → HOME before GOTO
 - [ ] Hot wire uses DRV8263 independent half-bridge mode (drv8263_set_in1/in2); IN1 and IN2 can be active simultaneously

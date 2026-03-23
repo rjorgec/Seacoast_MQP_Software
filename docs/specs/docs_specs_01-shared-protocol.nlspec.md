@@ -1,7 +1,7 @@
 # NLSpec: Shared Communication Protocol
 
 ## Version
-0.1.1
+0.1.2
 
 ## Depends On
 Nothing (leaf spec)
@@ -107,6 +107,7 @@ The following compile-time protocol defaults are defined in `shared/proto/proto.
 |----|----------|---------------|------|-------------|
 | 0x60 | `MSG_MOTION_DONE` | `pl_motion_done_t` | 8 | Motion complete/fault notification for any subsystem |
 | 0x61 | `MSG_VACUUM_STATUS` | `pl_vacuum_status_t` | 4 | Vacuum pump RPM and blocked/OK status |
+| 0x62 | `MSG_ARM_SEAL_EVENT` | `pl_arm_seal_event_t` | 10 | Rotary-arm seal transition event (LOST/RESTORED) with RPM context |
 
 ### 3.4 Response Messages
 
@@ -217,6 +218,22 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | 6 | `SPAWN_STATUS_FLOW_FAILURE` | Flaps fully open with no measurable flow |
 | 7 | `SPAWN_STATUS_ABORTED` | Dose cancelled by `MSG_CTRL_STOP` |
 
+### 4.7 Arm Seal Event (`arm_seal_event_t`)
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `ARM_SEAL_EVENT_LOST` | Seal loss edge detected |
+| 1 | `ARM_SEAL_EVENT_RESTORED` | Seal restored edge detected |
+
+### 4.8 Arm Seal Reason (`arm_seal_reason_t`)
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `ARM_SEAL_REASON_TRANSIENT` | Fast detach spike |
+| 1 | `ARM_SEAL_REASON_STEADY` | Sustained +RPM shift (leak/unsealed) |
+| 2 | `ARM_SEAL_REASON_STALE_TACH` | Tach pulses missing/stale while vacuum ON |
+| 3 | `ARM_SEAL_REASON_UNKNOWN` | Fallback reason when unavailable |
+
 ---
 
 ## 5. Payload Struct Reference
@@ -241,6 +258,7 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 | `pl_spawn_status_t` | 16 | `status:u8, retries:u8, bag_number:u16, target_ug:u32, disp_ug:u32, remain_ug:u32` |
 | `pl_motion_done_t` | 8 | `subsystem:u8, result:u8, _rsvd[2]:u8, steps_done:i32` |
 | `pl_vacuum_status_t` | 4 | `status:u8, _rsvd:u8, rpm:u16` |
+| `pl_arm_seal_event_t` | 10 | `event:u8, reason:u8, rpm_baseline:u16, rpm_filt:u16, delta_rpm:i16, age_ms:u16` |
 | `pl_hotwire_traverse_t` | 1 | `direction:u8` (0=cut/forward, 1=return) |
 | `pl_indexer_move_t` | 1 | `position:u8` (indexer_pos_t) |
 
@@ -250,6 +268,8 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 
 - [ ] `shared/proto/proto.h` contains all message IDs, enumerations, and payload structs listed above, with no omissions
 - [ ] All payload struct sizes match the sizes in the table (verified with `_Static_assert`)
+- [ ] `MSG_ARM_SEAL_EVENT` uses ID `0x62`; payload includes signed `delta_rpm` (`rpm_filt - rpm_baseline`) and sample `age_ms`
+- [ ] Pico sends `MSG_ARM_SEAL_EVENT` only on LOST/RESTORED transitions (no repeated LOST spam while latched)
 - [ ] `proto_crc16_ccitt()` computes CRC-16-CCITT (polynomial 0x1021, init 0xFFFF) correctly for at least 3 known test vectors
 - [ ] COBS encode/decode round-trips correctly for payloads of size 0, 1, 64, and 128 bytes
 - [ ] All `#define` constants use `#ifndef` guards
