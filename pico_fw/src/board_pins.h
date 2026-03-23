@@ -192,7 +192,7 @@
 #define ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS 300u /* wait this long for an RPM response after press */
 #endif
 #ifndef ARM_PRESS_RETRY_RPM_DELTA
-#define ARM_PRESS_RETRY_RPM_DELTA 15u /* minimum absolute RPM change that counts as a successful press */
+#define ARM_PRESS_RETRY_RPM_DELTA 15u /* corrected to observed 10-15 RPM behavior; 2000 was out-of-scale */
 #endif
 #ifndef ARM_MOTION_TIMEOUT_MS
 #define ARM_MOTION_TIMEOUT_MS 5000
@@ -357,6 +357,9 @@
 /* Rotary arm seal monitor tunables (vacuum RPM, Pico-side). */
 #ifndef ARM_SEAL_EMA_ALPHA_X1000
 #define ARM_SEAL_EMA_ALPHA_X1000 250u /* 0.25 */
+#endif
+#if ARM_SEAL_EMA_ALPHA_X1000 > 1000u
+#error "ARM_SEAL_EMA_ALPHA_X1000 must be <= 1000"
 #endif
 #ifndef ARM_SEAL_BASELINE_WINDOW_MS
 #define ARM_SEAL_BASELINE_WINDOW_MS 300u

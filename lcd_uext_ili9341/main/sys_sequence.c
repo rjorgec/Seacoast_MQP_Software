@@ -43,6 +43,7 @@ static const char *TAG = "sys_seq";
 /** Timeout for spawn dosing to complete (ms). */
 #define SEQ_DOSE_TIMEOUT_MS 120000u
 #define ARM_OPEN_RETRY_MAX 3u
+#define ARM_SEAL_EVENT_POLL_TIMEOUT_MS 200u
 
 /** Threshold for bag detection via HX711 scale (µg). */
 #define BAG_DETECT_THRESHOLD_UG 50000000u /* 50 g */
@@ -75,6 +76,7 @@ static volatile uint8_t s_last_motion_result = 0u;
 static volatile uint8_t s_last_spawn_status = 0u;
 static volatile uint8_t s_last_arm_seal_event = 0u;
 static volatile uint8_t s_last_arm_seal_reason = 0u;
+static volatile uint16_t s_last_arm_seal_snapshot = 0u; /* [15:8]=event, [7:0]=reason */
 
 /* ── Internal helpers ──────────────────────────────────────────────────────── */
 
@@ -399,7 +401,7 @@ static void seq_task(void *arg)
         case SYS_OPENING_BAG:
         {
             uint8_t retries = 0u;
-            while (retries <= (uint8_t)ARM_OPEN_RETRY_MAX)
+            for (;;)
             {
                 bool open_ok = false;
                 if (retries == 0u)
@@ -416,9 +418,12 @@ static void seq_task(void *arg)
                                                             EVT_ARM_SEAL_EVENT,
                                                             pdTRUE,
                                                             pdFALSE,
-                                                            0);
+                                                            pdMS_TO_TICKS(ARM_SEAL_EVENT_POLL_TIMEOUT_MS));
+                uint16_t seal_snapshot = s_last_arm_seal_snapshot;
+                uint8_t seal_event = (uint8_t)(seal_snapshot >> 8);
+                uint8_t seal_reason = (uint8_t)(seal_snapshot & 0xFFu);
                 bool seal_lost = (seal_bits & EVT_ARM_SEAL_EVENT) &&
-                                 (s_last_arm_seal_event == (uint8_t)ARM_SEAL_EVENT_LOST);
+                                 (seal_event == (uint8_t)ARM_SEAL_EVENT_LOST);
 
                 if (!open_ok && !seal_lost)
                 {
@@ -430,7 +435,7 @@ static void seq_task(void *arg)
 
                 if (seal_lost)
                 {
-                    if (retries >= (uint8_t)ARM_OPEN_RETRY_MAX)
+                    if (retries == (uint8_t)ARM_OPEN_RETRY_MAX)
                     {
                         ESP_LOGE(TAG, "bag opening: seal lost after max retries");
                         safe_stop_all();
@@ -440,7 +445,7 @@ static void seq_task(void *arg)
                     ++retries;
                     ESP_LOGW(TAG, "bag opening: seal lost, retry %u/%u reason=%u",
                              (unsigned)retries, (unsigned)ARM_OPEN_RETRY_MAX,
-                             (unsigned)s_last_arm_seal_reason);
+                             (unsigned)seal_reason);
                     set_state(SYS_OPENING_BAG);
                     continue;
                 }
@@ -701,6 +706,7 @@ void sys_sequence_notify_arm_seal_event(uint8_t event, uint8_t reason)
 {
     s_last_arm_seal_event = event;
     s_last_arm_seal_reason = reason;
+    s_last_arm_seal_snapshot = (uint16_t)(((uint16_t)event << 8) | (uint16_t)reason);
     if (s_events)
     {
         xEventGroupSetBitsFromISR(s_events, EVT_ARM_SEAL_EVENT, NULL);

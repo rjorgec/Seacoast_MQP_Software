@@ -205,6 +205,7 @@ typedef struct
     uint32_t transient_start_ms;
     uint32_t steady_start_ms;
     uint32_t restore_start_ms;
+    bool rpm_filt_init;
     bool restore_pending;
     bool rearm_requested;
     bool pending_press_baseline;
@@ -447,8 +448,10 @@ static void arm_seal_begin_baselining(uint32_t now_ms)
     s_arm_seal.baseline_sum = 0u;
     s_arm_seal.baseline_samples = 0u;
     s_arm_seal.baseline_last_sample_ms = 0u;
+    s_arm_seal.rpm_filt_init = false;
     s_arm_seal.restore_pending = false;
     s_arm_seal.restore_start_ms = 0u;
+    s_arm_seal.rpm_baseline_sealed = 0u;
     arm_seal_reset_threshold_timers();
 }
 
@@ -2150,8 +2153,7 @@ static void vacuum_sm_tick(void)
 
         s_vacuum_last_rpm = rpm;
         s_vacuum_rpm_valid = rpm_valid;
-        s_vacuum_last_sample_age_ms = rpm_valid ? (uint16_t)((pulse_age_ms > UINT16_MAX) ? UINT16_MAX : pulse_age_ms)
-                                                : UINT16_MAX;
+        s_vacuum_last_sample_age_ms = rpm_valid ? (uint16_t)pulse_age_ms : UINT16_MAX;
 
         vacuum_status_code_t new_status =
             (rpm < (uint16_t)VACUUM_RPM_BLOCKED_THRESHOLD) ? VACUUM_BLOCKED : VACUUM_OK;
@@ -2281,6 +2283,7 @@ static void arm_seal_monitor_tick(void)
         s_arm_seal.rearm_requested = false;
         s_arm_seal.pending_press_baseline = false;
         s_arm_seal.restore_pending = false;
+        s_arm_seal.rpm_filt_init = false;
         arm_seal_reset_threshold_timers();
         return;
     }
@@ -2295,17 +2298,14 @@ static void arm_seal_monitor_tick(void)
         return;
     }
 
-    if (s_arm_seal.rpm_filt == 0u)
+    if (!s_arm_seal.rpm_filt_init)
     {
         s_arm_seal.rpm_filt = s_vacuum_last_rpm;
+        s_arm_seal.rpm_filt_init = true;
     }
     else
     {
         uint32_t alpha = (uint32_t)ARM_SEAL_EMA_ALPHA_X1000;
-        if (alpha > 1000u)
-        {
-            alpha = 1000u;
-        }
         uint32_t prev = s_arm_seal.rpm_filt;
         uint32_t curr = s_vacuum_last_rpm;
         s_arm_seal.rpm_filt = (uint16_t)((alpha * curr + (1000u - alpha) * prev) / 1000u);
@@ -2404,7 +2404,9 @@ static void arm_seal_monitor_tick(void)
         s_arm_seal.steady_start_ms = 0u;
     }
 
-    if (s_arm_seal.restore_pending && s_arm_seal.rearm_requested && delta < (int16_t)ARM_SEAL_STEADY_DELTA_RPM)
+    if (s_arm_seal.restore_pending &&
+        s_arm_seal.rpm_baseline_sealed > 0u &&
+        delta < (int16_t)ARM_SEAL_STEADY_DELTA_RPM)
     {
         if (s_arm_seal.restore_start_ms == 0u)
         {

@@ -43,6 +43,7 @@ static lv_obj_t *s_dose_lbl_innoc = NULL;    /* inoculation % display */
 static uint32_t s_dose_target_ug = 0;
 static uint16_t s_dose_innoc_pct = 200; /* x10 → default 20.0 % */
 static uint8_t s_dose_bag_number = 0;
+#define UI_STATUS_MSG_MAX_LEN 72u
 
 /* ── Status helpers ─────────────────────────────────────────────────────── */
 
@@ -602,7 +603,7 @@ void ui_ops_on_arm_seal_event(const pl_arm_seal_event_t *pl)
         break;
     }
 
-    char msg[72];
+    char msg[UI_STATUS_MSG_MAX_LEN];
     snprintf(msg, sizeof(msg), "Arm seal %s (%s)", event_str, reason_str);
     ui_status_set(msg);
     ESP_LOGW(TAG, "%s", msg);
