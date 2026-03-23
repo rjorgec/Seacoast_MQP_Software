@@ -229,6 +229,7 @@ static void on_seq_abort(lv_event_t *e)
     (void)e;
     esp_err_t err = sys_sequence_send_cmd(SYS_CMD_ABORT);
     set_status(err == ESP_OK ? "Abort sent" : "Abort failed");
+    ESP_LOGI(TAG, "Sequence abort (%s)", esp_err_to_name(err));
 }
 
 /* ── Operations-screen button callbacks ──────────────────────────────────── */
