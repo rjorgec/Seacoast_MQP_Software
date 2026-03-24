@@ -306,6 +306,66 @@ fi
 echo "  ESP-IDF OK at: $IDF_PATH"
 
 # =============================================================================
+# STEP 5b — Export IDF_PATH to the system environment
+# =============================================================================
+# ESP-IDF tools (idf.py, esptool.py, etc.) require the IDF_PATH environment
+# variable to locate the framework.  Without a persistent export the variable
+# is only set inside this script's process and disappears when the script exits.
+#
+# Two complementary locations are written:
+#   /etc/profile.d/99-esp-idf.sh  — picked up by login shells for ALL users
+#                                    (covers VS Code integrated terminal on most
+#                                    desktop environments, SSH sessions, etc.)
+#   ~/.bashrc                      — picked up by interactive non-login shells
+#                                    (the typical case when you open a terminal
+#                                    emulator that does not invoke a login shell)
+# =============================================================================
+
+section "STEP 5b — Exporting IDF_PATH to the system environment (sudo required)"
+
+# --- /etc/profile.d/ (system-wide, login shells) ----------------------------
+
+PROFILE_D_FILE="/etc/profile.d/99-esp-idf.sh"
+
+# Build the file content as a variable so we can compare it to what is already
+# on disk and skip the sudo write when nothing has changed.
+PROFILE_D_CONTENT="# ESP-IDF environment — written by setup_dependencies.sh
+# Re-run setup_dependencies.sh to update after an IDF version change.
+export IDF_PATH=\"${IDF_PATH}\""
+
+if [ -f "$PROFILE_D_FILE" ] && [ "$(cat "$PROFILE_D_FILE")" = "$PROFILE_D_CONTENT" ]; then
+  echo "  $PROFILE_D_FILE already up-to-date — skipping."
+else
+  echo "  Writing $PROFILE_D_FILE (sudo required)..."
+  printf '%s\n' "$PROFILE_D_CONTENT" | sudo tee "$PROFILE_D_FILE" > /dev/null
+  sudo chmod 644 "$PROFILE_D_FILE"
+  echo "  System-wide IDF_PATH → $IDF_PATH"
+fi
+
+# --- ~/.bashrc (current user, interactive non-login shells) ------------------
+
+BASHRC="${HOME}/.bashrc"
+BASHRC_MARKER="# ESP-IDF — added by setup_dependencies.sh"
+
+if grep -qF "$BASHRC_MARKER" "$BASHRC" 2>/dev/null; then
+  echo "  $BASHRC already contains IDF_PATH export — skipping."
+else
+  {
+    echo ""
+    echo "$BASHRC_MARKER"
+    echo "export IDF_PATH=\"${IDF_PATH}\""
+    # Sourcing export.sh adds idf.py and the Xtensa/RISC-V toolchain binaries
+    # to PATH.  The '2>/dev/null || true' guard prevents errors from breaking
+    # a shell session if the IDF directory is temporarily unavailable (e.g. a
+    # network mount that is not yet mounted, or before a first-time install).
+    echo ". \"\$IDF_PATH/export.sh\" 2>/dev/null || true"
+  } >> "$BASHRC"
+  echo "  Added IDF_PATH export + export.sh source to $BASHRC"
+fi
+
+echo "  IDF_PATH environment export OK."
+
+# =============================================================================
 # STEP 6 — udev rules for USB device access (sudo required)
 # =============================================================================
 # Without these rules you would need to run picotool / idf.py flash as root.
@@ -559,8 +619,9 @@ echo "        ESP: Flash + Monitor    — flash and open serial console"
 echo ""
 if ! command -v idf.py >/dev/null 2>&1; then
   echo "  NOTE: 'idf.py' is not on your PATH in this shell session."
-  echo "  The VS Code tasks source export.sh automatically.  To use idf.py"
-  echo "  in a terminal, first run:"
+  echo "  IDF_PATH has been exported to /etc/profile.d/99-esp-idf.sh and"
+  echo "  ~/.bashrc so it will be available in all new terminal sessions."
+  echo "  To activate it in the CURRENT shell without opening a new one, run:"
   echo "    source \"${IDF_PATH}/export.sh\""
   echo ""
 fi
