@@ -258,12 +258,19 @@ extern "C"
         uint16_t rpm;   /**< measured RPM (0 if pump off) */
     } pl_vacuum_status_t;
 
-    /** MSG_DISPENSE_SPAWN payload (7 bytes) -- ESP->Pico */
+    typedef enum
+    {
+        DOSE_STYLE_A = 0,
+        DOSE_STYLE_B = 1,
+    } dose_style_t;
+
+    /** MSG_DISPENSE_SPAWN payload (8 bytes) -- ESP->Pico */
     typedef struct __attribute__((packed))
     {
         uint16_t bag_mass;      /**< mass of bag being inoculated (grams) */
         uint16_t spawn_mass;    /**< mass of spawn remaining (grams) */
         uint16_t innoc_percent; /**< spawn percentage of bag weight (x10, e.g. 250 = 25.0%) */
+        uint8_t dose_style;     /**< dose_style_t (A=0, B=1) */
         uint8_t bag_number;     /**< sequential bag count from this spawn block */
     } pl_innoculate_bag_t;
 
