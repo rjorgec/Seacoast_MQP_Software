@@ -169,6 +169,23 @@ typedef struct
 static stepper_pending_t s_arm_pending;
 static stepper_pending_t s_rack_pending;
 static stepper_pending_t s_turntable_pending;
+static stepper_pending_t s_agitator_pending; /* MSG_AGITATE standalone cycle */
+
+typedef enum
+{
+    AGIT_PHASE_IDLE            = 0,
+    AGIT_PHASE_HOMING          = 1, /* driving toward mechanical home endstop */
+    AGIT_PHASE_HOMING_BACKOFF  = 2, /* releasing from home endstop */
+    AGIT_PHASE_FORWARD         = 3, /* forward stroke of a knead cycle */
+    AGIT_PHASE_REVERSE         = 4, /* return stroke of a knead cycle */
+} agitator_phase_t;
+
+static agitator_phase_t s_agitator_phase      = AGIT_PHASE_IDLE;
+static bool             s_agitator_cycle_done  = false; /* true when all cycles complete */
+static bool             s_agitator_home_only   = false; /* true when an AGITATE_FLAG_DO_HOME request is in progress */
+static uint8_t          s_agitator_cycles_done = 0u;    /* cycles completed so far */
+static uint8_t          s_agitator_n_cycles    = 1u;    /* target number of fwd+rev cycles */
+static int32_t          s_agitator_pos_steps   = 0;     /* position from home (signed) */
 
 /* ── Vacuum pump state ─────────────────────────────────────────────────────── */
 
@@ -248,6 +265,8 @@ typedef enum
     SPAWN_SM_DONE,
     SPAWN_SM_FAULT,
     SPAWN_SM_ABORTED,
+    SPAWN_SM_AGIT_CLOSING,  /* agitation: waiting for flaps to fully close before running agitator */
+    SPAWN_SM_AGITATING,     /* agitation: agitator forward+reverse cycle running; re-primes on done */
 } spawn_sm_state_t;
 
 /** What to do after CLOSE_CONFIRM completes. */
@@ -694,6 +713,8 @@ static bool start_stepper_job(uint8_t dev_idx, int32_t relative_steps,
                               uint16_t torque_limit,
                               uint16_t torque_blank_steps,
                               uint32_t step_delay_us);
+static bool agitator_start_homing(void); /* sensorless home then start cycles */
+static bool agitator_start_cycle(void);  /* N×(forward+reverse) knead; shared by spawn SM and MSG_AGITATE */
 static bool start_arm_internal_absolute_move(int32_t target_steps,
                                              uint16_t torque_limit,
                                              uint32_t timeout_ms);
@@ -964,43 +985,18 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
                                         ? (s_spawn.dispensed_ug - s_spawn.window_start_ug)
                                         : 0u;
 
-            if (!s_spawn.agitating && window_delta < (uint32_t)SPAWN_FLOW_NOFLOW_UG)
+            if (window_delta < (uint32_t)SPAWN_FLOW_NOFLOW_UG)
             {
-                spawn_stop_flaps();
-                s_spawn.agitating = true;
                 s_spawn.retry++;
-                printf("Spawn DOSE_MAIN: no-flow window (delta=%luug) — agitating (retry %u/%u)\n",
+                printf("Spawn DOSE_MAIN: no-flow (delta=%lu ug) — closing flaps for agitation (retry %u/%u)\n",
                        (unsigned long)window_delta, (unsigned)s_spawn.retry,
                        (unsigned)s_spawn.max_retries);
                 send_spawn_status(SPAWN_STATUS_AGITATING);
-
-#ifdef STEPPER_DEV_AGITATOR
-                if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
-                {
-                    int32_t agit_steps = (int32_t)AGITATOR_KNEAD_STEPS;
-                    if (!start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
-                                           agit_steps,
-                                           (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
-                                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
-                                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
-                    {
-                        printf("Agitator: motion start failed\n");
-                    }
-                    else
-                    {
-                        printf("Agitator: started knead motion (%u steps)\n",
-                               (unsigned)AGITATOR_KNEAD_STEPS);
-                    }
-                }
-                else
-                {
-                    printf("Agitator: STEPPER_DEV_AGITATOR not in chain (not wired)\n");
-                }
-#else
-                printf("Agitator: STEPPER_DEV_AGITATOR not defined (see board_pins.h)\n");
-#endif
-                s_spawn.last_flow_check = delayed_by_ms(now, (uint32_t)SPAWN_AGITATE_MS);
-                s_spawn.window_start_ug = s_spawn.dispensed_ug;
+                /* Fully close flaps before running the agitator, then re-prime */
+                spawn_fast_close();
+                s_spawn.close_start_time = get_absolute_time();
+                s_spawn.window_start_ug  = s_spawn.dispensed_ug;
+                spawn_set_state(SPAWN_SM_AGIT_CLOSING);
                 return true;
             }
 
@@ -1008,48 +1004,6 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
             s_spawn.window_start_ug = s_spawn.dispensed_ug;
             s_spawn.last_flow_check = now;
 
-            if (s_spawn.agitating)
-            {
-                s_spawn.agitating = false;
-                if (s_spawn.retry >= s_spawn.max_retries)
-                {
-                    s_spawn.active = false;
-                    printf("Spawn DOSE_MAIN: max retries reached — BAG_EMPTY\n");
-                    spawn_set_state(SPAWN_SM_FAULT);
-                    send_spawn_status(SPAWN_STATUS_BAG_EMPTY);
-                    return false;
-                }
-                /* Re-engage prime sequence */
-                s_spawn.startup_opening = true;
-                s_spawn.last_flow_check = get_absolute_time();
-                s_spawn.window_start_ug = s_spawn.dispensed_ug;
-                s_spawn.last_tick_ug    = s_spawn.dispensed_ug;
-                s_spawn.ema_seeded      = false;
-                s_spawn.ema_flow_ug     = 0u;
-                s_spawn.consecutive_open_nudges = 0u;
-
-                s_drv8263.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-                s_drv8263.config.current_high_threshold    = 4095u;
-                s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-                spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-                (void)drv8263_start_current_monitoring(&s_drv8263);
-                if (s_drv8263_flap2_ready)
-                {
-                    s_drv8263_flap2.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-                    s_drv8263_flap2.config.current_high_threshold    = 4095u;
-                    s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-                    (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
-                }
-                spawn_set_state(SPAWN_SM_PRIME);
-                send_spawn_status(SPAWN_STATUS_RUNNING);
-                return true;
-            }
-        }
-
-        /* During agitation hold-off keep flaps stopped */
-        if (s_spawn.agitating)
-        {
-            return true;
         }
 
         /* ── Nudge undercurrent: flap reached fully-open endpoint ───────────── */
@@ -1347,6 +1301,81 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
         spawn_set_state(SPAWN_SM_DONE);
         send_spawn_status(SPAWN_STATUS_DONE);
         return false;
+    }
+
+    /* ── AGIT_CLOSING: flaps closing before agitation — wait for FLAP_SM_CLOSED ─ */
+    case SPAWN_SM_AGIT_CLOSING:
+    {
+        uint32_t elapsed_ms = (uint32_t)(absolute_time_diff_us(s_spawn.close_start_time, now) / 1000u);
+        bool close_done = (s_flap_state == FLAP_SM_CLOSED || s_flap_state == FLAP_SM_FAULT);
+        bool timed_out  = (elapsed_ms >= (uint32_t)SPAWN_CLOSE_CONFIRM_TIMEOUT_MS);
+
+        if (!close_done && !timed_out)
+        {
+            return true; /* still closing */
+        }
+
+        printf("Spawn AGIT_CLOSING: flaps %s in %lums — starting agitator\n",
+               close_done ? "closed" : "timed-out", (unsigned long)elapsed_ms);
+
+        /* Start the N-cycle knead (forward + reverse × AGITATOR_N_CYCLES) */
+        s_agitator_n_cycles    = (uint8_t)AGITATOR_N_CYCLES;
+        s_agitator_cycles_done = 0u;
+        s_agitator_cycle_done  = false;
+        if (!agitator_start_cycle())
+        {
+            /* Agitator not wired or failed — skip to retry/re-prime directly */
+            printf("Spawn AGIT_CLOSING: agitator not available — re-priming\n");
+            s_agitator_cycle_done = true; /* treat as done to fall through */
+        }
+        spawn_set_state(SPAWN_SM_AGITATING);
+        return true;
+    }
+
+    /* ── AGITATING: agitator cycle running — wait for completion then re-prime ── */
+    case SPAWN_SM_AGITATING:
+    {
+        if (!s_agitator_cycle_done)
+        {
+            return true; /* agitator still running */
+        }
+
+        printf("Spawn AGITATING: cycle done — retry=%u/%u\n",
+               (unsigned)s_spawn.retry, (unsigned)s_spawn.max_retries);
+
+        if (s_spawn.retry >= s_spawn.max_retries)
+        {
+            s_spawn.active = false;
+            printf("Spawn AGITATING: max retries reached — BAG_EMPTY\n");
+            spawn_set_state(SPAWN_SM_FAULT);
+            send_spawn_status(SPAWN_STATUS_BAG_EMPTY);
+            return false;
+        }
+
+        /* Re-engage prime sequence: open flaps and look for fresh flow */
+        s_spawn.startup_opening = true;
+        s_spawn.last_flow_check = get_absolute_time();
+        s_spawn.window_start_ug = s_spawn.dispensed_ug;
+        s_spawn.last_tick_ug    = s_spawn.dispensed_ug;
+        s_spawn.ema_seeded      = false;
+        s_spawn.ema_flow_ug     = 0u;
+        s_spawn.consecutive_open_nudges = 0u;
+
+        s_drv8263.config.current_low_threshold      = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8263.config.current_high_threshold     = 4095u;
+        s_drv8263.config.current_check_interval_ms  = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+        (void)drv8263_start_current_monitoring(&s_drv8263);
+        if (s_drv8263_flap2_ready)
+        {
+            s_drv8263_flap2.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+            s_drv8263_flap2.config.current_high_threshold    = 4095u;
+            s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+            (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+        }
+        spawn_set_state(SPAWN_SM_PRIME);
+        send_spawn_status(SPAWN_STATUS_RUNNING);
+        return true;
     }
 
     /* ── FINISH_A_TOPOFF: small open pulses to correct undershoot ────────────── */
@@ -2089,6 +2118,199 @@ static void stepper_completion_tick(void)
                    (unsigned)result, (long)s_turntable_pos_steps);
         }
     }
+
+#ifdef STEPPER_DEV_AGITATOR
+    /* ── AGITATOR — multi-phase: homing → backoff → N×(forward+reverse) ─── */
+    if (s_agitator_pending.pending)
+    {
+        bool job_done = !s_motion.jobs[STEPPER_DEV_AGITATOR].active;
+        bool timeout  = (now_ms - s_agitator_pending.start_ms) >= s_agitator_pending.timeout_ms;
+
+        if (job_done || timeout)
+        {
+            int32_t steps_achieved = 0;
+            motion_result_t result =
+                consume_stepper_motion_result((uint8_t)STEPPER_DEV_AGITATOR,
+                                              timeout && !job_done,
+                                              &steps_achieved);
+
+            /* ── HOMING phase: stall = home found; end of steps = already homed ─ */
+            if (s_agitator_phase == AGIT_PHASE_HOMING)
+            {
+                /* Restore normal torque sample divisor after sensitive homing mode */
+                set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+
+                /* Either a torque stall (home endstop) or exhausted search steps.
+                 * Both are acceptable home conditions — zero the position. */
+                s_agitator_pos_steps = 0;
+                printf("Agitator homing: endstop reached (result=%u steps=%li) — backing off %u steps\n",
+                       (unsigned)result, (long)steps_achieved,
+                       (unsigned)AGITATOR_HOME_BACKOFF_STEPS);
+                s_agitator_phase = AGIT_PHASE_HOMING_BACKOFF;
+                if (start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                                      -(int32_t)AGITATOR_HOME_BACKOFF_STEPS,
+                                      0u, 0u,
+                                      (uint32_t)AGITATOR_STEP_DELAY_US))
+                {
+                    s_agitator_pending.target_steps = -(int32_t)AGITATOR_HOME_BACKOFF_STEPS;
+                    s_agitator_pending.start_ms     = now_ms;
+                }
+                else
+                {
+                    /* Can't backoff — follow home-only or cycle behavior */
+                    printf("Agitator homing: backoff start failed\n");
+                    if (s_agitator_home_only)
+                    {
+                        s_agitator_pending.pending = false;
+                        s_agitator_phase           = AGIT_PHASE_IDLE;
+                        s_agitator_cycle_done      = true;
+                        s_agitator_home_only       = false;
+                        send_motion_done(SUBSYS_AGITATOR, MOTION_OK, s_agitator_pos_steps);
+                    }
+                    else
+                    {
+                        s_agitator_phase = AGIT_PHASE_FORWARD;
+                        if (!start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                                               (int32_t)AGITATOR_KNEAD_STEPS,
+                                               0u, 0u,
+                                               (uint32_t)AGITATOR_STEP_DELAY_US))
+                        {
+                            /* Nothing works — abort */
+                            s_agitator_pending.pending = false;
+                            s_agitator_phase           = AGIT_PHASE_IDLE;
+                            s_agitator_cycle_done      = true;
+                            send_motion_done(SUBSYS_AGITATOR, MOTION_FAULT, 0);
+                        }
+                        else
+                        {
+                            s_agitator_pending.target_steps = (int32_t)AGITATOR_KNEAD_STEPS;
+                            s_agitator_pending.start_ms     = now_ms;
+                        }
+                    }
+                }
+            }
+            /* ── HOMING_BACKOFF phase: position released from endstop ─────────── */
+            else if (s_agitator_phase == AGIT_PHASE_HOMING_BACKOFF)
+            {
+                s_agitator_pos_steps += steps_achieved; /* negative — moving away from stop */
+
+                if (s_agitator_home_only)
+                {
+                    printf("Agitator homing complete (home-only, pos=%li)\n",
+                           (long)s_agitator_pos_steps);
+                    s_agitator_pending.pending = false;
+                    s_agitator_phase           = AGIT_PHASE_IDLE;
+                    s_agitator_cycle_done      = true;
+                    s_agitator_home_only       = false;
+                    send_motion_done(SUBSYS_AGITATOR, MOTION_OK, s_agitator_pos_steps);
+                }
+                else
+                {
+                    printf("Agitator backoff done (pos=%li) — starting %u-cycle knead\n",
+                           (long)s_agitator_pos_steps, (unsigned)s_agitator_n_cycles);
+                    s_agitator_cycles_done = 0u;
+                    s_agitator_phase = AGIT_PHASE_FORWARD;
+                    if (!start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                                           (int32_t)AGITATOR_KNEAD_STEPS,
+                                           0u, 0u,
+                                           (uint32_t)AGITATOR_STEP_DELAY_US))
+                    {
+                        s_agitator_pending.pending = false;
+                        s_agitator_phase           = AGIT_PHASE_IDLE;
+                        s_agitator_cycle_done      = true;
+                        send_motion_done(SUBSYS_AGITATOR, MOTION_FAULT, 0);
+                    }
+                    else
+                    {
+                        s_agitator_pending.target_steps = (int32_t)AGITATOR_KNEAD_STEPS;
+                        s_agitator_pending.start_ms     = now_ms;
+                    }
+                }
+            }
+            /* ── FORWARD stroke: queue reverse ───────────────────────────────── */
+            else if (s_agitator_phase == AGIT_PHASE_FORWARD && !timeout && result == MOTION_OK)
+            {
+                s_agitator_pos_steps += steps_achieved;
+                printf("Agitator: fwd done (cycle %u/%u pos=%li) — reversing\n",
+                       (unsigned)(s_agitator_cycles_done + 1u),
+                       (unsigned)s_agitator_n_cycles,
+                       (long)s_agitator_pos_steps);
+                s_agitator_phase = AGIT_PHASE_REVERSE;
+                if (start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                                      -(int32_t)AGITATOR_KNEAD_STEPS,
+                                      0u, 0u,
+                                      (uint32_t)AGITATOR_STEP_DELAY_US))
+                {
+                    s_agitator_pending.target_steps = -(int32_t)AGITATOR_KNEAD_STEPS;
+                    s_agitator_pending.start_ms     = now_ms;
+                }
+                else
+                {
+                    /* Reverse failed — count as done */
+                    printf("Agitator: reverse start failed — ending early\n");
+                    s_agitator_cycles_done++;
+                    s_agitator_pending.pending = false;
+                    s_agitator_phase           = AGIT_PHASE_IDLE;
+                    s_agitator_cycle_done      = true;
+                    send_motion_done(SUBSYS_AGITATOR, MOTION_OK, s_agitator_pos_steps);
+                }
+            }
+            /* ── REVERSE stroke: count cycle; repeat or finish ─────────────────── */
+            else if (s_agitator_phase == AGIT_PHASE_REVERSE && !timeout && result == MOTION_OK)
+            {
+                s_agitator_pos_steps += steps_achieved;
+                s_agitator_cycles_done++;
+                printf("Agitator: rev done — %u/%u cycles complete (pos=%li)\n",
+                       (unsigned)s_agitator_cycles_done,
+                       (unsigned)s_agitator_n_cycles,
+                       (long)s_agitator_pos_steps);
+
+                if (s_agitator_cycles_done < s_agitator_n_cycles)
+                {
+                    /* Start next forward stroke */
+                    s_agitator_phase = AGIT_PHASE_FORWARD;
+                    if (start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                                          (int32_t)AGITATOR_KNEAD_STEPS,
+                                          0u, 0u,
+                                          (uint32_t)AGITATOR_STEP_DELAY_US))
+                    {
+                        s_agitator_pending.target_steps = (int32_t)AGITATOR_KNEAD_STEPS;
+                        s_agitator_pending.start_ms     = now_ms;
+                    }
+                    else
+                    {
+                        printf("Agitator: next cycle start failed\n");
+                        s_agitator_pending.pending = false;
+                        s_agitator_phase           = AGIT_PHASE_IDLE;
+                        s_agitator_cycle_done      = true;
+                        send_motion_done(SUBSYS_AGITATOR, MOTION_FAULT, s_agitator_pos_steps);
+                    }
+                }
+                else
+                {
+                    /* All cycles complete */
+                    s_agitator_pending.pending = false;
+                    s_agitator_phase           = AGIT_PHASE_IDLE;
+                    s_agitator_cycle_done      = true;
+                    printf("Agitator: all %u cycles done (pos=%li)\n",
+                           (unsigned)s_agitator_n_cycles, (long)s_agitator_pos_steps);
+                    send_motion_done(SUBSYS_AGITATOR, MOTION_OK, s_agitator_pos_steps);
+                }
+            }
+            /* ── Timeout or fault on any phase ──────────────────────────────────── */
+            else
+            {
+                printf("Agitator: timeout/fault in phase %u (result=%u steps=%li)\n",
+                       (unsigned)s_agitator_phase, (unsigned)result, (long)steps_achieved);
+                s_agitator_pending.pending = false;
+                s_agitator_phase           = AGIT_PHASE_IDLE;
+                s_agitator_cycle_done      = true;
+                s_agitator_home_only       = false;
+                send_motion_done(SUBSYS_AGITATOR, result, steps_achieved);
+            }
+        }
+    }
+#endif /* STEPPER_DEV_AGITATOR */
 }
 
 /**
@@ -2914,6 +3136,184 @@ static void handle_arm_home(uint16_t seq)
 }
 
 /**
+ * @brief Sensorlessly home the agitator to its mechanical endstop via stall
+ *        detection, then back off AGITATOR_HOME_BACKOFF_STEPS.
+ *
+ * After homing the tick automatically starts the N-cycle knead sequence
+ * (using s_agitator_n_cycles).  s_agitator_pos_steps is zeroed at the
+ * endstop and updated through each subsequent stroke.
+ *
+ * @return true if homing was started, false if not wired / already running.
+ */
+static bool agitator_start_homing(void)
+{
+#ifdef STEPPER_DEV_AGITATOR
+    if (!s_stepper_ready)
+    {
+        printf("Agitator homing: stepper not ready\n");
+        return false;
+    }
+    if (DRV8434S_N_DEVICES <= (uint8_t)STEPPER_DEV_AGITATOR)
+    {
+        printf("Agitator homing: device %u not in chain (N=%u)\n",
+               (unsigned)STEPPER_DEV_AGITATOR, (unsigned)DRV8434S_N_DEVICES);
+        return false;
+    }
+    if (s_agitator_pending.pending)
+    {
+        printf("Agitator homing: already running\n");
+        return false;
+    }
+
+    s_agitator_cycle_done  = false;
+    s_agitator_cycles_done = 0u;
+    s_agitator_phase       = AGIT_PHASE_HOMING;
+
+    set_motion_torque_sample_div(STEPPER_DEFAULT_TORQUE_SAMPLE_DIV); /* sensitive stall detection for homing */
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                           (int32_t)AGITATOR_HOME_SEARCH_STEPS,
+                           (uint16_t)AGITATOR_HOME_TORQUE_LIMIT,
+                           0u,
+                           (uint32_t)AGITATOR_STEP_DELAY_US))
+    {
+        set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+        printf("Agitator homing: start_stepper_job failed\n");
+        s_agitator_phase = AGIT_PHASE_IDLE;
+        return false;
+    }
+
+    s_agitator_pending.pending      = true;
+    s_agitator_pending.target_steps = (int32_t)AGITATOR_HOME_SEARCH_STEPS;
+    s_agitator_pending.subsys       = SUBSYS_AGITATOR;
+    s_agitator_pending.start_ms     = to_ms_since_boot(get_absolute_time());
+    s_agitator_pending.timeout_ms   = (uint32_t)AGITATOR_HOME_TIMEOUT_MS;
+    s_agitator_pending.dev_idx      = (uint8_t)STEPPER_DEV_AGITATOR;
+
+    printf("Agitator homing: started (search=%u torque=%u then %u cycles)\n",
+           (unsigned)AGITATOR_HOME_SEARCH_STEPS,
+           (unsigned)AGITATOR_HOME_TORQUE_LIMIT,
+           (unsigned)s_agitator_n_cycles);
+    return true;
+#else
+    printf("Agitator homing: STEPPER_DEV_AGITATOR not defined\n");
+    return false;
+#endif
+}
+
+/**
+ * @brief Start N knead cycles (forward + reverse, N = s_agitator_n_cycles) on
+ *        STEPPER_DEV_AGITATOR without homing first.  Caller must set
+ *        s_agitator_n_cycles before calling.
+ *
+ * The agitator completion tick handles all phase transitions automatically.
+ * s_agitator_cycle_done is set true when all strokes complete (or on fault).
+ * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent at the end.
+ *
+ * @return true if the cycle was started, false if not wired / already running.
+ */
+static bool agitator_start_cycle(void)
+{
+#ifdef STEPPER_DEV_AGITATOR
+    if (!s_stepper_ready)
+    {
+        printf("Agitator: stepper not ready\n");
+        return false;
+    }
+    if (DRV8434S_N_DEVICES <= (uint8_t)STEPPER_DEV_AGITATOR)
+    {
+        printf("Agitator: device %u not in chain (N=%u)\n",
+               (unsigned)STEPPER_DEV_AGITATOR, (unsigned)DRV8434S_N_DEVICES);
+        return false;
+    }
+    if (s_agitator_pending.pending)
+    {
+        printf("Agitator: already running\n");
+        return false;
+    }
+
+    s_agitator_cycle_done  = false;
+    s_agitator_cycles_done = 0u;
+    s_agitator_phase       = AGIT_PHASE_FORWARD;
+
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_AGITATOR,
+                           (int32_t)AGITATOR_KNEAD_STEPS,
+                           0u, 0u,
+                           (uint32_t)AGITATOR_STEP_DELAY_US))
+    {
+        printf("Agitator: start_stepper_job (forward) failed\n");
+        s_agitator_phase = AGIT_PHASE_IDLE;
+        return false;
+    }
+
+    s_agitator_pending.pending      = true;
+    s_agitator_pending.target_steps = (int32_t)AGITATOR_KNEAD_STEPS;
+    s_agitator_pending.subsys       = SUBSYS_AGITATOR;
+    s_agitator_pending.start_ms     = to_ms_since_boot(get_absolute_time());
+    s_agitator_pending.timeout_ms   = (uint32_t)AGITATOR_MOTION_TIMEOUT_MS;
+    s_agitator_pending.dev_idx      = (uint8_t)STEPPER_DEV_AGITATOR;
+
+    printf("Agitator: starting %u×(fwd+rev) cycles (%u steps @ %u us/step)\n",
+           (unsigned)s_agitator_n_cycles,
+           (unsigned)AGITATOR_KNEAD_STEPS, (unsigned)AGITATOR_STEP_DELAY_US);
+    return true;
+#else
+    printf("Agitator: STEPPER_DEV_AGITATOR not defined\n");
+    return false;
+#endif
+}
+
+/**
+ * @brief MSG_AGITATE (0x4E) — trigger a standalone agitation cycle.
+ *
+ * Optional pl_agitate_t payload (len may be 0 for all defaults):
+ *   flags    AGITATE_FLAG_DO_HOME → home only, do not enter knead cycle
+ *   n_cycles 0 = use AGITATOR_N_CYCLES from board_pins.h; >0 overrides cycle count
+ *
+ * Pico sends MSG_MOTION_DONE(SUBSYS_AGITATOR, ...) when operation completes.
+ * NACKs if stepper not ready, agitator not wired, or another cycle is running.
+ */
+static void handle_agitate(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (s_agitator_pending.pending)
+    {
+        printf("Agitate: already in progress\n");
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    /* Parse optional payload */
+    uint8_t flags    = 0u;
+    uint8_t n_cycles = 0u;
+    if (len >= 1u && payload)
+        flags = payload[0];
+    if (len >= 2u && payload)
+        n_cycles = payload[1];
+
+    s_agitator_n_cycles    = (n_cycles == 0u) ? (uint8_t)AGITATOR_N_CYCLES : n_cycles;
+    s_agitator_cycles_done = 0u;
+
+    bool started;
+    if (flags & AGITATE_FLAG_DO_HOME)
+    {
+        s_agitator_home_only = true;
+        started = agitator_start_homing();
+    }
+    else
+    {
+        s_agitator_home_only = false;
+        started = agitator_start_cycle();
+    }
+
+    if (!started)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    send_ack(seq);
+}
+
+/**
  * @brief MSG_ARM_MOVE (0x42) — move arm stepper (device 0) to named position.
  */
 static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
@@ -2949,6 +3349,11 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
         break;
     case ARM_POS_2:
         target = (int32_t)ARM_STEPS_POS2;
+        break;
+    case ARM_POS_HOME:
+        /* Move back to released-home position (step 0) without re-homing.
+         * Requires a prior MSG_ARM_HOME; already guarded by s_arm_rehome_required above. */
+        target = 0;
         break;
     default:
         send_nack(seq, NACK_UNKNOWN);
@@ -3087,17 +3492,14 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
 
     switch ((turntable_pos_t)p->position)
     {
-    case TURNTABLE_POS_A:
-        target = (int32_t)TURNTABLE_STEPS_A;
+    case TURNTABLE_POS_INTAKE:
+        target = (int32_t)TURNTABLE_STEPS_INTAKE;
         break;
-    case TURNTABLE_POS_B:
-        target = (int32_t)TURNTABLE_STEPS_B;
+    case TURNTABLE_POS_TRASH:
+        target = (int32_t)TURNTABLE_STEPS_TRASH;
         break;
-    case TURNTABLE_POS_C:
-        target = (int32_t)TURNTABLE_STEPS_C;
-        break;
-    case TURNTABLE_POS_D:
-        target = (int32_t)TURNTABLE_STEPS_D;
+    case TURNTABLE_POS_EJECT:
+        target = (int32_t)TURNTABLE_STEPS_EJECT;
         break;
     default:
         send_nack(seq, NACK_UNKNOWN);
@@ -3690,6 +4092,11 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
         handle_arm_home(hdr.seq);
         break;
 
+    case MSG_AGITATE:
+        printf("Agitate\n");
+        handle_agitate(hdr.seq, payload, hdr.len);
+        break;
+
     case MSG_RACK_MOVE:
         printf("Rack Move\n");
         handle_rack_move(hdr.seq, payload, hdr.len);
@@ -4143,6 +4550,7 @@ void uart_server_init(void)
 
     memset(&s_arm_pending, 0, sizeof(s_arm_pending));
     memset(&s_rack_pending, 0, sizeof(s_rack_pending));
+    memset(&s_agitator_pending, 0, sizeof(s_agitator_pending));
     memset(&s_turntable_pending, 0, sizeof(s_turntable_pending));
 
     s_flap_state = FLAP_SM_IDLE;

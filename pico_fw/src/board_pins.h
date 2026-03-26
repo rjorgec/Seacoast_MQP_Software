@@ -211,7 +211,7 @@
 #define ARM_HOME_TIMEOUT_MS 15000
 #endif
 #ifndef ARM_HOME_TORQUE_LIMIT
-#define ARM_HOME_TORQUE_LIMIT 110u //
+#define ARM_HOME_TORQUE_LIMIT 120u //
 #endif
 #ifndef ARM_HOME_TORQUE_BLANK_STEPS
 #define ARM_HOME_TORQUE_BLANK_STEPS 100u
@@ -234,18 +234,15 @@
 #define RACK_MOTION_TIMEOUT_MS 5000
 #endif
 
-/* Turntable stepper (device 2) */
-#ifndef TURNTABLE_STEPS_A
-#define TURNTABLE_STEPS_A 0
+/* Turntable stepper (device 2) — INTAKE is the hard endstop (= 0) */
+#ifndef TURNTABLE_STEPS_INTAKE
+#define TURNTABLE_STEPS_INTAKE 0
 #endif
-#ifndef TURNTABLE_STEPS_B
-#define TURNTABLE_STEPS_B 500
+#ifndef TURNTABLE_STEPS_TRASH
+#define TURNTABLE_STEPS_TRASH 500
 #endif
-#ifndef TURNTABLE_STEPS_C
-#define TURNTABLE_STEPS_C 1000
-#endif
-#ifndef TURNTABLE_STEPS_D
-#define TURNTABLE_STEPS_D 1500
+#ifndef TURNTABLE_STEPS_EJECT
+#define TURNTABLE_STEPS_EJECT 1000
 #endif
 #ifndef TURNTABLE_MOTION_TIMEOUT_MS
 #define TURNTABLE_MOTION_TIMEOUT_MS 8000
@@ -620,10 +617,42 @@
   5 /* max agitation attempts before SPAWN_STATUS_BAG_EMPTY */
 #endif
 #ifndef AGITATOR_KNEAD_STEPS
-#define AGITATOR_KNEAD_STEPS 200 /* steps per agitation knead cycle */
+#define AGITATOR_KNEAD_STEPS 400 /* steps per forward (or reverse) stroke */
+#endif
+#ifndef AGITATOR_N_CYCLES
+#define AGITATOR_N_CYCLES                                                      \
+  3u /* number of full forward+reverse cycles per agitation */
 #endif
 #ifndef AGITATOR_STEP_DELAY_US
-#define AGITATOR_STEP_DELAY_US 2000u /* µs per step (adjust for torque) */
+#define AGITATOR_STEP_DELAY_US                                                 \
+  2000u /* µs per step (tune for torque vs speed) */
+#endif
+/* Timeout per agitation cycle set (N_CYCLES × 2 strokes × KNEAD_STEPS ×
+ * STEP_DELAY + margin) */
+#ifndef AGITATOR_MOTION_TIMEOUT_MS
+#define AGITATOR_MOTION_TIMEOUT_MS                                             \
+  ((uint32_t)AGITATOR_N_CYCLES * 2u * (uint32_t)AGITATOR_KNEAD_STEPS *         \
+       ((uint32_t)AGITATOR_STEP_DELAY_US / 1000u) +                            \
+   2000u)
+#endif
+
+/* ── Agitator homing (sensorless stall-detect, same pattern as arm home) ── */
+/* Maximum steps toward the mechanical hard-stop during homing search.
+ * Positive = forward; adjust sign to match the physical home direction. */
+#ifndef AGITATOR_HOME_SEARCH_STEPS
+#define AGITATOR_HOME_SEARCH_STEPS -500
+#endif
+/* Stall-torque threshold used during homing.  Lower = more sensitive. */
+#ifndef AGITATOR_HOME_TORQUE_LIMIT
+#define AGITATOR_HOME_TORQUE_LIMIT 200u
+#endif
+/* Steps to release from the hard-stop after a successful home stall. */
+#ifndef AGITATOR_HOME_BACKOFF_STEPS
+#define AGITATOR_HOME_BACKOFF_STEPS 20
+#endif
+/* Maximum time allowed for the homing search before declaring fault. */
+#ifndef AGITATOR_HOME_TIMEOUT_MS
+#define AGITATOR_HOME_TIMEOUT_MS 10000u
 #endif
 
 /* ================================================================== */

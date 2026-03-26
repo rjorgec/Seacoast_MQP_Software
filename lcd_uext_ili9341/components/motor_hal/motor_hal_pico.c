@@ -335,3 +335,46 @@ esp_err_t motor_indexer_move(uint8_t position)
     }
     return err;
 }
+
+esp_err_t motor_agitate(void)
+{
+    /* MSG_AGITATE (0x4E) — zero-length payload; Pico uses all defaults from
+     * board_pins.h: AGITATOR_N_CYCLES forward+reverse strokes, no homing.
+     * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent asynchronously when done. */
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "agitate rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_agitate_home(void)
+{
+    /* MSG_AGITATE with AGITATE_FLAG_DO_HOME: sensorlessly home the agitator
+     * (stall-detect to mechanical endstop, then backoff only), and stop
+     * in place (do not run knead cycles).
+     * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent asynchronously when done. */
+    pl_agitate_t pl = {
+        .flags    = AGITATE_FLAG_DO_HOME,
+        .n_cycles = 0u, /* 0 = use AGITATOR_N_CYCLES from firmware */
+    };
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "agitate_home rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}

@@ -12,7 +12,7 @@ extern "C" {
 
 /* Shared default for DRV8434S soft torque-limit threshold.
  * Keep this aligned with the Pico-side protocol header. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 300u
 
 /*
  * Wire format endianness is little-endian for all multi-byte fields.
@@ -58,6 +58,8 @@ typedef enum {
       0x4B,                /* ESP→Pico: traverse hot wire carriage stepper */
   MSG_INDEXER_MOVE = 0x4C, /* ESP→Pico: move bag depth/eject rack (indexer) */
   MSG_ARM_HOME = 0x4D,     /* ESP→Pico: sensorless home for the rotary arm */
+  MSG_AGITATE =
+  0x4E, /* ESP→Pico: trigger one agitation cycle (agitator eccentric arm) */
   /* ---- Unsolicited status messages (0x60–0x6F) ---- */
   MSG_MOTION_DONE = 0x60,    /* Pico→ESP: motion/action complete notification */
   MSG_VACUUM_STATUS = 0x61,  /* Pico→ESP: vacuum pump RPM/blocked status */
@@ -199,6 +201,8 @@ typedef enum {
   ARM_POS_PRESS = 0, /* press against attachment point */
   ARM_POS_1 = 1,     /* absolute position 1 */
   ARM_POS_2 = 2,     /* absolute position 2 */
+  ARM_POS_HOME = 3,  /* return to released-home position (step 0, established by
+                        MSG_ARM_HOME) */
 } arm_pos_t;
 
 /** Named positions for the rack stepper (DRV8434S device 1) */
@@ -208,12 +212,13 @@ typedef enum {
   RACK_POS_PRESS = 2,  /* move to press-into-arm position */
 } rack_pos_t;
 
-/** Named positions for the turntable stepper (DRV8434S device 2) */
+/** Named positions for the turntable stepper (DRV8434S device 2).
+ *  TURNTABLE_POS_INTAKE (0) is the physical hard endstop; MSG_TURNTABLE_HOME
+ *  drives to this position and zeros the step counter. */
 typedef enum {
-  TURNTABLE_POS_A = 0,
-  TURNTABLE_POS_B = 1,
-  TURNTABLE_POS_C = 2,
-  TURNTABLE_POS_D = 3,
+  TURNTABLE_POS_INTAKE = 0, /* bag-intake / home position (hard endstop) */
+  TURNTABLE_POS_TRASH = 1,  /* waste-disposal position */
+  TURNTABLE_POS_EJECT = 2,  /* bag-eject / output position */
 } turntable_pos_t;
 
 /** Vacuum pump status codes (carried in MSG_VACUUM_STATUS) */
@@ -222,6 +227,22 @@ typedef enum {
   VACUUM_BLOCKED = 1,
   VACUUM_OFF = 2,
 } vacuum_status_code_t;
+
+/** Bit flags for pl_agitate_t::flags */
+#define AGITATE_FLAG_DO_HOME                                                   \
+  (1u << 0) /**< home agitator before cycling (stall-detect) */
+
+/**
+ * MSG_AGITATE (0x4E) optional payload.
+ * If len == 0 the Pico uses all defaults from board_pins.h.
+ * Fields are read only up to the received length, so older senders remain
+ * compatible.
+ */
+typedef struct __attribute__((packed)) {
+  uint8_t flags; /**< AGITATE_FLAG_* bitmask; 0 = defaults */
+  uint8_t
+      n_cycles; /**< 0 = use AGITATOR_N_CYCLES from firmware; >0 overrides */
+} pl_agitate_t;
 
 /* ------------------------------------------------------------------ */
 /*  Payload structs for state-based messages                           */
