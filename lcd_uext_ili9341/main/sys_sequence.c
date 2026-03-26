@@ -42,6 +42,8 @@ static const char *TAG = "sys_seq";
 
 /** Timeout for spawn dosing to complete (ms). */
 #define SEQ_DOSE_TIMEOUT_MS 120000u
+#define ARM_OPEN_RETRY_MAX 3u
+#define ARM_SEAL_EVENT_POLL_TIMEOUT_MS 200u
 
 /** Threshold for bag detection via HX711 scale (µg). */
 #define BAG_DETECT_THRESHOLD_UG 50000000u /* 50 g */
@@ -55,6 +57,7 @@ static const char *TAG = "sys_seq";
 #define EVT_SPAWN_DONE (1u << 1)
 #define EVT_SPAWN_EMPTY (1u << 2)
 #define EVT_SPAWN_AGITATING (1u << 3)
+#define EVT_ARM_SEAL_EVENT (1u << 4)
 
 /* ── Module state ──────────────────────────────────────────────────────────── */
 
@@ -71,6 +74,9 @@ static volatile uint8_t s_last_motion_result = 0u;
 
 /* Last spawn status from MSG_SPAWN_STATUS notification */
 static volatile uint8_t s_last_spawn_status = 0u;
+static volatile uint8_t s_last_arm_seal_event = 0u;
+static volatile uint8_t s_last_arm_seal_reason = 0u;
+static volatile uint16_t s_last_arm_seal_snapshot = 0u; /* [15:8]=event, [7:0]=reason */
 
 /* ── Internal helpers ──────────────────────────────────────────────────────── */
 
@@ -233,6 +239,31 @@ static bool open_bag_sequence(void)
     return true;
 }
 
+static bool open_bag_recover_sequence(void)
+{
+    ESP_LOGW(TAG, "bag_open: recovery sequence (seal lost)");
+
+    (void)motor_arm_move(ARM_POS_1);
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    (void)motor_arm_move(ARM_POS_PRESS);
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    (void)motor_arm_move(ARM_POS_2);
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 /* ── Main sequence task ────────────────────────────────────────────────────── */
 
 static void seq_task(void *arg)
@@ -369,16 +400,64 @@ static void seq_task(void *arg)
         /* ── OPENING BAG ────────────────────────────────────────────── */
         case SYS_OPENING_BAG:
         {
-            if (!open_bag_sequence())
+            uint8_t retries = 0u;
+            for (;;)
             {
-                ESP_LOGE(TAG, "bag opening sub-sequence failed");
-                safe_stop_all();
-                set_state(SYS_ERROR);
+                bool open_ok = false;
+                if (retries == 0u)
+                {
+                    open_ok = open_bag_sequence();
+                }
+                else
+                {
+                    set_state(SYS_OPEN_RECOVERING);
+                    open_ok = open_bag_recover_sequence();
+                }
+
+                EventBits_t seal_bits = xEventGroupWaitBits(s_events,
+                                                            EVT_ARM_SEAL_EVENT,
+                                                            pdTRUE,
+                                                            pdFALSE,
+                                                            pdMS_TO_TICKS(ARM_SEAL_EVENT_POLL_TIMEOUT_MS));
+                uint16_t seal_snapshot = s_last_arm_seal_snapshot;
+                uint8_t seal_event = (uint8_t)(seal_snapshot >> 8);
+                uint8_t seal_reason = (uint8_t)(seal_snapshot & 0xFFu);
+                bool seal_lost = (seal_bits & EVT_ARM_SEAL_EVENT) &&
+                                 (seal_event == (uint8_t)ARM_SEAL_EVENT_LOST);
+
+                if (!open_ok && !seal_lost)
+                {
+                    ESP_LOGE(TAG, "bag opening sub-sequence failed");
+                    safe_stop_all();
+                    set_state(SYS_ERROR);
+                    break;
+                }
+
+                if (seal_lost)
+                {
+                    if (retries == (uint8_t)ARM_OPEN_RETRY_MAX)
+                    {
+                        ESP_LOGE(TAG, "bag opening: seal lost after max retries");
+                        safe_stop_all();
+                        set_state(SYS_ERROR);
+                        break;
+                    }
+                    ++retries;
+                    ESP_LOGW(TAG, "bag opening: seal lost, retry %u/%u reason=%u",
+                             (unsigned)retries, (unsigned)ARM_OPEN_RETRY_MAX,
+                             (unsigned)seal_reason);
+                    set_state(SYS_OPENING_BAG);
+                    continue;
+                }
+
+                set_state(SYS_INOCULATING);
                 break;
             }
-            set_state(SYS_INOCULATING);
             break;
         }
+
+        case SYS_OPEN_RECOVERING:
+            break;
 
         /* ── INOCULATING ────────────────────────────────────────────── */
         case SYS_INOCULATING:
@@ -623,6 +702,17 @@ void sys_sequence_notify_spawn_status(uint8_t status)
     }
 }
 
+void sys_sequence_notify_arm_seal_event(uint8_t event, uint8_t reason)
+{
+    s_last_arm_seal_event = event;
+    s_last_arm_seal_reason = reason;
+    s_last_arm_seal_snapshot = (uint16_t)(((uint16_t)event << 8) | (uint16_t)reason);
+    if (s_events)
+    {
+        xEventGroupSetBitsFromISR(s_events, EVT_ARM_SEAL_EVENT, NULL);
+    }
+}
+
 const char *sys_sequence_state_name(sys_state_t state)
 {
     switch (state)
@@ -641,6 +731,8 @@ const char *sys_sequence_state_name(sys_state_t state)
         return "INTAKE_WEIGHING";
     case SYS_OPENING_BAG:
         return "OPENING_BAG";
+    case SYS_OPEN_RECOVERING:
+        return "OPEN_RECOVERING";
     case SYS_INOCULATING:
         return "INOCULATING";
     case SYS_POST_DOSE:
