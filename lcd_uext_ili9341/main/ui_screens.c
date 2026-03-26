@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "ui_screens.h"
-#include "control.h"
+#include "sys_sequence.h"
 
 #include "lvgl.h"
 #include "esp_log.h"
@@ -20,15 +20,15 @@ static const char *TAG = "ui_screens";
 #define LVGL_ACTIVE_SCREEN() lv_scr_act()
 #endif
 
-#define JOG_SPEED 2500u
-#define JOG_LOW_TH 30u
-#define JOG_HIGH_TH 200u
-#define JOG_INTERVAL_MS 5u
-
 /* Shared file-scope labels — re-assigned by every ui_show_* call */
 static lv_obj_t *lbl_status = NULL; /* updated by ui_status_set() / set_status() */
 static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without it */
-static float s_last_weight_g = 0.0f;
+static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
+static uint16_t s_weight_req_seq = 0u; /* 0 = no in-flight read request */
+static uint32_t s_weight_req_interval_us = 0u;
+
+/* Scale screen auto-refresh timer — non-NULL only while the Scale screen is active */
+static lv_timer_t *s_scale_timer = NULL;
 
 /* Operations screen async-update labels — NULL when not on that screen */
 static lv_obj_t *s_ops_lbl_status = NULL; /* last motion-done result */
@@ -61,35 +61,30 @@ static void set_status(const char *s)
     ui_status_set(s);
 }
 
+static bool sequence_manual_actions_blocked(void)
+{
+    switch (sys_sequence_get_state())
+    {
+    case SYS_IDLE:
+    case SYS_SPAWN_EMPTY:
+    case SYS_ERROR:
+    case SYS_ESTOP:
+        return false;
+    default:
+        return true;
+    }
+}
+
 /* ── Home-screen button callbacks ────────────────────────────────────────── */
-
-static void on_fwd(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_FWD,
-                                                   JOG_SPEED,
-                                                   JOG_LOW_TH,
-                                                   JOG_HIGH_TH,
-                                                   JOG_INTERVAL_MS);
-    set_status(err == ESP_OK ? "LINACT: FWD" : "LINACT: FWD FAILED");
-    ESP_LOGI(TAG, "FWD pressed (%s)", esp_err_to_name(err));
-}
-
-static void on_rev(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_linact_start_monitor_dir(MOTOR_DIR_REV,
-                                                   JOG_SPEED,
-                                                   JOG_LOW_TH,
-                                                   JOG_HIGH_TH,
-                                                   JOG_INTERVAL_MS);
-    set_status(err == ESP_OK ? "LINACT: REV" : "LINACT: REV FAILED");
-    ESP_LOGI(TAG, "REV pressed (%s)", esp_err_to_name(err));
-}
 
 static void on_dose(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     ui_show_dosing();
     ESP_LOGI(TAG, "DOSE pressed");
 }
@@ -104,13 +99,57 @@ static void on_home(lv_event_t *e)
 static void on_ops_page(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     ui_show_operations();
     ESP_LOGI(TAG, "Operations pressed");
+}
+
+static void on_auto_page(lv_event_t *e)
+{
+    (void)e;
+    ui_show_auto();
+    ESP_LOGI(TAG, "Automated Functions pressed");
+}
+
+static void scale_auto_read_cb(lv_timer_t *t)
+{
+    (void)t;
+    static const pl_hx711_measure_t req = {.interval_us = 500000}; /* 500 ms measurement window */
+    (void)pico_link_send(MSG_HX711_MEASURE, &req, sizeof(req), NULL);
+}
+
+static void scale_timer_stop(void)
+{
+    if (s_scale_timer)
+    {
+#if defined(LVGL_VERSION_MAJOR) && (LVGL_VERSION_MAJOR >= 9)
+        lv_timer_delete(s_scale_timer);
+#else
+        lv_timer_del(s_scale_timer);
+#endif
+        s_scale_timer = NULL;
+    }
+}
+
+static void on_scale_page(lv_event_t *e)
+{
+    (void)e;
+    ui_show_scale();
+    ESP_LOGI(TAG, "Scale pressed");
 }
 
 static void on_tare(lv_event_t *e)
 {
     (void)e;
+    if (sequence_manual_actions_blocked())
+    {
+        set_status("SEQ active: manual disabled");
+        return;
+    }
     uint8_t nack_code = 0;
     esp_err_t err = pico_link_send_rpc(MSG_HX711_TARE,
                                        NULL, 0,
@@ -146,6 +185,8 @@ static void on_read_weight(lv_event_t *e)
                                    &seq);
     if (err == ESP_OK)
     {
+        s_weight_req_seq = seq;
+        s_weight_req_interval_us = measure_payload.interval_us;
         set_status("Weight request sent...");
         ESP_LOGI(TAG, "Weight request sent (seq=%u)", seq);
     }
@@ -159,43 +200,36 @@ static void on_read_weight(lv_event_t *e)
     }
 }
 
+static void on_setup_load(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_SETUP_LOAD);
+    set_status(err == ESP_OK ? "Setup/Load started" : "Setup/Load FAILED");
+    ESP_LOGI(TAG, "Setup/Load (%s)", esp_err_to_name(err));
+}
+
 static void on_start(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {
-        .type = CTRL_CMD_START,
-        .target_g = 50.0f,
-        .recipe_id = 0,
-    };
-    bool ok = control_send(&cmd);
-    set_status(ok ? "START sent" : "START failed");
-    ESP_LOGI(TAG, "Start pressed (send=%d)", (int)ok);
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_START);
+    set_status(err == ESP_OK ? "Starting..." : "Start FAILED");
+    ESP_LOGI(TAG, "Start pressed (%s)", esp_err_to_name(err));
 }
 
-static void on_pause(lv_event_t *e)
+static void on_seq_start(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_PAUSE};
-    bool ok = control_send(&cmd);
-    set_status(ok ? "PAUSE sent" : "PAUSE failed");
-    ESP_LOGI(TAG, "Pause pressed (send=%d)", (int)ok);
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_START);
+    set_status(err == ESP_OK ? "SEQ: START sent" : "SEQ: START failed");
+    ESP_LOGI(TAG, "Sequence start (%s)", esp_err_to_name(err));
 }
 
-static void on_stop(lv_event_t *e)
+static void on_seq_abort(lv_event_t *e)
 {
     (void)e;
-    ctrl_cmd_t cmd = {.type = CTRL_CMD_STOP};
-    bool ok = control_send(&cmd);
-    set_status(ok ? "STOP sent" : "STOP failed");
-    ESP_LOGI(TAG, "Stop pressed (send=%d)", (int)ok);
-}
-
-static void on_stop_linact(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_linact_stop_monitor();
-    set_status(err == ESP_OK ? "LINACT: STOP" : "LINACT: STOP FAILED");
-    ESP_LOGI(TAG, "STOP pressed (%s)", esp_err_to_name(err));
+    esp_err_t err = sys_sequence_send_cmd(SYS_CMD_ABORT);
+    set_status(err == ESP_OK ? "Abort sent" : "Abort failed");
+    ESP_LOGI(TAG, "Sequence abort (%s)", esp_err_to_name(err));
 }
 
 /* ── Operations-screen button callbacks ──────────────────────────────────── */
@@ -224,6 +258,14 @@ static void on_arm_press(lv_event_t *e)
     ESP_LOGI(TAG, "Arm press (%s)", esp_err_to_name(err));
 }
 
+static void on_arm_home(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_arm_home();
+    set_status(err == ESP_OK ? "Arm: homing..." : "Arm home: FAILED");
+    ESP_LOGI(TAG, "Arm home (%s)", esp_err_to_name(err));
+}
+
 static void on_arm_pos1(lv_event_t *e)
 {
     (void)e;
@@ -238,6 +280,19 @@ static void on_arm_pos2(lv_event_t *e)
     esp_err_t err = motor_arm_move((uint8_t)ARM_POS_2);
     set_status(err == ESP_OK ? "Arm: to POS2..." : "Arm pos2: FAILED");
     ESP_LOGI(TAG, "Arm pos2 (%s)", esp_err_to_name(err));
+}
+
+static void on_agitate_home(lv_event_t *e)
+{
+    (void)e;
+    /* Sensorlessly home the agitator (AGITATE_FLAG_DO_HOME, default n_cycles) */
+    pl_agitate_t pl = { .flags = AGITATE_FLAG_DO_HOME, .n_cycles = 0u };
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       &pl, (uint16_t)sizeof(pl),
+                                       300u, &nack_code);
+    set_status(err == ESP_OK ? "Agit: homing..." : "Agit home: FAILED");
+    ESP_LOGI(TAG, "Agitate home (%s nack=%u)", esp_err_to_name(err), nack_code);
 }
 
 static void on_rack_home(lv_event_t *e)
@@ -272,36 +327,36 @@ static void on_turntable_home(lv_event_t *e)
     ESP_LOGI(TAG, "Turntable home (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_a(lv_event_t *e)
+static void on_turntable_intake(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_A);
-    set_status(err == ESP_OK ? "Tbl: to A..." : "Tbl A: FAILED");
-    ESP_LOGI(TAG, "Turntable A (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_INTAKE);
+    set_status(err == ESP_OK ? "Tbl: to INTAKE..." : "Tbl INTAKE: FAILED");
+    ESP_LOGI(TAG, "Turntable INTAKE (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_b(lv_event_t *e)
+static void on_turntable_trash(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_B);
-    set_status(err == ESP_OK ? "Tbl: to B..." : "Tbl B: FAILED");
-    ESP_LOGI(TAG, "Turntable B (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_TRASH);
+    set_status(err == ESP_OK ? "Tbl: to TRASH..." : "Tbl TRASH: FAILED");
+    ESP_LOGI(TAG, "Turntable TRASH (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_c(lv_event_t *e)
+static void on_turntable_eject(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_C);
-    set_status(err == ESP_OK ? "Tbl: to C..." : "Tbl C: FAILED");
-    ESP_LOGI(TAG, "Turntable C (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_EJECT);
+    set_status(err == ESP_OK ? "Tbl: to EJECT..." : "Tbl EJECT: FAILED");
+    ESP_LOGI(TAG, "Turntable EJECT (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_d(lv_event_t *e)
+static void on_agitate(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_D);
-    set_status(err == ESP_OK ? "Tbl: to D..." : "Tbl D: FAILED");
-    ESP_LOGI(TAG, "Turntable D (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_agitate();
+    set_status(err == ESP_OK ? "Agitating..." : "Agitate: FAILED");
+    ESP_LOGI(TAG, "Agitate (%s)", esp_err_to_name(err));
 }
 
 static void on_hotwire_on(lv_event_t *e)
@@ -357,31 +412,84 @@ static void on_vacuum2_off(lv_event_t *e)
 void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
                                 const uint8_t *payload, uint16_t len)
 {
-    (void)seq;
-
-    if (msg_type == MSG_HX711_MEASURE && len == sizeof(pl_hx711_mass_t))
+    if (msg_type == MSG_HX711_MEASURE && payload != NULL)
     {
-        pl_hx711_mass_t mass_data;
-        memcpy(&mass_data, payload, sizeof(mass_data));
+        if (len == sizeof(pl_hx711_measure_t) && s_weight_req_seq != 0u && seq == s_weight_req_seq)
+        {
+            uint32_t echoed_interval_us = 0u;
+            memcpy(&echoed_interval_us, payload, sizeof(echoed_interval_us));
+            if (echoed_interval_us == s_weight_req_interval_us)
+            {
+                /* UART loopback/echo case: request came back as RX frame.
+                 * This is not a weight response. */
+                ESP_LOGW(TAG, "Ignored echoed HX711 request (seq=%u interval_us=%lu)",
+                         (unsigned)seq, (unsigned long)echoed_interval_us);
+                set_status("HX711 echo detected (check Pico->ESP RX path)");
+                s_weight_req_seq = 0u;
+                return;
+            }
+        }
 
-        float weight_g = (float)mass_data.mass_ug / 1000000.0f;
+        int32_t mass_ug = 0;
+        uint8_t unit = 0u;
+
+        if (len >= sizeof(pl_hx711_mass_t))
+        {
+            pl_hx711_mass_t mass_data;
+            memcpy(&mass_data, payload, sizeof(mass_data));
+            mass_ug = mass_data.mass_ug;
+            unit = mass_data.unit;
+        }
+        else if (len >= sizeof(int32_t))
+        {
+            /* Legacy Pico payload: mass only (int32_t micrograms). */
+            memcpy(&mass_ug, payload, sizeof(mass_ug));
+            ESP_LOGW(TAG, "Received legacy HX711 payload len=%u (mass only)",
+                     (unsigned)len);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Invalid HX711 payload len=%u", (unsigned)len);
+            return;
+        }
+
+        float weight_g = (float)mass_ug / 1000000.0f;
         s_last_weight_g = weight_g;
+        s_weight_req_seq = 0u;
         ESP_LOGI(TAG, "Received weight: %.3f g (unit=%u)", weight_g,
-                 mass_data.unit);
+                 unit);
 
+        char weight_str[32];
+        snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g", weight_g);
+
+        lvgl_port_lock(0);
         if (lbl_weight)
         {
-            char weight_str[32];
-            snprintf(weight_str, sizeof(weight_str), "Weight: %.2f g",
-                     weight_g);
-            lvgl_port_lock(0);
             lv_label_set_text(lbl_weight, weight_str);
-            lvgl_port_unlock();
         }
+        lvgl_port_unlock();
 
         char status_buf[64];
         snprintf(status_buf, sizeof(status_buf), "Weight: %.2f g", weight_g);
         set_status(status_buf);
+        return;
+    }
+
+    /* If the Pico rejects a read request, surface it on the Scale screen. */
+    if (msg_type == MSG_NACK &&
+        payload != NULL &&
+        len >= sizeof(pl_nack_t) &&
+        s_weight_req_seq != 0u &&
+        seq == s_weight_req_seq)
+    {
+        const pl_nack_t *nack = (const pl_nack_t *)payload;
+        char status_buf[64];
+        snprintf(status_buf, sizeof(status_buf), "Weight read NACK (code=%u)",
+                 (unsigned)nack->code);
+        set_status(status_buf);
+        ESP_LOGW(TAG, "Weight read NACK for seq=%u code=%u",
+                 (unsigned)seq, (unsigned)nack->code);
+        s_weight_req_seq = 0u;
     }
 }
 
@@ -432,6 +540,9 @@ void ui_ops_on_motion_done(const pl_motion_done_t *pl)
         break;
     case MOTION_FAULT:
         res_name = "FAULT";
+        break;
+    case MOTION_SPI_FAULT:
+        res_name = "SPI FAULT";
         break;
     default:
         res_name = "?";
@@ -484,20 +595,6 @@ void ui_ops_on_vacuum_status(const pl_vacuum_status_t *pl)
 
 /* ── UI helpers ──────────────────────────────────────────────────────────── */
 
-/** Create a full-featured grid button (for Home screen grid layout). */
-static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *txt,
-                              lv_event_cb_t cb)
-{
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *label = lv_label_create(btn);
-    lv_label_set_text(label, txt);
-    lv_obj_center(label);
-
-    return btn;
-}
-
 /**
  * Create a button at an explicit absolute position within the screen's
  * padded content area. Uses LV_ALIGN_TOP_LEFT + (x, y) offsets.
@@ -521,14 +618,154 @@ static lv_obj_t *make_btn(lv_obj_t *scr, const char *txt,
 
 /* ── Screen builders ─────────────────────────────────────────────────────── */
 
+/*
+ * Automated Functions Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  2  "Automated Functions"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
+ *  y= 20  status label (colour = white)
+ *  y= 42  [Setup / Load  300×56]
+ *  y=104  [Start         145×56]  10  [Abort  145×56]
+ */
+void ui_show_auto(void)
+{
+    lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
+    lv_obj_clean(scr);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
+
+    /* Nullify async-update handles on unrelated screens */
+    s_ops_lbl_status = NULL;
+    s_ops_lbl_vacuum = NULL;
+    lbl_weight = NULL;
+
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* ── Title ───────────────────────────────────────────────────────────── */
+    lv_obj_t *lbl_title = lv_label_create(scr);
+    lv_label_set_text(lbl_title, "Automated Functions");
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, 0, 2);
+
+    /* ── Home nav (top-right) ────────────────────────────────────────────── */
+    lv_obj_t *btn_nav = lv_btn_create(scr);
+    lv_obj_set_size(btn_nav, 60, 20);
+    lv_obj_align(btn_nav, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_nav, on_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l_nav = lv_label_create(btn_nav);
+    lv_label_set_text(l_nav, "Home");
+    lv_obj_center(l_nav);
+
+    /* ── Status label (y=20) ─────────────────────────────────────────────── */
+    lbl_status = lv_label_create(scr);
+    lv_label_set_text(lbl_status, "Ready");
+    lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 20);
+
+    /* ── Action buttons ─────────────────────────────────────────────────── */
+    make_btn(scr, "Setup / Load", 0,   42, 300, 56, on_setup_load);
+    make_btn(scr, "Start",        0,  104, 145, 56, on_seq_start);
+    make_btn(scr, "Abort",      155,  104, 145, 56, on_seq_abort);
+}
+
+/*
+ * Scale Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  2  "Scale"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
+ *  y= 28  weight readout label (large, live-updated)
+ *  y= 68  [Tare  145×80]   4   [Read  145×80]
+ *  y=156  status label (result of last Tare / Read)
+ */
+void ui_show_scale(void)
+{
+    lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
+    lv_obj_clean(scr);
+
+    /* Delete any stale timer before creating a new one (re-entry guard) */
+    scale_timer_stop();
+
+    /* Nullify unrelated async handles */
+    s_ops_lbl_status = NULL;
+    s_ops_lbl_vacuum = NULL;
+    s_dose_lbl_status = NULL;
+    s_dose_lbl_progress = NULL;
+    s_dose_lbl_retries = NULL;
+    s_dose_bar = NULL;
+    s_dose_lbl_innoc = NULL;
+    s_dose_target_ug = 0;
+
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* ── Title ───────────────────────────────────────────────────────────── */
+    lv_obj_t *lbl_title = lv_label_create(scr);
+    lv_label_set_text(lbl_title, "Scale");
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, 0, 2);
+
+    /* ── Home nav (top-right) ────────────────────────────────────────────── */
+    lv_obj_t *btn_nav = lv_btn_create(scr);
+    lv_obj_set_size(btn_nav, 60, 20);
+    lv_obj_align(btn_nav, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(btn_nav, on_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l_nav = lv_label_create(btn_nav);
+    lv_label_set_text(l_nav, "Home");
+    lv_obj_center(l_nav);
+
+    /* ── Weight readout (y=28) — updated live via ui_screens_pico_rx_handler */
+    lbl_weight = lv_label_create(scr);
+    lv_obj_set_style_text_font(lbl_weight, &lv_font_montserrat_14, 0);
+    /* Show last-known value immediately so the screen is not blank */
+    {
+        char w_buf[32];
+        if (s_last_weight_g >= 0.0f)
+            snprintf(w_buf, sizeof(w_buf), "Weight: %.2f g", (double)s_last_weight_g);
+        else
+            snprintf(w_buf, sizeof(w_buf), "Weight: -- g");
+        lv_label_set_text(lbl_weight, w_buf);
+    }
+    lv_obj_align(lbl_weight, LV_ALIGN_TOP_LEFT, 0, 28);
+
+    /* ── Tare / Read buttons (y=68, h=80, 4 px gap) ─────────────────────── */
+    make_btn(scr, "Tare", 0,   68, 148, 80, on_tare);
+    make_btn(scr, "Read", 152, 68, 148, 80, on_read_weight);
+
+    /* ── Status label (y=156) ────────────────────────────────────────────── */
+    lbl_status = lv_label_create(scr);
+    lv_label_set_text(lbl_status, "");
+    lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
+    lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 156);
+
+    /* Manual read only: do not auto-poll the Pico from this screen. */
+}
+
+/*
+ * Home Screen Layout  (320 × 240, landscape, 10 px pad → 300 × 220 content)
+ *
+ *  y=  0  status label "IDLE • Seacoast Inoculator"
+ *  y= 20  [Automated Functions  300×46]
+ *  y= 70  [Scale                300×46]
+ *  y=120  [Operations           300×46]
+ *  y=170  [Dosing               300×46]
+ */
 void ui_show_home(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
 
-    /* Nullify ops-screen labels so async handlers don't touch freed widgets */
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
+
+    /* Nullify all async-update handles so stale pointer writes can't crash */
     s_ops_lbl_status = NULL;
     s_ops_lbl_vacuum = NULL;
+    s_dose_lbl_status = NULL;
+    s_dose_lbl_progress = NULL;
+    s_dose_lbl_retries = NULL;
+    s_dose_bar = NULL;
+    s_dose_lbl_innoc = NULL;
+    s_dose_target_ug = 0;
+    lbl_weight = NULL;
 
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
@@ -538,40 +775,11 @@ void ui_show_home(void)
     lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* 2-column × 3-row button grid */
-    lv_obj_t *cont = lv_obj_create(scr);
-    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(cont, 300, 210);
-    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, 0);
-
-    lv_obj_set_style_pad_all(cont, 6, 0);
-    lv_obj_set_style_pad_row(cont, 6, 0);
-    lv_obj_set_style_pad_column(cont, 6, 0);
-    lv_obj_set_layout(cont, LV_LAYOUT_GRID);
-
-    static lv_coord_t col_dsc[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
-
-    lv_obj_t *b_fwd = make_big_btn(cont, "Forward", on_fwd);
-    lv_obj_t *b_rev = make_big_btn(cont, "Backward", on_rev);
-    lv_obj_t *b_dose = make_big_btn(cont, "Dose", on_dose);
-    lv_obj_t *b_tare = make_big_btn(cont, "Tare", on_tare);
-    lv_obj_t *b_ops = make_big_btn(cont, "Operations", on_ops_page);
-
-    lv_obj_set_grid_cell(b_fwd, LV_GRID_ALIGN_STRETCH, 0, 1,
-                         LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_rev, LV_GRID_ALIGN_STRETCH, 1, 1,
-                         LV_GRID_ALIGN_STRETCH, 0, 1);
-    lv_obj_set_grid_cell(b_dose, LV_GRID_ALIGN_STRETCH, 0, 1,
-                         LV_GRID_ALIGN_STRETCH, 1, 1);
-    lv_obj_set_grid_cell(b_tare, LV_GRID_ALIGN_STRETCH, 1, 1,
-                         LV_GRID_ALIGN_STRETCH, 1, 1);
-    /* Operations spans both columns in row 2 for a wide, easy touch target */
-    lv_obj_set_grid_cell(b_ops, LV_GRID_ALIGN_STRETCH, 0, 2,
-                         LV_GRID_ALIGN_STRETCH, 2, 1);
+    /* Four navigation buttons */
+    make_btn(scr, "Automated Functions", 0,   20, 300, 46, on_auto_page);
+    make_btn(scr, "Scale",               0,   70, 300, 46, on_scale_page);
+    make_btn(scr, "Operations",          0,  120, 300, 46, on_ops_page);
+    make_btn(scr, "Dosing",              0,  170, 300, 46, on_dose);
 }
 
 /*
@@ -579,18 +787,19 @@ void ui_show_home(void)
  *
  *  y=  0  "Operations"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
  *  y= 22  [Flap Open  148×24]  4  [Flap Close  148×24]
- *  y= 50  [Arm Press  96×24]  4  [Arm Pos 1  96×24]  4  [Arm Pos 2  96×24]
- *  y= 78  [Rack Home  96×24]  4  [Rack Ext   96×24]  4  [Rack Press 96×24]
- *  y=106  [TblHome 56×24] 4 [TblA 56×24] 4 [TblB 56×24] 4 [TblC 56×24] 4 [TblD 56×24]
+ *  y= 50  4-btn 72px: [Arm Home][Arm Press][Arm Pos1][Arm Pos2]
+ *  y= 78  [Rack Home  96×24]  4  [Rack Ext 96×24]  4  [Rack Press 96×24]
+ *  y=106  4-btn 72px: [Tbl Home][Intake][Trash][Eject]
  *  y=134  [Wire ON  148×24]  4  [Wire OFF  148×24]
- *  y=162  [Vac ON   148×24]  4  [Vac OFF   148×24]
+ *  y=162  6-btn 46px: [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]
  *  y=188  s_ops_lbl_status  (motion-done text)
  *  y=204  s_ops_lbl_vacuum  (vacuum status text)
  *
  *  Button-row widths:
- *    2-btn: 148+4+148 = 300 px
- *    3-btn: 96+4+96+4+96 = 296 px
- *    5-btn: 56×5 + 4×4 = 296 px   (positions: x = 0, 60, 120, 180, 240)
+ *    2-btn 148px: 148+4+148 = 300 px
+ *    3-btn 96px:  96+4+96+4+96 = 296 px
+ *    4-btn 72px:  72+4+72+4+72+4+72 = 300 px  (x = 0, 76, 152, 228)
+ *    5-btn 56px:  56+4+56+4+56+4+56+4+56 = 296 px  (x = 0, 60, 120, 180, 240)
  */
 void ui_show_operations(void)
 {
@@ -598,6 +807,9 @@ void ui_show_operations(void)
     lv_obj_clean(scr);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(scr, 10, 0);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Weight label not present on this screen */
     lbl_weight = NULL;
@@ -620,32 +832,34 @@ void ui_show_operations(void)
     make_btn(scr, "Flaps Open", 0, 22, 148, 24, on_flap_open);
     make_btn(scr, "Flaps Close", 152, 22, 148, 24, on_flap_close);
 
-    /* ── Row 2: Arm  (y=50, h=24) ────────────────────────────────────────── */
-    make_btn(scr, "Arm Press", 0, 50, 96, 24, on_arm_press);
-    make_btn(scr, "Arm Pos 1", 100, 50, 96, 24, on_arm_pos1);
-    make_btn(scr, "Arm Pos 2", 200, 50, 96, 24, on_arm_pos2);
+    /* ── Row 2: Arm  (y=50, h=24)  4 × 72 px + 3 × 4 px = 300 px ───────── */
+    make_btn(scr, "Arm Home",  0,   50, 72, 24, on_arm_home);
+    make_btn(scr, "Arm Press", 76,  50, 72, 24, on_arm_press);
+    make_btn(scr, "Arm Pos 1", 152, 50, 72, 24, on_arm_pos1);
+    make_btn(scr, "Arm Pos 2", 228, 50, 72, 24, on_arm_pos2);
 
-    /* ── Row 3: Rack  (y=78, h=24) ───────────────────────────────────────── */
-    make_btn(scr, "Rack Home", 0, 78, 96, 24, on_rack_home);
+    /* ── Row 3: Rack  (y=78, h=24)  3 × 96 px + 2 × 4 px = 296 px ──────── */
+    make_btn(scr, "Rack Home",   0,   78, 96, 24, on_rack_home);
     make_btn(scr, "Rack Extend", 100, 78, 96, 24, on_rack_extend);
-    make_btn(scr, "Rack Press", 200, 78, 96, 24, on_rack_press);
+    make_btn(scr, "Rack Press",  200, 78, 96, 24, on_rack_press);
 
-    /* ── Row 4: Turntable  (y=106, h=24)  5 × 56 px + 4 × 4 px = 296 px ── */
-    make_btn(scr, "Tbl Home", 0, 106, 56, 24, on_turntable_home);
-    make_btn(scr, "Tbl A", 60, 106, 56, 24, on_turntable_a);
-    make_btn(scr, "Tbl B", 120, 106, 56, 24, on_turntable_b);
-    make_btn(scr, "Tbl C", 180, 106, 56, 24, on_turntable_c);
-    make_btn(scr, "Tbl D", 240, 106, 56, 24, on_turntable_d);
+    /* ── Row 4: Turntable  (y=106, h=24)  4 × 72 px + 3 × 4 px = 300 px ── */
+    make_btn(scr, "Tbl Home", 0,   106, 72, 24, on_turntable_home);
+    make_btn(scr, "Intake",   76,  106, 72, 24, on_turntable_intake);
+    make_btn(scr, "Trash",    152, 106, 72, 24, on_turntable_trash);
+    make_btn(scr, "Eject",    228, 106, 72, 24, on_turntable_eject);
 
-    /* ── Row 5: Hot Wire  (y=134, h=24) ──────────────────────────────────── */
-    make_btn(scr, "Wire ON", 0, 134, 148, 24, on_hotwire_on);
+    /* ── Row 5: Hot Wire  (y=134, h=24)  2 × 148 px + 4 px = 300 px ─────── */
+    make_btn(scr, "Wire ON",  0,   134, 148, 24, on_hotwire_on);
     make_btn(scr, "Wire OFF", 152, 134, 148, 24, on_hotwire_off);
 
-    /* ── Row 6: Vacuum  (y=162, h=24)  4 × 72 px + 3 × 4 px = 300 px ────── */
-    make_btn(scr, "Vac ON", 0, 162, 72, 24, on_vacuum_on);
-    make_btn(scr, "Vac OFF", 76, 162, 72, 24, on_vacuum_off);
-    make_btn(scr, "Vac2 ON", 152, 162, 72, 24, on_vacuum2_on);
-    make_btn(scr, "Vac2 OFF", 228, 162, 72, 24, on_vacuum2_off);
+    /* ── Row 6: Vacuum + Agitator  (y=162, h=24)  6 × 46 px + 5 × 4 px = 296 px ── */
+    make_btn(scr, "Vac ON",    0,   162, 46, 24, on_vacuum_on);
+    make_btn(scr, "Vac OFF",   50,  162, 46, 24, on_vacuum_off);
+    make_btn(scr, "Vac2 ON",   100, 162, 46, 24, on_vacuum2_on);
+    make_btn(scr, "Vac2 OFF",  150, 162, 46, 24, on_vacuum2_off);
+    make_btn(scr, "Agitate",   200, 162, 46, 24, on_agitate);
+    make_btn(scr, "Agit Home", 250, 162, 46, 24, on_agitate_home);
 
     /* ── Status labels  (y=188, y=204) ───────────────────────────────────── */
     s_ops_lbl_status = lv_label_create(scr);
@@ -736,11 +950,16 @@ static void on_dose_start(lv_event_t *e)
 static void on_dose_abort(lv_event_t *e)
 {
     (void)e;
-    /* Close flaps to stop material flow immediately; the Pico's spawn timer
-     * will exhaust its agitation retries and send SPAWN_STATUS_BAG_EMPTY. */
-    esp_err_t err = motor_flap_close();
-    set_status(err == ESP_OK ? "Aborting\xe2\x80\xa6" : "Abort FAILED");
-    ESP_LOGI(TAG, "Dose abort (%s)", esp_err_to_name(err));
+    /* Send MSG_CTRL_STOP so the Pico aborts the spawn state machine,
+     * stops the timer, stops flaps, and fast-closes — see uart_server.c
+     * MSG_CTRL_STOP handler. */
+    uint8_t nack = 0;
+    esp_err_t err = pico_link_send_rpc(MSG_CTRL_STOP, NULL, 0,
+                                       2000, /* 2 s timeout */
+                                       &nack);
+    set_status(err == ESP_OK ? "Aborted" : "Abort FAILED");
+    ESP_LOGI(TAG, "Dose abort via MSG_CTRL_STOP (%s nack=%u)",
+             esp_err_to_name(err), nack);
 }
 
 /* ── Dosing screen — spawn-status async update ───────────────────────────── */
@@ -847,6 +1066,9 @@ void ui_show_dosing(void)
 {
     lv_obj_t *scr = LVGL_ACTIVE_SCREEN();
     lv_obj_clean(scr);
+
+    /* Stop Scale screen auto-refresh timer if active */
+    scale_timer_stop();
 
     /* Nullify all async-update handles so stale pointer writes can't crash. */
     s_ops_lbl_status = NULL;

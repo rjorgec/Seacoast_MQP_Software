@@ -3,6 +3,8 @@
 #include "proto/proto.h"
 
 void ui_show_home(void);
+void ui_show_auto(void);
+void ui_show_scale(void);
 void ui_show_dosing(void);
 void ui_show_operations(void);
 void ui_status_set(const char *s);

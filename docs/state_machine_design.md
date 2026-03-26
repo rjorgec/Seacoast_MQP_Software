@@ -70,10 +70,12 @@ Existing IDs (0x01, 0x10–0x11, 0x20–0x21, 0x28–0x29, 0x30–0x33, 0x80–0
 | 0x41 | `MSG_FLAPS_CLOSE`           | ESP → Pico   | _(none, len=0)_             | Close both flaps — drive DRV8263 flap instance REVERSE with current-high auto-stop at mechanical stop |
 | 0x42 | `MSG_ARM_MOVE`             | ESP → Pico   | `pl_arm_move_t`             | Move arm stepper (DRV8434S dev 0) to named absolute position |
 | 0x43 | `MSG_RACK_MOVE`            | ESP → Pico   | `pl_rack_move_t`            | Move rack stepper (DRV8434S dev 1) to named absolute position; HOME also zeros position counter |
-| 0x44 | `MSG_TURNTABLE_GOTO`       | ESP → Pico   | `pl_turntable_goto_t`       | Move turntable stepper (DRV8434S dev 2) to named absolute angular position |
-| 0x45 | `MSG_TURNTABLE_HOME`       | ESP → Pico   | _(none, len=0)_             | Drive turntable to physical endstop via stall detection; zero position counter |
+| 0x44 | `MSG_TURNTABLE_GOTO`       | ESP → Pico   | `pl_turntable_goto_t`       | Move turntable stepper (DRV8434S dev 2) to named position: INTAKE / TRASH / EJECT |
+| 0x45 | `MSG_TURNTABLE_HOME`       | ESP → Pico   | _(none, len=0)_             | Drive turntable to INTAKE hard endstop via stall detection; zero position counter |
 | 0x46 | `MSG_HOTWIRE_SET`          | ESP → Pico   | `pl_hotwire_set_t`          | Enable or disable hot-wire PWM (DRV8263 hotwire instance, constant current mode) |
 | 0x47 | `MSG_VACUUM_SET`           | ESP → Pico   | `pl_vacuum_set_t`           | Assert or de-assert vacuum pump trigger GPIO |
+| 0x4D | `MSG_ARM_HOME`             | ESP → Pico   | _(none, len=0)_             | Sensorlessly home the arm against its positive hard stop, then back off |
+| 0x4E | `MSG_AGITATE`              | ESP → Pico   | _(none, len=0)_             | Trigger a single agitation cycle on the agitator eccentric arm (DRV8434S dev 3) |
 
 ### 1.2 Unsolicited Status Messages (Pico → ESP32)
 
@@ -96,7 +98,7 @@ All structs are C99-compatible, `__attribute__((packed))`, and use only fixed-wi
 /* Subsystem IDs used in pl_motion_done_t */
 typedef enum __attribute__((packed))
 {
-    SUBSYS_FLAP       = 0,
+    SUBSYS_FLAPS      = 0,
     SUBSYS_ARM        = 1,
     SUBSYS_RACK       = 2,
     SUBSYS_TURNTABLE  = 3,
@@ -106,10 +108,10 @@ typedef enum __attribute__((packed))
 typedef enum __attribute__((packed))
 {
     MOTION_OK             = 0,   /* Completed normally (reached target steps) */
-    MOTION_CURRENT_STOP   = 1,   /* Auto-stopped by current threshold (flap endpoint) */
-    MOTION_STALL          = 2,   /* Stepper stall detected before target */
-    MOTION_TIMEOUT        = 3,   /* Wall-clock timeout elapsed */
-    MOTION_FAULT          = 4,   /* Driver fault pin asserted */
+    MOTION_STALLED        = 1,   /* Stepper stall detected before target */
+    MOTION_TIMEOUT        = 2,   /* Wall-clock timeout elapsed */
+    MOTION_FAULT          = 3,   /* Driver fault pin asserted */
+    MOTION_SPI_FAULT      = 4,   /* SPI communication failure (not a physical stall) */
 } motion_result_t;
 
 /* Arm absolute position identifiers */
@@ -118,6 +120,7 @@ typedef enum __attribute__((packed))
     ARM_POS_PRESS = 0,
     ARM_POS_1     = 1,
     ARM_POS_2     = 2,
+    ARM_POS_HOME  = 3,   /* Move to released-home position (step 0 after homing) */
 } arm_pos_t;
 
 /* Rack absolute position identifiers */
@@ -128,13 +131,15 @@ typedef enum __attribute__((packed))
     RACK_POS_PRESS  = 2,
 } rack_pos_t;
 
-/* Turntable absolute position identifiers */
+/* Turntable absolute position identifiers
+ * INTAKE (0) is also the physical hard endstop reached by MSG_TURNTABLE_HOME.
+ * TRASH and EJECT are measured in steps from that endstop.
+ */
 typedef enum __attribute__((packed))
 {
-    TURNTABLE_POS_A = 0,
-    TURNTABLE_POS_B = 1,
-    TURNTABLE_POS_C = 2,
-    TURNTABLE_POS_D = 3,
+    TURNTABLE_POS_INTAKE = 0,   /* Bag-intake / home position (hard endstop) */
+    TURNTABLE_POS_TRASH  = 1,   /* Waste-disposal position */
+    TURNTABLE_POS_EJECT  = 2,   /* Bag-eject / output position */
 } turntable_pos_t;
 
 /* Vacuum operational status */
@@ -149,6 +154,9 @@ typedef enum __attribute__((packed))
 /*
  * MSG_ARM_MOVE (0x42)  ESP→Pico   1 byte
  * Move arm stepper (DRV8434S dev 0) to a named absolute position.
+ * ARM_POS_HOME (3) moves the arm back to the released-home step position (s_arm_pos_steps = 0)
+ * established by the last successful MSG_ARM_HOME.  Requires a prior home; NACKs if
+ * REHOME_REQUIRED.
  */
 typedef struct __attribute__((packed))
 {
@@ -213,7 +221,7 @@ typedef struct __attribute__((packed))
     uint8_t  subsystem;   /* subsystem_id_t */
     uint8_t  result;      /* motion_result_t */
     uint8_t  _rsvd[2];   /* padding — must be 0x00 0x00 */
-    int32_t  steps_done;  /* actual steps completed (meaningless for SUBSYS_FLAP) */
+    int32_t  steps_done;  /* actual steps completed (meaningless for SUBSYS_FLAPS) */
 } pl_motion_done_t;
 ```
 
@@ -264,16 +272,16 @@ static int32_t s_turntable_pos_steps;  /* DRV8434S dev 2 */
 |--------------|------------------------------------------------|------------|-------------|
 | `IDLE`       | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Start DRV8263 FWD at full speed; start timeout timer; ACK |
 | `IDLE`       | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Start DRV8263 REV; start timeout timer; ACK |
-| `OPENING`    | Monitoring auto-stop fires: current drops      | `OPEN`     | Send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_CURRENT_STOP)` |
-| `OPENING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
+| `OPENING`    | Monitoring auto-stop fires: current drops      | `OPEN`     | Send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_CURRENT_STOP)` |
+| `OPENING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_TIMEOUT)` |
 | `OPENING`    | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Restart DRV8263 REV; reset timer; ACK |
 | `OPEN`       | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Start DRV8263 REV; start timer; ACK |
-| `OPEN`       | `MSG_FLAPS_OPEN` received                       | `OPEN`     | Already open — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
-| `CLOSING`    | Monitoring auto-stop fires: current high       | `CLOSED`   | Send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_CURRENT_STOP)` |
-| `CLOSING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_TIMEOUT)` |
+| `OPEN`       | `MSG_FLAPS_OPEN` received                       | `OPEN`     | Already open — send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_OK)`; ACK |
+| `CLOSING`    | Monitoring auto-stop fires: current high       | `CLOSED`   | Send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_CURRENT_STOP)` |
+| `CLOSING`    | `FLAP_TIMEOUT_MS` elapsed                      | `FAULT`    | Stop DRV8263; send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_TIMEOUT)` |
 | `CLOSING`    | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Restart DRV8263 FWD; reset timer; ACK |
 | `CLOSED`     | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Start DRV8263 FWD; start timer; ACK |
-| `CLOSED`     | `MSG_FLAPS_CLOSE` received                      | `CLOSED`   | Already closed — send `MSG_MOTION_DONE(SUBSYS_FLAP, MOTION_OK)`; ACK |
+| `CLOSED`     | `MSG_FLAPS_CLOSE` received                      | `CLOSED`   | Already closed — send `MSG_MOTION_DONE(SUBSYS_FLAPS, MOTION_OK)`; ACK |
 | `FAULT`      | `MSG_FLAPS_OPEN` received                       | `OPENING`  | Clear fault; start DRV8263 FWD; ACK |
 | `FAULT`      | `MSG_FLAPS_CLOSE` received                      | `CLOSING`  | Clear fault; start DRV8263 REV; ACK |
 
@@ -315,26 +323,26 @@ stateDiagram-v2
 ### 3.2 Arm Stepper State Machine
 
 **Hardware:** DRV8434S device index 0, daisy-chain on SPI0.  
-**Trigger message:** `MSG_ARM_MOVE` (0x42).  
-**Position tracking:** `s_arm_pos_steps` — Pico computes delta from current to target and calls `drv8434s_motion_start()`.
+**Trigger messages:** `MSG_ARM_MOVE` (0x42), `MSG_ARM_HOME` (0x4D).  
+**Position tracking:** `s_arm_pos_steps` — Pico computes delta from current to target and starts a DRV8434S motion job. Boot still initializes `s_arm_pos_steps = 0` for backward compatibility, but the trusted physical reference is established only by `MSG_ARM_HOME`. Named arm positions are measured from the physical home hard-stop reached by homing.
 
 #### State Transition Table
 
-| From State   | Event / Condition                              | To State   | Side Effect |
-|--------------|------------------------------------------------|------------|-------------|
-| `IDLE`       | `MSG_ARM_MOVE(ARM_POS_PRESS)` received         | `MOVING`   | Compute delta to `ARM_STEPS_PRESS`; start step job; ACK |
-| `IDLE`       | `MSG_ARM_MOVE(ARM_POS_1)` received             | `MOVING`   | Compute delta to `ARM_STEPS_POS1`; start step job; ACK |
-| `IDLE`       | `MSG_ARM_MOVE(ARM_POS_2)` received             | `MOVING`   | Compute delta to `ARM_STEPS_POS2`; start step job; ACK |
-| `AT_PRESS`   | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Same as IDLE transitions above |
-| `AT_POS1`    | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Same as IDLE transitions above |
-| `AT_POS2`    | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Same as IDLE transitions above |
-| `FAULT`      | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Clear fault flag; start step job; ACK |
-| `MOVING`     | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_PRESS` / `AT_POS1` / `AT_POS2` | Update `s_arm_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, steps)` |
-| `MOVING`     | `drv8434s_motion_done` cb: stall detected      | `FAULT`    | Send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_STALL, steps)` |
-| `MOVING`     | `ARM_MOVE_TIMEOUT_MS` elapsed                  | `FAULT`    | Cancel motion; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_TIMEOUT, steps)` |
-| `MOVING`     | `MSG_ARM_MOVE(any)` received                   | `MOVING`   | Cancel current job; start new job; ACK |
+| From State | Event / Condition | To State | Side Effect |
+|------------|-------------------|----------|-------------|
+| `IDLE` / `AT_PRESS` / `AT_POS1` / `AT_POS2` / `AT_HOME_RELEASED` | `MSG_ARM_MOVE(PRESS/POS1/POS2)` received | `MOVING` | Compute delta to `ARM_STEPS_*`; start step job; ACK |
+| `IDLE` / `AT_PRESS` / `AT_POS1` / `AT_POS2` / `AT_HOME_RELEASED` | `MSG_ARM_MOVE(ARM_POS_HOME)` received | `MOVING` | Compute delta to step position 0 (released-home); start step job; ACK |
+| `IDLE` / `AT_PRESS` / `AT_POS1` / `AT_POS2` / `AT_HOME_RELEASED` / `REHOME_REQUIRED` | `MSG_ARM_HOME` received | `HOMING_SEEK` | Require idle DRV8434S motion engine; start positive seek using `ARM_HOME_*` constants; ACK |
+| `MOVING` | Step job complete (target was PRESS/POS1/POS2) | `AT_PRESS` / `AT_POS1` / `AT_POS2` | Update `s_arm_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, steps)` |
+| `MOVING` | Step job complete (target was ARM_POS_HOME) | `AT_HOME_RELEASED` | Update `s_arm_pos_steps = 0`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, steps)` |
+| `MOVING` | Unexpected stall / timeout / driver fault / SPI fault | `REHOME_REQUIRED` | Update tracked steps, send terminal `MSG_MOTION_DONE`, set `s_arm_rehome_required = true` |
+| `REHOME_REQUIRED` | `MSG_ARM_MOVE(any)` received | `REHOME_REQUIRED` | NACK until `MSG_ARM_HOME` succeeds |
+| `HOMING_SEEK` | Torque stop before search distance consumed | `HOMING_BACKOFF` | Treat stop as home hard-stop; set `s_arm_pos_steps = 0`; start relative backoff by `-ARM_HOME_BACKOFF_STEPS` |
+| `HOMING_SEEK` | Search completes without torque stop | `REHOME_REQUIRED` | Send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_TIMEOUT, s_arm_pos_steps)` |
+| `HOMING_SEEK` / `HOMING_BACKOFF` | Timeout / driver fault / SPI fault | `REHOME_REQUIRED` | Send terminal `MSG_MOTION_DONE`; leave arm requiring re-home |
+| `HOMING_BACKOFF` | Backoff completes | `AT_HOME_RELEASED` | Update `s_arm_pos_steps += steps_achieved`; send `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, -ARM_HOME_BACKOFF_STEPS)` |
 
-> **Torque / stall confirmation for press:** When moving to `ARM_POS_PRESS`, stall detection is enabled with a torque threshold. A stall event here means successful engagement — treat as `MOTION_OK` if achieved within `ARM_PRESS_STALL_WINDOW_STEPS` of the target, otherwise `MOTION_STALL`.
+`MSG_ARM_HOME` is explicit/manual only. Homing is exclusive across the DRV8434S chain: if any other motion job is active, the Pico NACKs the request. While homing is active, other stepper starts are also rejected.
 
 #### Arm State Diagram
 
@@ -342,23 +350,33 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> IDLE
 
-    IDLE --> MOVING : MSG_ARM_MOVE received
+    IDLE --> MOVING : MSG_ARM_MOVE (any)
+    IDLE --> HOMING_SEEK : MSG_ARM_HOME
 
-    AT_PRESS --> MOVING : MSG_ARM_MOVE received
-    AT_POS1  --> MOVING : MSG_ARM_MOVE received
-    AT_POS2  --> MOVING : MSG_ARM_MOVE received
-    FAULT    --> MOVING : MSG_ARM_MOVE received - fault cleared
+    AT_PRESS --> MOVING : MSG_ARM_MOVE
+    AT_POS1 --> MOVING : MSG_ARM_MOVE
+    AT_POS2 --> MOVING : MSG_ARM_MOVE
+    AT_PRESS --> HOMING_SEEK : MSG_ARM_HOME
+    AT_POS1 --> HOMING_SEEK : MSG_ARM_HOME
+    AT_POS2 --> HOMING_SEEK : MSG_ARM_HOME
 
-    MOVING --> AT_PRESS : step job complete - target was PRESS
-    MOVING --> AT_POS1  : step job complete - target was POS1
-    MOVING --> AT_POS2  : step job complete - target was POS2
-    MOVING --> FAULT    : stall before target OR timeout
-    MOVING --> MOVING   : new MSG_ARM_MOVE - job restarted
+    AT_HOME_RELEASED --> MOVING : MSG_ARM_MOVE (PRESS/POS1/POS2)
+    AT_HOME_RELEASED --> MOVING : MSG_ARM_MOVE HOME - move to step 0
+    AT_HOME_RELEASED --> HOMING_SEEK : MSG_ARM_HOME
 
-    AT_PRESS --> [*] : MSG_MOTION_DONE sent
-    AT_POS1  --> [*] : MSG_MOTION_DONE sent
-    AT_POS2  --> [*] : MSG_MOTION_DONE sent
-    FAULT    --> [*] : MSG_MOTION_DONE sent
+    MOVING --> AT_PRESS : move complete - target PRESS
+    MOVING --> AT_POS1 : move complete - target POS1
+    MOVING --> AT_POS2 : move complete - target POS2
+    MOVING --> AT_HOME_RELEASED : move complete - target HOME
+    MOVING --> REHOME_REQUIRED : stall / timeout / fault / SPI fault
+
+    REHOME_REQUIRED --> HOMING_SEEK : MSG_ARM_HOME
+    REHOME_REQUIRED --> REHOME_REQUIRED : MSG_ARM_MOVE NACK
+
+    HOMING_SEEK --> HOMING_BACKOFF : torque stop at hard-stop
+    HOMING_SEEK --> REHOME_REQUIRED : no stop / timeout / fault
+    HOMING_BACKOFF --> AT_HOME_RELEASED : backoff complete - step 0
+    HOMING_BACKOFF --> REHOME_REQUIRED : timeout / fault
 ```
 
 ---
@@ -368,7 +386,7 @@ stateDiagram-v2
 **Hardware:** DRV8434S device index 1, daisy-chain on SPI0.  
 **Trigger message:** `MSG_RACK_MOVE` (0x43).  
 **Position tracking:** `s_rack_pos_steps` — zeroed when `RACK_POS_HOME` completes.  
-**Homing:** Drive in the home direction until stall is detected; the stall is the physical endstop.
+**Homing:** Triggered by `MSG_RACK_MOVE(RACK_POS_HOME)`. Drives the rack toward the physical endstop at reduced speed until stall detection fires; the stall position is treated as the zero reference and `s_rack_pos_steps` is cleared. This is analogous to `MSG_ARM_HOME` for the rotary arm, except the rack has no separate home command — homing is simply one of the named positions. Unlike the arm, there is no backoff after the home stall: the rack sits against its endstop at step 0.
 
 #### State Transition Table
 
@@ -384,7 +402,7 @@ stateDiagram-v2
 | `HOMING`     | Stall detected at endstop                      | `AT_HOME`   | Set `s_rack_pos_steps = 0`; send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_OK, 0)` |
 | `HOMING`     | `RACK_HOME_TIMEOUT_MS` elapsed, no stall       | `FAULT`     | Stop; send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_TIMEOUT, steps)` |
 | `MOVING`     | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_EXTEND` / `AT_PRESS` | Update `s_rack_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_OK, steps)` |
-| `MOVING`     | Stall detected unexpectedly                    | `FAULT`     | Send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_STALL, steps)` |
+| `MOVING`     | Stall detected unexpectedly                    | `FAULT`     | Send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_STALLED, steps)` |
 | `MOVING`     | `RACK_MOVE_TIMEOUT_MS` elapsed                 | `FAULT`     | Send `MSG_MOTION_DONE(SUBSYS_RACK, MOTION_TIMEOUT, steps)` |
 
 #### Rack State Diagram
@@ -427,25 +445,26 @@ stateDiagram-v2
 **Position tracking:** `s_turntable_pos_steps` — zeroed after homing.  
 **Boot requirement:** The turntable **must** receive `MSG_TURNTABLE_HOME` before any `MSG_TURNTABLE_GOTO` is valid. Commands received in `UNCALIBRATED` state are NACKed.
 
+**Named positions:** INTAKE (0 — the physical hard endstop, same as the home position), TRASH, EJECT. Because the home endstop coincides with INTAKE, `MSG_TURNTABLE_HOME` effectively positions the turntable at INTAKE. No 4th position is needed.
+
 #### State Transition Table
 
-| From State       | Event / Condition                              | To State        | Side Effect |
-|------------------|------------------------------------------------|-----------------|-------------|
-| `UNCALIBRATED`   | `MSG_TURNTABLE_HOME` received                  | `HOMING`        | Drive to physical endstop (stall); ACK |
-| `UNCALIBRATED`   | `MSG_TURNTABLE_GOTO` received                  | `UNCALIBRATED`  | NACK — not yet homed |
-| `HOMING`         | Stall detected at endstop                      | `AT_A`          | Set `s_turntable_pos_steps = 0`; send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_OK, 0)` |
-| `HOMING`         | `TURNTABLE_HOME_TIMEOUT_MS` elapsed            | `FAULT`         | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_TIMEOUT, steps)` |
-| `AT_A`           | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`        | Delta to target; ACK |
-| `AT_B`           | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`        | Delta to target; ACK |
-| `AT_C`           | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`        | Delta to target; ACK |
-| `AT_D`           | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`        | Delta to target; ACK |
-| `AT_x`           | `MSG_TURNTABLE_HOME` received                  | `HOMING`        | Re-home; ACK |
-| `FAULT`          | `MSG_TURNTABLE_HOME` received                  | `HOMING`        | Clear fault; re-home; ACK |
-| `FAULT`          | `MSG_TURNTABLE_GOTO` received                  | `FAULT`         | NACK — re-home required |
-| `MOVING`         | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_A/B/C/D`    | Update `s_turntable_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_OK, steps)` |
-| `MOVING`         | Stall detected                                 | `FAULT`         | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_STALL, steps)` |
-| `MOVING`         | `TURNTABLE_MOVE_TIMEOUT_MS` elapsed            | `FAULT`         | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_TIMEOUT, steps)` |
-| `MOVING`         | `MSG_TURNTABLE_HOME` received                  | `HOMING`        | Cancel job; re-home; ACK |
+| From State       | Event / Condition                              | To State           | Side Effect |
+|------------------|------------------------------------------------|--------------------|-------------|
+| `UNCALIBRATED`   | `MSG_TURNTABLE_HOME` received                  | `HOMING`           | Drive to INTAKE hard endstop (stall); ACK |
+| `UNCALIBRATED`   | `MSG_TURNTABLE_GOTO` received                  | `UNCALIBRATED`     | NACK — not yet homed |
+| `HOMING`         | Stall detected at INTAKE endstop               | `AT_INTAKE`        | Set `s_turntable_pos_steps = 0`; send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_OK, 0)` |
+| `HOMING`         | `TURNTABLE_HOME_TIMEOUT_MS` elapsed            | `FAULT`            | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_TIMEOUT, steps)` |
+| `AT_INTAKE`      | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`           | Delta to target; ACK |
+| `AT_TRASH`       | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`           | Delta to target; ACK |
+| `AT_EJECT`       | `MSG_TURNTABLE_GOTO(POS_x)` received           | `MOVING`           | Delta to target; ACK |
+| `AT_x`           | `MSG_TURNTABLE_HOME` received                  | `HOMING`           | Re-home to INTAKE endstop; ACK |
+| `FAULT`          | `MSG_TURNTABLE_HOME` received                  | `HOMING`           | Clear fault; re-home; ACK |
+| `FAULT`          | `MSG_TURNTABLE_GOTO` received                  | `FAULT`            | NACK — re-home required |
+| `MOVING`         | `drv8434s_motion_done` cb: `reason=COMPLETE`   | `AT_INTAKE/TRASH/EJECT` | Update `s_turntable_pos_steps`; send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_OK, steps)` |
+| `MOVING`         | Stall detected                                 | `FAULT`            | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_STALLED, steps)` |
+| `MOVING`         | `TURNTABLE_MOVE_TIMEOUT_MS` elapsed            | `FAULT`            | Send `MSG_MOTION_DONE(SUBSYS_TURNTABLE, MOTION_TIMEOUT, steps)` |
+| `MOVING`         | `MSG_TURNTABLE_HOME` received                  | `HOMING`           | Cancel job; re-home; ACK |
 
 #### Turntable State Diagram
 
@@ -455,35 +474,30 @@ stateDiagram-v2
 
     UNCALIBRATED --> HOMING : MSG_TURNTABLE_HOME
 
-    HOMING --> AT_A  : stall at endstop - zero counter
-    HOMING --> FAULT : home timeout
+    HOMING --> AT_INTAKE : stall at INTAKE endstop - zero counter
+    HOMING --> FAULT     : home timeout
 
-    AT_A --> MOVING : MSG_TURNTABLE_GOTO B or C or D
-    AT_A --> HOMING : MSG_TURNTABLE_HOME
+    AT_INTAKE --> MOVING : MSG_TURNTABLE_GOTO TRASH or EJECT
+    AT_INTAKE --> HOMING : MSG_TURNTABLE_HOME
 
-    AT_B --> MOVING : MSG_TURNTABLE_GOTO A or C or D
-    AT_B --> HOMING : MSG_TURNTABLE_HOME
+    AT_TRASH --> MOVING : MSG_TURNTABLE_GOTO INTAKE or EJECT
+    AT_TRASH --> HOMING : MSG_TURNTABLE_HOME
 
-    AT_C --> MOVING : MSG_TURNTABLE_GOTO A or B or D
-    AT_C --> HOMING : MSG_TURNTABLE_HOME
+    AT_EJECT --> MOVING : MSG_TURNTABLE_GOTO INTAKE or TRASH
+    AT_EJECT --> HOMING : MSG_TURNTABLE_HOME
 
-    AT_D --> MOVING : MSG_TURNTABLE_GOTO A or B or C
-    AT_D --> HOMING : MSG_TURNTABLE_HOME
-
-    MOVING --> AT_A : step job complete - target A
-    MOVING --> AT_B : step job complete - target B
-    MOVING --> AT_C : step job complete - target C
-    MOVING --> AT_D : step job complete - target D
-    MOVING --> FAULT : stall OR timeout
-    MOVING --> HOMING : MSG_TURNTABLE_HOME - job cancelled
+    MOVING --> AT_INTAKE : step job complete - target INTAKE
+    MOVING --> AT_TRASH  : step job complete - target TRASH
+    MOVING --> AT_EJECT  : step job complete - target EJECT
+    MOVING --> FAULT     : stall OR timeout
+    MOVING --> HOMING    : MSG_TURNTABLE_HOME - job cancelled
 
     FAULT --> HOMING : MSG_TURNTABLE_HOME - fault cleared
 
-    AT_A --> [*]  : MSG_MOTION_DONE sent
-    AT_B --> [*]  : MSG_MOTION_DONE sent
-    AT_C --> [*]  : MSG_MOTION_DONE sent
-    AT_D --> [*]  : MSG_MOTION_DONE sent
-    FAULT --> [*] : MSG_MOTION_DONE sent
+    AT_INTAKE --> [*] : MSG_MOTION_DONE sent
+    AT_TRASH  --> [*] : MSG_MOTION_DONE sent
+    AT_EJECT  --> [*] : MSG_MOTION_DONE sent
+    FAULT     --> [*] : MSG_MOTION_DONE sent
 ```
 
 ---
@@ -531,6 +545,11 @@ stateDiagram-v2
 **Hardware:** Trigger GPIO GP10 (output), RPM sense GPIO GP11 (input, rising-edge interrupt).  
 **Trigger messages:** `MSG_VACUUM_SET` (0x47), `MSG_VACUUM_STATUS` sent unsolicited Pico→ESP.  
 **RPM Monitoring:** Active only while pump is `ON`. Sends `MSG_VACUUM_STATUS` on any transition between `ON_OK` and `ON_BLOCKED`, and every 5 s while running.
+
+> **RPM sense behaviour notes:**
+> - **Loaded (suction cup attached and sealed):** The pump motor runs under increased load, causing the measured RPM to be slightly lower than the free-running speed. This is normal and does not indicate a blocked condition unless RPM drops below `VACUUM_RPM_BLOCKED_THRESHOLD`.
+> - **Suction loss / disconnect transient:** If the suction cup suddenly loses contact or detaches, the mechanical load on the pump drops abruptly. This causes a strong **positive RPM transient** (a brief spike well above normal operating speed) as the motor accelerates under no load before settling. The firmware does not filter this transient, so the reported RPM may briefly read much higher than normal immediately after a disconnection event. Do not interpret a high-RPM reading alone as confirmation that the cup is properly attached — use the subsequent steady-state RPM to assess sealing.
+> - **`VACUUM_RPM_BLOCKED_THRESHOLD`** should be calibrated below the loaded operating RPM but above any false-low caused by measurement jitter. Typical loaded RPM is slightly lower than the free-run RPM printed on the pump datasheet.
 
 > **No `MSG_MOTION_DONE` is sent** for the vacuum pump.
 
@@ -599,28 +618,63 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 
 // ── Arm stepper (DRV8434S device 0) ──────────────────────────────────────────
 
-// Steps from arm home (fully retracted) to press position against attachment.
+// Steps from the physical arm home hard-stop reached by MSG_ARM_HOME to the
+// press position. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS,
+// so working positions are often zero or negative after calibration.
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS          4000
+#define ARM_STEPS_PRESS          -3500
 #endif
 
 // Steps from arm home to intermediate position 1.
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1           1000
+#define ARM_STEPS_POS1           -500
 #endif
 
 // Steps from arm home to intermediate position 2.
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2           2500
+#define ARM_STEPS_POS2           -100
 #endif
 
-// Stall detection window for press engagement confirmation.
-// If stall fires within this many steps of ARM_STEPS_PRESS, it is OK.
-#ifndef ARM_PRESS_STALL_WINDOW_STEPS
-#define ARM_PRESS_STALL_WINDOW_STEPS  200
+// ARM_POS_HOME target: the released-home step position after a successful homing
+// sequence (i.e. step 0 = ARM_HOME_BACKOFF_STEPS away from the hard stop).
+// This constant is always 0 — it is listed here for clarity only.
+#ifndef ARM_STEPS_HOME
+#define ARM_STEPS_HOME           0
 #endif
 
-// Maximum time allowed for any arm move before FAULT.
+// Maximum positive-direction search distance for sensorless homing.
+#ifndef ARM_HOME_SEARCH_STEPS
+#define ARM_HOME_SEARCH_STEPS    5000
+#endif
+
+// Homing move speed and timeout.
+#ifndef ARM_HOME_STEP_DELAY_US
+#define ARM_HOME_STEP_DELAY_US   2000u
+#endif
+
+#ifndef ARM_HOME_TIMEOUT_MS
+#define ARM_HOME_TIMEOUT_MS      15000
+#endif
+
+// Stall-detection tuning for homing.
+#ifndef ARM_HOME_TORQUE_LIMIT
+#define ARM_HOME_TORQUE_LIMIT    300u
+#endif
+
+#ifndef ARM_HOME_TORQUE_BLANK_STEPS
+#define ARM_HOME_TORQUE_BLANK_STEPS 0u
+#endif
+
+#ifndef ARM_HOME_TORQUE_SAMPLE_DIV
+#define ARM_HOME_TORQUE_SAMPLE_DIV 1u
+#endif
+
+// Fixed release distance after a successful homing stall.
+#ifndef ARM_HOME_BACKOFF_STEPS
+#define ARM_HOME_BACKOFF_STEPS   100
+#endif
+
+// Maximum time allowed for any normal arm move before FAULT / REHOME_REQUIRED.
 #ifndef ARM_MOVE_TIMEOUT_MS
 #define ARM_MOVE_TIMEOUT_MS      10000
 #endif
@@ -649,21 +703,20 @@ Add to [`pico_fw/src/board_pins.h`](pico_fw/src/board_pins.h) in a new section b
 
 // ── Turntable stepper (DRV8434S device 2) ────────────────────────────────────
 
-// Steps from home (endstop / zero) to each named angular position.
-#ifndef TURNTABLE_STEPS_A
-#define TURNTABLE_STEPS_A        0
+// INTAKE (0) is the physical hard endstop reached by MSG_TURNTABLE_HOME.
+// It is therefore always 0 steps from home; no separate constant is needed.
+// TRASH and EJECT are measured in steps from that endstop.
+
+#ifndef TURNTABLE_STEPS_INTAKE
+#define TURNTABLE_STEPS_INTAKE   0       /* home / endstop position */
 #endif
 
-#ifndef TURNTABLE_STEPS_B
-#define TURNTABLE_STEPS_B        1250
+#ifndef TURNTABLE_STEPS_TRASH
+#define TURNTABLE_STEPS_TRASH    1250
 #endif
 
-#ifndef TURNTABLE_STEPS_C
-#define TURNTABLE_STEPS_C        2500
-#endif
-
-#ifndef TURNTABLE_STEPS_D
-#define TURNTABLE_STEPS_D        3750
+#ifndef TURNTABLE_STEPS_EJECT
+#define TURNTABLE_STEPS_EJECT    2500
 #endif
 
 // Maximum time allowed for homing move before FAULT.
@@ -857,17 +910,17 @@ This is a **new screen** replacing `ui_show_stepper()`. It provides direct contr
 ├──────────────────────────────────────────────────────────┤
 │  FLAPS          [ Flap Open ]     [ Flap Close ]         │
 ├──────────────────────────────────────────────────────────┤
-│  ARM            [ Arm Press ] [ Arm Pos 1 ] [ Arm Pos 2 ]│
+│  ARM    [ Arm Home ] [ Arm Press ] [ Arm Pos 1 ] [ Arm Pos 2 ]               │
 ├──────────────────────────────────────────────────────────┤
 │  RACK           [ Rack Home ] [ Rack Extend] [ Rack Press]│
 ├──────────────────────────────────────────────────────────┤
-│  TURNTABLE      [  Pos A  ] [  Pos B  ] [  Pos C  ] [D] │
+│  TURNTABLE  [ Intake ] [ Trash ] [ Eject ]               │
 ├──────────────────────────────────────────────────────────┤
 │  HOT WIRE       [ HotWire ON ]    [ HotWire OFF ]        │
 ├──────────────────────────────────────────────────────────┤
 │  VACUUM         [ Vacuum ON ]     [ Vacuum OFF ]         │
 ├──────────────────────────────────────────────────────────┤
-│  CALIBRATE      [ Turntable Home ]                       │
+│  VAC/AGIT [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]          │
 ├──────────────────────────────────────────────────────────┤
 │  Status: _______________  Vacuum: OK / BLOCKED (XXXX RPM)│
 └──────────────────────────────────────────────────────────┘
@@ -875,26 +928,32 @@ This is a **new screen** replacing `ui_show_stepper()`. It provides direct contr
 
 #### Button Detail Table
 
-| Section     | `lv_btn` Label       | Callback                    | Message Sent                                    |
-|-------------|----------------------|-----------------------------|--------------------------------------------------|
-| FLAPS       | `"Flap Open"`        | `on_flap_open()`            | `motor_flap_open()` → `MSG_FLAPS_OPEN`            |
-| FLAPS       | `"Flap Close"`       | `on_flap_close()`           | `motor_flap_close()` → `MSG_FLAPS_CLOSE`          |
-| ARM         | `"Arm Press"`        | `on_arm_press()`            | `motor_arm_move(ARM_POS_PRESS)` → `MSG_ARM_MOVE` |
-| ARM         | `"Arm Pos 1"`        | `on_arm_pos1()`             | `motor_arm_move(ARM_POS_1)` → `MSG_ARM_MOVE`     |
-| ARM         | `"Arm Pos 2"`        | `on_arm_pos2()`             | `motor_arm_move(ARM_POS_2)` → `MSG_ARM_MOVE`     |
-| RACK        | `"Rack Home"`        | `on_rack_home()`            | `motor_rack_move(RACK_POS_HOME)` → `MSG_RACK_MOVE` |
-| RACK        | `"Rack Extend"`      | `on_rack_extend()`          | `motor_rack_move(RACK_POS_EXTEND)` → `MSG_RACK_MOVE` |
-| RACK        | `"Rack Press"`       | `on_rack_press()`           | `motor_rack_move(RACK_POS_PRESS)` → `MSG_RACK_MOVE` |
-| TURNTABLE   | `"Pos A"`            | `on_turntable_a()`          | `motor_turntable_goto(TURNTABLE_POS_A)` → `MSG_TURNTABLE_GOTO` |
-| TURNTABLE   | `"Pos B"`            | `on_turntable_b()`          | `motor_turntable_goto(TURNTABLE_POS_B)` → `MSG_TURNTABLE_GOTO` |
-| TURNTABLE   | `"Pos C"`            | `on_turntable_c()`          | `motor_turntable_goto(TURNTABLE_POS_C)` → `MSG_TURNTABLE_GOTO` |
-| TURNTABLE   | `"Pos D"`            | `on_turntable_d()`          | `motor_turntable_goto(TURNTABLE_POS_D)` → `MSG_TURNTABLE_GOTO` |
-| HOT WIRE    | `"HotWire ON"`       | `on_hotwire_on()`           | `motor_hotwire_set(true)` → `MSG_HOTWIRE_SET`    |
-| HOT WIRE    | `"HotWire OFF"`      | `on_hotwire_off()`          | `motor_hotwire_set(false)` → `MSG_HOTWIRE_SET`   |
-| VACUUM      | `"Vacuum ON"`        | `on_vacuum_on()`            | `motor_vacuum_set(true)` → `MSG_VACUUM_SET`      |
-| VACUUM      | `"Vacuum OFF"`       | `on_vacuum_off()`           | `motor_vacuum_set(false)` → `MSG_VACUUM_SET`     |
-| CALIBRATE   | `"Turntable Home"`   | `on_turntable_home()`       | `motor_turntable_home()` → `MSG_TURNTABLE_HOME`  |
-| NAV         | `"Home"`             | `on_home()`                 | `ui_show_home()`                                 |
+| Section     | `lv_btn` Label       | Callback                    | Message Sent                                                         |
+|-------------|----------------------|-----------------------------|----------------------------------------------------------------------|
+| FLAPS       | `"Flap Open"`        | `on_flap_open()`            | `motor_flap_open()` → `MSG_FLAPS_OPEN`                               |
+| FLAPS       | `"Flap Close"`       | `on_flap_close()`           | `motor_flap_close()` → `MSG_FLAPS_CLOSE`                             |
+| ARM         | `"Arm Home"`         | `on_arm_home()`             | `motor_arm_home()` → `MSG_ARM_HOME`                                  |
+| ARM         | `"Arm Press"`        | `on_arm_press()`            | `motor_arm_move(ARM_POS_PRESS)` → `MSG_ARM_MOVE`                     |
+| ARM         | `"Arm Pos 1"`        | `on_arm_pos1()`             | `motor_arm_move(ARM_POS_1)` → `MSG_ARM_MOVE`                         |
+| ARM         | `"Arm Pos 2"`        | `on_arm_pos2()`             | `motor_arm_move(ARM_POS_2)` → `MSG_ARM_MOVE`                         |
+| RACK        | `"Rack Home"`        | `on_rack_home()`            | `motor_rack_move(RACK_POS_HOME)` → `MSG_RACK_MOVE`                   |
+| RACK        | `"Rack Extend"`      | `on_rack_extend()`          | `motor_rack_move(RACK_POS_EXTEND)` → `MSG_RACK_MOVE`                 |
+| RACK        | `"Rack Press"`       | `on_rack_press()`           | `motor_rack_move(RACK_POS_PRESS)` → `MSG_RACK_MOVE`                  |
+| TURNTABLE   | `"Intake"`           | `on_turntable_intake()`     | `motor_turntable_goto(TURNTABLE_POS_INTAKE)` → `MSG_TURNTABLE_GOTO`  |
+| TURNTABLE   | `"Trash"`            | `on_turntable_trash()`      | `motor_turntable_goto(TURNTABLE_POS_TRASH)` → `MSG_TURNTABLE_GOTO`   |
+| TURNTABLE   | `"Eject"`            | `on_turntable_eject()`      | `motor_turntable_goto(TURNTABLE_POS_EJECT)` → `MSG_TURNTABLE_GOTO`   |
+| HOT WIRE    | `"HotWire ON"`       | `on_hotwire_on()`           | `motor_hotwire_set(true)` → `MSG_HOTWIRE_SET`                        |
+| HOT WIRE    | `"HotWire OFF"`      | `on_hotwire_off()`          | `motor_hotwire_set(false)` → `MSG_HOTWIRE_SET`                       |
+| VACUUM      | `"Vacuum ON"`        | `on_vacuum_on()`            | `motor_vacuum_set(true)` → `MSG_VACUUM_SET`                          |
+| VACUUM      | `"Vacuum OFF"`       | `on_vacuum_off()`           | `motor_vacuum_set(false)` → `MSG_VACUUM_SET`                         |
+| TURNTABLE   | `"Tbl Home"`         | `on_turntable_home()`       | `motor_turntable_home()` → `MSG_TURNTABLE_HOME`                      |
+| VAC/AGIT    | `"Vac ON"`           | `on_vacuum_on()`            | `motor_vacuum_set(true)` → `MSG_VACUUM_SET`                          |
+| VAC/AGIT    | `"Vac OFF"`          | `on_vacuum_off()`           | `motor_vacuum_set(false)` → `MSG_VACUUM_SET`                         |
+| VAC/AGIT    | `"Vac2 ON"`          | `on_vacuum2_on()`           | `motor_vacuum2_set(true)` → `MSG_VACUUM2_SET`                        |
+| VAC/AGIT    | `"Vac2 OFF"`         | `on_vacuum2_off()`          | `motor_vacuum2_set(false)` → `MSG_VACUUM2_SET`                       |
+| VAC/AGIT    | `"Agitate"`          | `on_agitate()`              | `MSG_AGITATE` (len=0 → `AGITATOR_N_CYCLES` cycles, no homing)       |
+| VAC/AGIT    | `"Agit Home"`        | `on_agitate_home()`         | `MSG_AGITATE` with `pl_agitate_t{AGITATE_FLAG_DO_HOME, n_cycles=0}` → stall-home then `AGITATOR_N_CYCLES` cycles |
+| NAV         | `"Home"`             | `on_home()`                 | `ui_show_home()`                                                     |
 
 #### Status Bar Labels on Operations Screen
 
@@ -938,6 +997,12 @@ esp_err_t motor_flap_close(void);
  */
 esp_err_t motor_arm_move(uint8_t position);
 
+/**
+ * @brief Sensorlessly home the arm against its positive hard stop, then back off.
+ * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE arrives later asynchronously.
+ */
+esp_err_t motor_arm_home(void);
+
 /* ── Rack helpers ─────────────────────────────────────────────────────────── */
 
 /**
@@ -952,7 +1017,7 @@ esp_err_t motor_rack_move(uint8_t position);
 
 /**
  * @brief Move turntable stepper (DRV8434S dev 2) to a named angular position.
- * @param position  turntable_pos_t: TURNTABLE_POS_A..D = 0..3
+ * @param position  turntable_pos_t: TURNTABLE_POS_INTAKE=0, TURNTABLE_POS_TRASH=1, TURNTABLE_POS_EJECT=2
  * Requires prior MSG_TURNTABLE_HOME to calibrate; returns NACK if uncalibrated.
  * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE arrives later asynchronously.
  */
@@ -982,6 +1047,38 @@ esp_err_t motor_hotwire_set(bool enable);
  * Returns ESP_OK when Pico ACKs immediately (steady-state, no MSG_MOTION_DONE).
  */
 esp_err_t motor_vacuum_set(bool enable);
+
+/* ── Agitator helpers ─────────────────────────────────────────────────────── */
+
+/**
+ * @brief Trigger a standalone agitation cycle on the agitator eccentric arm
+ *        (DRV8434S dev 3, STEPPER_DEV_AGITATOR).
+ *
+ * Sends MSG_AGITATE with len=0 → Pico uses all defaults from board_pins.h:
+ *   - AGITATOR_N_CYCLES forward+reverse strokes
+ *   - No homing before cycling
+ *
+ * NOTE: Agitation is intended as a standalone maintenance / pre-dose action.
+ *       It is no longer automatically triggered inside the dosing state machine
+ *       (SPAWN_MAX_RETRIES / SPAWN_AGITATE_MS); invoke this helper manually
+ *       from the Operations screen or from a pre-sequence setup step instead.
+ *
+ * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE(SUBSYS_AGITATOR) arrives later.
+ */
+esp_err_t motor_agitate(void);
+
+/**
+ * @brief Home the agitator via sensorless stall-detect, then run the default
+ *        agitation cycle count.
+ *
+ * Sends MSG_AGITATE with pl_agitate_t{flags=AGITATE_FLAG_DO_HOME, n_cycles=0}.
+ * The Pico drives the agitator toward AGITATOR_HOME_SEARCH_STEPS until stall
+ * (AGITATOR_HOME_TORQUE_LIMIT), backs off AGITATOR_HOME_BACKOFF_STEPS, then
+ * performs AGITATOR_N_CYCLES forward+reverse strokes.
+ *
+ * Returns ESP_OK when Pico ACKs. MSG_MOTION_DONE(SUBSYS_AGITATOR) arrives later.
+ */
+esp_err_t motor_agitate_home(void);
 ```
 
 ### 7.1 Direct `pico_link_send` Wrappers (non-RPC fire-and-forget)
@@ -1051,18 +1148,21 @@ case MSG_MOTION_DONE:
 
 | `subsystem_id` | `result`            | Status label text |
 |----------------|---------------------|-------------------|
-| `SUBSYS_FLAP`  | `MOTION_CURRENT_STOP` | `"Flaps: done"` |
-| `SUBSYS_FLAP`  | `MOTION_OK`         | `"Flaps: done (no-op)"` |
-| `SUBSYS_FLAP`  | `MOTION_TIMEOUT`    | `"Flaps: TIMEOUT"` |
+| `SUBSYS_FLAPS` | `MOTION_CURRENT_STOP` | `"Flaps: done"` |
+| `SUBSYS_FLAPS` | `MOTION_OK`         | `"Flaps: done (no-op)"` |
+| `SUBSYS_FLAPS` | `MOTION_TIMEOUT`    | `"Flaps: TIMEOUT"` |
 | `SUBSYS_ARM`   | `MOTION_OK`         | `"Arm: at position"` |
-| `SUBSYS_ARM`   | `MOTION_STALL`      | `"Arm: STALL"` |
+| `SUBSYS_ARM`   | `MOTION_STALLED`    | `"Arm: STALLED"` |
 | `SUBSYS_ARM`   | `MOTION_TIMEOUT`    | `"Arm: TIMEOUT"` |
+| `SUBSYS_ARM`   | `MOTION_SPI_FAULT`  | `"Arm: SPI FAULT"` |
 | `SUBSYS_RACK`  | `MOTION_OK`         | `"Rack: at position"` |
-| `SUBSYS_RACK`  | `MOTION_STALL`      | `"Rack: STALL"` |
+| `SUBSYS_RACK`  | `MOTION_STALLED`    | `"Rack: STALLED"` |
 | `SUBSYS_RACK`  | `MOTION_TIMEOUT`    | `"Rack: TIMEOUT"` |
+| `SUBSYS_RACK`  | `MOTION_SPI_FAULT`  | `"Rack: SPI FAULT"` |
 | `SUBSYS_TURNTABLE` | `MOTION_OK`     | `"Turntable: at position"` |
-| `SUBSYS_TURNTABLE` | `MOTION_STALL`  | `"Turntable: STALL"` |
+| `SUBSYS_TURNTABLE` | `MOTION_STALLED`| `"Turntable: STALLED"` |
 | `SUBSYS_TURNTABLE` | `MOTION_TIMEOUT`| `"Turntable: TIMEOUT"` |
+| `SUBSYS_TURNTABLE` | `MOTION_SPI_FAULT`| `"Turntable: SPI FAULT"` |
 | any            | `MOTION_FAULT`      | `"DRIVER FAULT"` |
 
 ### 8.3 Sequence Number Policy
@@ -1225,6 +1325,10 @@ case MSG_ARM_MOVE:
     handle_arm_move(hdr.seq, payload, hdr.len);
     break;
 
+case MSG_ARM_HOME:
+    handle_arm_home(hdr.seq);
+    break;
+
 case MSG_RACK_MOVE:
     handle_rack_move(hdr.seq, payload, hdr.len);
     break;
@@ -1271,14 +1375,16 @@ static hotwire_sm_state_t   s_hotwire_sm;
 
 1. Verify `MSG_PING` round-trip still works after adding new message IDs to `msg_type_t`.  
 2. Implement and test `MSG_FLAPS_OPEN` / `MSG_FLAPS_CLOSE` (simplest — no position tracking).  
-3. Implement `MSG_TURNTABLE_HOME`, verify stall detection zeros counter.  
-4. Implement `MSG_TURNTABLE_GOTO` A→B→C→D with hardcoded step counts.  
-5. Implement `MSG_RACK_MOVE` HOME (homing), then EXTEND/PRESS.  
-6. Implement `MSG_ARM_MOVE` PRESS (with stall confirmation), then POS1/POS2.  
-7. Implement `MSG_HOTWIRE_SET` — verify constant-current PWM, check Rsense voltage.  
-8. Implement `MSG_VACUUM_SET` + RPM IRQ, verify `MSG_VACUUM_STATUS` telemetry.  
-9. Integrate Operations screen in ESP32 UI, verify all buttons.  
-10. End-to-end calibration of all `board_pins.h` position constants.
+3. Implement `MSG_TURNTABLE_HOME`, verify stall detection zeros counter and reports `AT_INTAKE`.  
+4. Implement `MSG_TURNTABLE_GOTO` INTAKE→TRASH→EJECT with hardcoded step counts.  
+5. Implement `MSG_RACK_MOVE` HOME (stall homing, zeros counter), then EXTEND/PRESS.  
+6. Implement `MSG_ARM_HOME`, verify positive-direction seek, torque-stop, and fixed backoff to step 0.  
+7. Implement `MSG_ARM_MOVE` PRESS, then POS1/POS2, then ARM_POS_HOME (return to step 0).  
+8. Implement `MSG_HOTWIRE_SET` — verify constant-current PWM, check Rsense voltage.  
+9. Implement `MSG_VACUUM_SET` + RPM IRQ, verify `MSG_VACUUM_STATUS` telemetry; note loaded vs. free-run RPM difference and disconnect transient.  
+10. Implement `MSG_AGITATE`, verify one agitation cycle and `MSG_MOTION_DONE` response.  
+11. Integrate Operations screen in ESP32 UI, verify all buttons including `Arm Home`, renamed turntable buttons (Intake/Trash/Eject), `Agitate`, and `Agit Home`.  
+12. End-to-end calibration of all `board_pins.h` position constants.
 
 ---
 

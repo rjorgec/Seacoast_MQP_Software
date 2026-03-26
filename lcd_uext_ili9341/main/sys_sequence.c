@@ -99,11 +99,19 @@ static void safe_stop_all(void)
  */
 static bool wait_motion_done(uint8_t expected_subsys, uint32_t timeout_ms)
 {
+    /* DIAG: confirm task is about to block — abort queued before this will be
+     * silently ignored until the wait returns or times out. */
+    ESP_LOGD(TAG, "wait_motion_done: BLOCKING up to %u ms for subsys=%u (state=%s)",
+             (unsigned)timeout_ms, (unsigned)expected_subsys,
+             sys_sequence_state_name(s_state));
+
     EventBits_t bits = xEventGroupWaitBits(s_events,
                                            EVT_MOTION_DONE,
                                            pdTRUE, /* clear on exit */
                                            pdFALSE,
                                            pdMS_TO_TICKS(timeout_ms));
+
+    ESP_LOGD(TAG, "wait_motion_done: unblocked, bits=0x%lx", (unsigned long)bits);
 
     if (!(bits & EVT_MOTION_DONE))
     {
@@ -247,7 +255,7 @@ static void seq_task(void *arg)
             else if (cmd == SYS_CMD_ABORT && s_state != SYS_IDLE)
             {
                 safe_stop_all();
-                set_state(SYS_ERROR);
+                set_state(SYS_IDLE);
             }
         }
 
@@ -261,7 +269,7 @@ static void seq_task(void *arg)
             if (c == SYS_CMD_SETUP_LOAD)
             {
                 set_state(SYS_SETUP_LOAD);
-                /* Open flaps, open arms, rotate platform to trash, tare */
+                /* Open flaps, open arms, rotate platform to intake for homing, tare */
                 ESP_LOGI(TAG, "setup: open flaps");
                 (void)motor_flap_open();
                 ESP_LOGI(TAG, "setup: arm to pos1 (open)");
@@ -269,7 +277,7 @@ static void seq_task(void *arg)
                 ESP_LOGI(TAG, "setup: rack home (open lin)");
                 (void)motor_rack_move(RACK_POS_HOME);
                 ESP_LOGI(TAG, "setup: turntable home");
-                (void)motor_turntable_home();
+                (void)motor_turntable_home(); // TODO: create function for moving turntable to hardstop and zeroing position counter on Pico
                 wait_motion_done(0xFFu, SEQ_MOTION_TIMEOUT_MS);
                 ESP_LOGI(TAG, "setup: tare scale via pico_link");
                 /* Note: HX711 tare sent via existing MSG_HX711_TARE RPC */
@@ -280,7 +288,10 @@ static void seq_task(void *arg)
                 if (s2 == SYS_CMD_START)
                     set_state(SYS_CUTTING_TIP);
                 else
+                {
+                    safe_stop_all();
                     set_state(SYS_IDLE);
+                }
             }
             break;
         }
@@ -314,8 +325,8 @@ static void seq_task(void *arg)
         /* ── ROTATING TO ACCEPT ─────────────────────────────────────── */
         case SYS_ROTATING_TO_ACCEPT:
         {
-            ESP_LOGI(TAG, "rotate: turntable to accept (POS_B)");
-            (void)motor_turntable_goto(TURNTABLE_POS_B);
+            ESP_LOGI(TAG, "rotate: turntable to intake position");
+            (void)motor_turntable_goto(TURNTABLE_POS_INTAKE);
             if (!wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS))
             {
                 set_state(SYS_ERROR);
@@ -436,7 +447,7 @@ static void seq_task(void *arg)
         case SYS_EJECTING:
         {
             ESP_LOGI(TAG, "eject: turn platform to eject, release vacuum");
-            (void)motor_turntable_goto(TURNTABLE_POS_C); /* eject position */
+            (void)motor_turntable_goto(TURNTABLE_POS_EJECT); /* eject position */
             wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS);
 
             /* Release vacuum cups */
@@ -464,7 +475,7 @@ static void seq_task(void *arg)
         case SYS_ROTATING_TO_INTAKE:
         {
             ESP_LOGI(TAG, "rotate: platform back to accept");
-            (void)motor_turntable_goto(TURNTABLE_POS_B);
+            (void)motor_turntable_goto(TURNTABLE_POS_INTAKE);
             wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS);
 
             /* Re-open indexer for next bag */
@@ -490,7 +501,7 @@ static void seq_task(void *arg)
             ESP_LOGI(TAG, "continue: close arms, rotate to trash, open flaps");
             (void)motor_rack_move(RACK_POS_HOME);
             (void)motor_arm_move(ARM_POS_PRESS);
-            (void)motor_turntable_goto(TURNTABLE_POS_A); /* trash */
+            (void)motor_turntable_goto(TURNTABLE_POS_TRASH); /* trash */
             wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS);
 
             (void)motor_flap_open();

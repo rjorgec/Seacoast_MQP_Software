@@ -82,19 +82,51 @@ esp_err_t motor_linact_stop(void)
     return motor_linact_stop_monitor();
 }
 
-// Stepper not supported yet
+// Soft torque limit for stepper motion (0 = disabled).
+// This value is sent over UART to the Pico and used by the motion engine
+// to stop a move when torque drops below the threshold.
+#ifndef STEPPER_SOFT_TORQUE_LIMIT
+#define STEPPER_SOFT_TORQUE_LIMIT PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT
+#endif
+
 esp_err_t motor_stepper_enable(bool en)
 {
-    (void)en;
-    return ESP_ERR_NOT_SUPPORTED;
+    pl_stepper_enable_t payload = {.enable = en ? 1u : 0u};
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_STEPPER_ENABLE,
+                                       &payload,
+                                       (uint16_t)sizeof(payload),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "stepper enable rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
 }
 
 esp_err_t motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_delay_us)
 {
-    (void)dir;
-    (void)steps;
-    (void)step_delay_us;
-    return ESP_ERR_NOT_SUPPORTED;
+    pl_stepper_stepjob_t payload = {
+        .dir = (uint8_t)dir,
+        .steps = steps,
+        .step_delay_us = step_delay_us,
+        .torque_limit = (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
+    };
+
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_MOTOR_STEPPER_STEPJOB,
+                                       &payload,
+                                       (uint16_t)sizeof(payload),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "stepper step rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -147,6 +179,22 @@ esp_err_t motor_arm_move(uint8_t pos)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "arm_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_arm_home(void)
+{
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_ARM_HOME,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "arm_home rpc failed (%s), nack=%u",
                  esp_err_to_name(err), (unsigned)nack_code);
     }
     return err;
@@ -283,6 +331,49 @@ esp_err_t motor_indexer_move(uint8_t position)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "indexer_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_agitate(void)
+{
+    /* MSG_AGITATE (0x4E) — zero-length payload; Pico uses all defaults from
+     * board_pins.h: AGITATOR_N_CYCLES forward+reverse strokes, no homing.
+     * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent asynchronously when done. */
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "agitate rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_agitate_home(void)
+{
+    /* MSG_AGITATE with AGITATE_FLAG_DO_HOME: sensorlessly home the agitator
+     * (stall-detect to mechanical endstop, then backoff only), and stop
+     * in place (do not run knead cycles).
+     * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent asynchronously when done. */
+    pl_agitate_t pl = {
+        .flags    = AGITATE_FLAG_DO_HOME,
+        .n_cycles = 0u, /* 0 = use AGITATOR_N_CYCLES from firmware */
+    };
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "agitate_home rpc failed (%s), nack=%u",
                  esp_err_to_name(err), (unsigned)nack_code);
     }
     return err;
