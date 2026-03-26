@@ -1799,7 +1799,7 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
 
     if (innoc_percent < SPAWN_INNOC_PCT_MIN_X10 || innoc_percent > SPAWN_INNOC_PCT_MAX_X10)
     {
-        send_nack(seq, NACK_BAD_LEN);
+        send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
