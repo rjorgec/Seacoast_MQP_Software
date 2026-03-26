@@ -142,8 +142,15 @@ extern "C"
         uint16_t bag_mass;      // mass of bag being innoculated
         uint16_t spawn_mass;    // mass of spawn remaining
         uint16_t innoc_percent; // spawn percentage of bag weight (x10)
+        uint8_t dose_style;     // dose_style_t
         uint8_t bag_number;     // how many bags have been innoculated from the same spawn
     } pl_innoculate_bag_t;
+
+    typedef enum
+    {
+        DOSE_STYLE_A = 0,
+        DOSE_STYLE_B = 1,
+    } dose_style_t;
 
     typedef enum
     {

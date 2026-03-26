@@ -827,7 +827,7 @@ The existing LVGL screen set is modified as follows. All screens use the same `l
 ```
 Home Screen
 ├── Operations Screen   ← replaces "Stepper Test" screen
-├── Dosing Screen       (unchanged)
+├── Dosing Screen       (A/B style selector added)
 └── (Recipes — future)
 ```
 
@@ -872,6 +872,20 @@ This is a **new screen** replacing `ui_show_stepper()`. It provides direct contr
 │  Status: _______________  Vacuum: OK / BLOCKED (XXXX RPM)│
 └──────────────────────────────────────────────────────────┘
 ```
+
+### 6.4 Dosing Screen (`ui_show_dosing()`)
+
+The dosing screen includes:
+
+- Inoculation percentage controls (`-` / `+`) with a bounded range of **1.0% to 50.0%** (x10 storage in payload).
+- Dose style buttons (`A` and `B`) that set `dose_style` in `MSG_DISPENSE_SPAWN`.
+
+`MSG_DISPENSE_SPAWN` payload now carries `dose_style` (`DOSE_STYLE_A=0`, `DOSE_STYLE_B=1`) and should be validated defensively on the Pico side:
+
+- Accept both the current payload size (8 bytes) and legacy payload size (7 bytes).
+- Default legacy payloads to `DOSE_STYLE_A`.
+- Clamp/validate `dose_style` to known enum values.
+- Reject out-of-range inoculation percentages.
 
 #### Button Detail Table
 

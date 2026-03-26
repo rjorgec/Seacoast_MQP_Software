@@ -188,6 +188,8 @@ static spawn_dose_ctx_t s_spawn;
  *   in between                            → linear interpolation */
 #define SPAWN_PROP_UPPER 2u  /* 50 % of target remaining */
 #define SPAWN_PROP_LOWER 10u /* 10 % of target remaining */
+#define SPAWN_INNOC_PCT_MIN_X10 10u
+#define SPAWN_INNOC_PCT_MAX_X10 500u
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /*  Frame transmit helpers                                                     */
@@ -1749,7 +1751,16 @@ static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t le
  */
 static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
-    if (len < (uint16_t)sizeof(pl_innoculate_bag_t))
+    typedef struct __attribute__((packed))
+    {
+        uint16_t bag_mass;
+        uint16_t spawn_mass;
+        uint16_t innoc_percent;
+        uint8_t bag_number;
+    } pl_innoculate_bag_legacy_t;
+
+    if (len != (uint16_t)sizeof(pl_innoculate_bag_t) &&
+        len != (uint16_t)sizeof(pl_innoculate_bag_legacy_t))
     {
         send_nack(seq, NACK_BAD_LEN);
         return;
@@ -1769,6 +1780,28 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     const pl_innoculate_bag_t *pl = (const pl_innoculate_bag_t *)payload;
+    uint16_t innoc_percent = 0u;
+    uint8_t dose_style = DOSE_STYLE_A;
+    uint8_t bag_number = 0u;
+
+    if (len == (uint16_t)sizeof(pl_innoculate_bag_legacy_t))
+    {
+        const pl_innoculate_bag_legacy_t *legacy = (const pl_innoculate_bag_legacy_t *)payload;
+        innoc_percent = legacy->innoc_percent;
+        bag_number = legacy->bag_number;
+    }
+    else
+    {
+        innoc_percent = pl->innoc_percent;
+        bag_number = pl->bag_number;
+        dose_style = (pl->dose_style == DOSE_STYLE_B) ? DOSE_STYLE_B : DOSE_STYLE_A;
+    }
+
+    if (innoc_percent < SPAWN_INNOC_PCT_MIN_X10 || innoc_percent > SPAWN_INNOC_PCT_MAX_X10)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
 
     /* Drain stale HX711 FIFO samples before taking the baseline.
      * The HX711 runs at 80 SPS continuously; between doses the FIFO/queue
@@ -1808,13 +1841,13 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
     s_spawn.agitating = false;
     s_spawn.retry = 0u;
     s_spawn.max_retries = SPAWN_MAX_RETRIES;
-    s_spawn.bag_number = pl->bag_number;
+    s_spawn.bag_number = bag_number;
     s_spawn.start_mass_ug = (uint32_t)mass.ug;
     double m;
     mass_get_value(&mass, &m);
     printf("Initial mass %f\n", m);
     /* innoc_percent is x10 percent (e.g., 250 = 25.0%) */
-    uint64_t target_ug = ((uint64_t)s_spawn.start_mass_ug * (uint64_t)pl->innoc_percent) / 1000ULL;
+    uint64_t target_ug = ((uint64_t)s_spawn.start_mass_ug * (uint64_t)innoc_percent) / 1000ULL;
     s_spawn.target_ug = (uint32_t)target_ug;
     s_spawn.dispensed_ug = 0u;
     s_spawn.window_start_ug = 0u; /* start of first 500 ms flow window */
@@ -1860,6 +1893,7 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
         return;
     }
 
+    printf("Spawn: dose style %c\n", (dose_style == DOSE_STYLE_B) ? 'B' : 'A');
     send_ack(seq);
     send_spawn_status(SPAWN_STATUS_RUNNING);
 }

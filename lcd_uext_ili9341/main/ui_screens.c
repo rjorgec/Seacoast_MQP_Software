@@ -40,8 +40,10 @@ static lv_obj_t *s_dose_lbl_progress = NULL; /* "X.XX g / Y.YY g" */
 static lv_obj_t *s_dose_lbl_retries = NULL;  /* "Retries: N  Bag: N" */
 static lv_obj_t *s_dose_bar = NULL;          /* progress bar 0..1000 */
 static lv_obj_t *s_dose_lbl_innoc = NULL;    /* inoculation % display */
+static lv_obj_t *s_dose_lbl_style = NULL;    /* dose style display */
 static uint32_t s_dose_target_ug = 0;
 static uint16_t s_dose_innoc_pct = 200; /* x10 → default 20.0 % */
+static uint8_t s_dose_style = DOSE_STYLE_A;
 static uint8_t s_dose_bag_number = 0;
 
 /* ── Status helpers ─────────────────────────────────────────────────────── */
@@ -678,6 +680,14 @@ static void dose_update_innoc_label(void)
     lv_label_set_text(s_dose_lbl_innoc, buf);
 }
 
+static void dose_update_style_label(void)
+{
+    if (!s_dose_lbl_style)
+        return;
+    lv_label_set_text(s_dose_lbl_style,
+                      (s_dose_style == DOSE_STYLE_B) ? "Dose Style: B" : "Dose Style: A");
+}
+
 static void on_innoc_minus(lv_event_t *e)
 {
     (void)e;
@@ -694,6 +704,20 @@ static void on_innoc_plus(lv_event_t *e)
     dose_update_innoc_label();
 }
 
+static void on_dose_style_a(lv_event_t *e)
+{
+    (void)e;
+    s_dose_style = DOSE_STYLE_A;
+    dose_update_style_label();
+}
+
+static void on_dose_style_b(lv_event_t *e)
+{
+    (void)e;
+    s_dose_style = DOSE_STYLE_B;
+    dose_update_style_label();
+}
+
 static void on_dose_start(lv_event_t *e)
 {
     (void)e;
@@ -702,6 +726,7 @@ static void on_dose_start(lv_event_t *e)
         .bag_mass = 0,      /* unused by Pico — scale read internally */
         .spawn_mass = 1000, /* 1 kg remaining (informational) */
         .innoc_percent = s_dose_innoc_pct,
+        .dose_style = s_dose_style,
         .bag_number = s_dose_bag_number,
     };
 
@@ -722,8 +747,8 @@ static void on_dose_start(lv_event_t *e)
     {
         s_dose_bag_number++;
         set_status("Dose running\xe2\x80\xa6");
-        ESP_LOGI(TAG, "MSG_DISPENSE_SPAWN sent (innoc=%u, bag=%u)",
-                 s_dose_innoc_pct, pl.bag_number);
+        ESP_LOGI(TAG, "MSG_DISPENSE_SPAWN sent (innoc=%u, style=%u, bag=%u)",
+                 s_dose_innoc_pct, s_dose_style, pl.bag_number);
     }
     else
     {
@@ -841,7 +866,8 @@ void ui_dosing_on_spawn_status(const pl_spawn_status_t *pl)
  *    y= 68  retries label   "Retries: N   Bag: N"                              *
  *    y= 88  progress bar    300 × 18                                           *
  *    y=115  innoc label 90×24  [−  55×24]  [+  55×24]                         *
- *    y=152  [Start Dose 145×65]  4  [Abort 145×65]  (to bottom)                *
+ *    y=142  dose style label + [A 40×24] [B 40×24]                             *
+ *    y=170  [Start Dose 145×47]  4  [Abort 145×47]  (to bottom)                *
  * ─────────────────────────────────────────────────────────────────────────── */
 void ui_show_dosing(void)
 {
@@ -856,6 +882,7 @@ void ui_show_dosing(void)
     s_dose_lbl_retries = NULL;
     s_dose_bar = NULL;
     s_dose_lbl_innoc = NULL;
+    s_dose_lbl_style = NULL;
     s_dose_target_ug = 0;
     lbl_weight = NULL;
 
@@ -917,7 +944,17 @@ void ui_show_dosing(void)
     make_btn(scr, " - ", 100, 113, 55, 24, on_innoc_minus);
     make_btn(scr, " + ", 159, 113, 55, 24, on_innoc_plus);
 
-    /* ── Start / Abort row (y=152) ───────────────────────────────────────── */
-    make_btn(scr, "Start Dose", 0, 152, 145, 65, on_dose_start);
-    make_btn(scr, "Abort", 155, 152, 145, 65, on_dose_abort);
+    /* ── Dose style row (y=142): label + A/B buttons ─────────────────────── */
+    s_dose_lbl_style = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_dose_lbl_style,
+                               &lv_font_montserrat_14, 0);
+    lv_obj_align(s_dose_lbl_style, LV_ALIGN_TOP_LEFT, 0, 142);
+    dose_update_style_label();
+
+    make_btn(scr, "A", 150, 140, 40, 24, on_dose_style_a);
+    make_btn(scr, "B", 194, 140, 40, 24, on_dose_style_b);
+
+    /* ── Start / Abort row (y=170) ───────────────────────────────────────── */
+    make_btn(scr, "Start Dose", 0, 170, 145, 47, on_dose_start);
+    make_btn(scr, "Abort", 155, 170, 145, 47, on_dose_abort);
 }
