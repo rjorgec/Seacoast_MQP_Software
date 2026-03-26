@@ -183,16 +183,20 @@
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
 #endif
 #ifndef ARM_PRESS_RETRY_MAX_RETRIES
-#define ARM_PRESS_RETRY_MAX_RETRIES 5u /* extra press attempts if vacuum RPM does not change */
+#define ARM_PRESS_RETRY_MAX_RETRIES                                            \
+  5u /* extra press attempts if vacuum RPM does not change */
 #endif
 #ifndef ARM_PRESS_RETRY_BACKOFF_STEPS
-#define ARM_PRESS_RETRY_BACKOFF_STEPS 150 /* release distance before a retry press */
+#define ARM_PRESS_RETRY_BACKOFF_STEPS                                          \
+  150 /* release distance before a retry press */
 #endif
 #ifndef ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS
-#define ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS 300u /* wait this long for an RPM response after press */
+#define ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS                                      \
+  300u /* wait this long for an RPM response after press */
 #endif
 #ifndef ARM_PRESS_RETRY_RPM_DELTA
-#define ARM_PRESS_RETRY_RPM_DELTA 2000u /* minimum absolute RPM change that counts as a successful press */
+#define ARM_PRESS_RETRY_RPM_DELTA                                              \
+  2000u /* minimum absolute RPM change that counts as a successful press */
 #endif
 #ifndef ARM_MOTION_TIMEOUT_MS
 #define ARM_MOTION_TIMEOUT_MS 5000
@@ -201,13 +205,13 @@
 #define ARM_HOME_SEARCH_STEPS 5000
 #endif
 #ifndef ARM_HOME_STEP_DELAY_US
-#define ARM_HOME_STEP_DELAY_US 4000u //arm speed for home
+#define ARM_HOME_STEP_DELAY_US 4000u // arm speed for home
 #endif
 #ifndef ARM_HOME_TIMEOUT_MS
 #define ARM_HOME_TIMEOUT_MS 15000
 #endif
 #ifndef ARM_HOME_TORQUE_LIMIT
-#define ARM_HOME_TORQUE_LIMIT 120u  //
+#define ARM_HOME_TORQUE_LIMIT 120u //
 #endif
 #ifndef ARM_HOME_TORQUE_BLANK_STEPS
 #define ARM_HOME_TORQUE_BLANK_STEPS 100u
@@ -230,18 +234,15 @@
 #define RACK_MOTION_TIMEOUT_MS 5000
 #endif
 
-/* Turntable stepper (device 2) */
-#ifndef TURNTABLE_STEPS_A
-#define TURNTABLE_STEPS_A 0
+/* Turntable stepper (device 2) — INTAKE is the hard endstop (= 0) */
+#ifndef TURNTABLE_STEPS_INTAKE
+#define TURNTABLE_STEPS_INTAKE 0
 #endif
-#ifndef TURNTABLE_STEPS_B
-#define TURNTABLE_STEPS_B 500
+#ifndef TURNTABLE_STEPS_TRASH
+#define TURNTABLE_STEPS_TRASH 500
 #endif
-#ifndef TURNTABLE_STEPS_C
-#define TURNTABLE_STEPS_C 1000
-#endif
-#ifndef TURNTABLE_STEPS_D
-#define TURNTABLE_STEPS_D 1500
+#ifndef TURNTABLE_STEPS_EJECT
+#define TURNTABLE_STEPS_EJECT 1000
 #endif
 #ifndef TURNTABLE_MOTION_TIMEOUT_MS
 #define TURNTABLE_MOTION_TIMEOUT_MS 8000
@@ -466,8 +467,9 @@
 #define SPAWN_NUDGE_OPEN_MS 300u /* ms to nudge flap open per control tick */
 #endif
 #ifndef SPAWN_NUDGE_CLOSE_MS
-#define SPAWN_NUDGE_CLOSE_MS 200u /* ms to nudge flap closed per control tick  \
-                                   */
+#define SPAWN_NUDGE_CLOSE_MS                                                   \
+  200u /* ms to nudge flap closed per control tick                             \
+        */
 #endif
 #ifndef SPAWN_MAX_OPEN_NUDGES
 #define SPAWN_MAX_OPEN_NUDGES                                                  \
@@ -475,7 +477,8 @@
 #endif
 #ifndef SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS
 #define SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS                                    \
-  350u /* minimum time before allowing an immediate nudge direction reversal */
+  350u /* minimum time before allowing an immediate nudge direction reversal   \
+        */
 #endif
 
 /* ── Proportional gain thresholds ──────────────────────────────────── */
@@ -539,8 +542,9 @@
   1000000u /* undershoot tolerance for top-off (µg = 1 g) */
 #endif
 #ifndef SPAWN_TOPOFF_PULSE_MS
-#define SPAWN_TOPOFF_PULSE_MS 80u /* duration of each top-off open nudge (ms)  \
-                                   */
+#define SPAWN_TOPOFF_PULSE_MS                                                  \
+  80u /* duration of each top-off open nudge (ms)                              \
+       */
 #endif
 #ifndef SPAWN_TOPOFF_MAX_PULSES
 #define SPAWN_TOPOFF_MAX_PULSES                                                \
@@ -578,10 +582,42 @@
   5 /* max agitation attempts before SPAWN_STATUS_BAG_EMPTY */
 #endif
 #ifndef AGITATOR_KNEAD_STEPS
-#define AGITATOR_KNEAD_STEPS 200 /* steps per agitation knead cycle */
+#define AGITATOR_KNEAD_STEPS 400 /* steps per forward (or reverse) stroke */
+#endif
+#ifndef AGITATOR_N_CYCLES
+#define AGITATOR_N_CYCLES                                                      \
+  3u /* number of full forward+reverse cycles per agitation */
 #endif
 #ifndef AGITATOR_STEP_DELAY_US
-#define AGITATOR_STEP_DELAY_US 2000u /* µs per step (adjust for torque) */
+#define AGITATOR_STEP_DELAY_US                                                 \
+  2000u /* µs per step (tune for torque vs speed) */
+#endif
+/* Timeout per agitation cycle set (N_CYCLES × 2 strokes × KNEAD_STEPS ×
+ * STEP_DELAY + margin) */
+#ifndef AGITATOR_MOTION_TIMEOUT_MS
+#define AGITATOR_MOTION_TIMEOUT_MS                                             \
+  ((uint32_t)AGITATOR_N_CYCLES * 2u * (uint32_t)AGITATOR_KNEAD_STEPS *         \
+       ((uint32_t)AGITATOR_STEP_DELAY_US / 1000u) +                            \
+   2000u)
+#endif
+
+/* ── Agitator homing (sensorless stall-detect, same pattern as arm home) ── */
+/* Maximum steps toward the mechanical hard-stop during homing search.
+ * Positive = forward; adjust sign to match the physical home direction. */
+#ifndef AGITATOR_HOME_SEARCH_STEPS
+#define AGITATOR_HOME_SEARCH_STEPS -500
+#endif
+/* Stall-torque threshold used during homing.  Lower = more sensitive. */
+#ifndef AGITATOR_HOME_TORQUE_LIMIT
+#define AGITATOR_HOME_TORQUE_LIMIT 200u
+#endif
+/* Steps to release from the hard-stop after a successful home stall. */
+#ifndef AGITATOR_HOME_BACKOFF_STEPS
+#define AGITATOR_HOME_BACKOFF_STEPS 20
+#endif
+/* Maximum time allowed for the homing search before declaring fault. */
+#ifndef AGITATOR_HOME_TIMEOUT_MS
+#define AGITATOR_HOME_TIMEOUT_MS 10000u
 #endif
 
 /* ================================================================== */

@@ -282,6 +282,19 @@ static void on_arm_pos2(lv_event_t *e)
     ESP_LOGI(TAG, "Arm pos2 (%s)", esp_err_to_name(err));
 }
 
+static void on_agitate_home(lv_event_t *e)
+{
+    (void)e;
+    /* Sensorlessly home the agitator (AGITATE_FLAG_DO_HOME, default n_cycles) */
+    pl_agitate_t pl = { .flags = AGITATE_FLAG_DO_HOME, .n_cycles = 0u };
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       &pl, (uint16_t)sizeof(pl),
+                                       300u, &nack_code);
+    set_status(err == ESP_OK ? "Agit: homing..." : "Agit home: FAILED");
+    ESP_LOGI(TAG, "Agitate home (%s nack=%u)", esp_err_to_name(err), nack_code);
+}
+
 static void on_rack_home(lv_event_t *e)
 {
     (void)e;
@@ -314,36 +327,36 @@ static void on_turntable_home(lv_event_t *e)
     ESP_LOGI(TAG, "Turntable home (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_a(lv_event_t *e)
+static void on_turntable_intake(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_A);
-    set_status(err == ESP_OK ? "Tbl: to A..." : "Tbl A: FAILED");
-    ESP_LOGI(TAG, "Turntable A (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_INTAKE);
+    set_status(err == ESP_OK ? "Tbl: to INTAKE..." : "Tbl INTAKE: FAILED");
+    ESP_LOGI(TAG, "Turntable INTAKE (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_b(lv_event_t *e)
+static void on_turntable_trash(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_B);
-    set_status(err == ESP_OK ? "Tbl: to B..." : "Tbl B: FAILED");
-    ESP_LOGI(TAG, "Turntable B (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_TRASH);
+    set_status(err == ESP_OK ? "Tbl: to TRASH..." : "Tbl TRASH: FAILED");
+    ESP_LOGI(TAG, "Turntable TRASH (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_c(lv_event_t *e)
+static void on_turntable_eject(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_C);
-    set_status(err == ESP_OK ? "Tbl: to C..." : "Tbl C: FAILED");
-    ESP_LOGI(TAG, "Turntable C (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_EJECT);
+    set_status(err == ESP_OK ? "Tbl: to EJECT..." : "Tbl EJECT: FAILED");
+    ESP_LOGI(TAG, "Turntable EJECT (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_d(lv_event_t *e)
+static void on_agitate(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_D);
-    set_status(err == ESP_OK ? "Tbl: to D..." : "Tbl D: FAILED");
-    ESP_LOGI(TAG, "Turntable D (%s)", esp_err_to_name(err));
+    esp_err_t err = motor_agitate();
+    set_status(err == ESP_OK ? "Agitating..." : "Agitate: FAILED");
+    ESP_LOGI(TAG, "Agitate (%s)", esp_err_to_name(err));
 }
 
 static void on_hotwire_on(lv_event_t *e)
@@ -774,18 +787,19 @@ void ui_show_home(void)
  *
  *  y=  0  "Operations"  title label (TOP_LEFT)    [Home 60×20, TOP_RIGHT]
  *  y= 22  [Flap Open  148×24]  4  [Flap Close  148×24]
- *  y= 50  [Arm Home  72×24]  4  [Arm Press 72×24]  4  [Arm Pos 1 72×24]  4  [Arm Pos 2 72×24]
- *  y= 78  [Rack Home  96×24]  4  [Rack Ext   96×24]  4  [Rack Press 96×24]
- *  y=106  [TblHome 56×24] 4 [TblA 56×24] 4 [TblB 56×24] 4 [TblC 56×24] 4 [TblD 56×24]
+ *  y= 50  4-btn 72px: [Arm Home][Arm Press][Arm Pos1][Arm Pos2]
+ *  y= 78  [Rack Home  96×24]  4  [Rack Ext 96×24]  4  [Rack Press 96×24]
+ *  y=106  4-btn 72px: [Tbl Home][Intake][Trash][Eject]
  *  y=134  [Wire ON  148×24]  4  [Wire OFF  148×24]
- *  y=162  [Vac ON   148×24]  4  [Vac OFF   148×24]
+ *  y=162  6-btn 46px: [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]
  *  y=188  s_ops_lbl_status  (motion-done text)
  *  y=204  s_ops_lbl_vacuum  (vacuum status text)
  *
  *  Button-row widths:
- *    2-btn: 148+4+148 = 300 px
- *    3-btn: 96+4+96+4+96 = 296 px
- *    5-btn: 56×5 + 4×4 = 296 px   (positions: x = 0, 60, 120, 180, 240)
+ *    2-btn 148px: 148+4+148 = 300 px
+ *    3-btn 96px:  96+4+96+4+96 = 296 px
+ *    4-btn 72px:  72+4+72+4+72+4+72 = 300 px  (x = 0, 76, 152, 228)
+ *    5-btn 56px:  56+4+56+4+56+4+56+4+56 = 296 px  (x = 0, 60, 120, 180, 240)
  */
 void ui_show_operations(void)
 {
@@ -818,33 +832,34 @@ void ui_show_operations(void)
     make_btn(scr, "Flaps Open", 0, 22, 148, 24, on_flap_open);
     make_btn(scr, "Flaps Close", 152, 22, 148, 24, on_flap_close);
 
-    /* ── Row 2: Arm  (y=50, h=24) ────────────────────────────────────────── */
-    make_btn(scr, "Arm Home", 0, 50, 72, 24, on_arm_home);
-    make_btn(scr, "Arm Press", 76, 50, 72, 24, on_arm_press);
+    /* ── Row 2: Arm  (y=50, h=24)  4 × 72 px + 3 × 4 px = 300 px ───────── */
+    make_btn(scr, "Arm Home",  0,   50, 72, 24, on_arm_home);
+    make_btn(scr, "Arm Press", 76,  50, 72, 24, on_arm_press);
     make_btn(scr, "Arm Pos 1", 152, 50, 72, 24, on_arm_pos1);
     make_btn(scr, "Arm Pos 2", 228, 50, 72, 24, on_arm_pos2);
 
-    /* ── Row 3: Rack  (y=78, h=24) ───────────────────────────────────────── */
-    make_btn(scr, "Rack Home", 0, 78, 96, 24, on_rack_home);
+    /* ── Row 3: Rack  (y=78, h=24)  3 × 96 px + 2 × 4 px = 296 px ──────── */
+    make_btn(scr, "Rack Home",   0,   78, 96, 24, on_rack_home);
     make_btn(scr, "Rack Extend", 100, 78, 96, 24, on_rack_extend);
-    make_btn(scr, "Rack Press", 200, 78, 96, 24, on_rack_press);
+    make_btn(scr, "Rack Press",  200, 78, 96, 24, on_rack_press);
 
-    /* ── Row 4: Turntable  (y=106, h=24)  5 × 56 px + 4 × 4 px = 296 px ── */
-    make_btn(scr, "Tbl Home", 0, 106, 56, 24, on_turntable_home);
-    make_btn(scr, "Tbl A", 60, 106, 56, 24, on_turntable_a);
-    make_btn(scr, "Tbl B", 120, 106, 56, 24, on_turntable_b);
-    make_btn(scr, "Tbl C", 180, 106, 56, 24, on_turntable_c);
-    make_btn(scr, "Tbl D", 240, 106, 56, 24, on_turntable_d);
+    /* ── Row 4: Turntable  (y=106, h=24)  4 × 72 px + 3 × 4 px = 300 px ── */
+    make_btn(scr, "Tbl Home", 0,   106, 72, 24, on_turntable_home);
+    make_btn(scr, "Intake",   76,  106, 72, 24, on_turntable_intake);
+    make_btn(scr, "Trash",    152, 106, 72, 24, on_turntable_trash);
+    make_btn(scr, "Eject",    228, 106, 72, 24, on_turntable_eject);
 
-    /* ── Row 5: Hot Wire  (y=134, h=24) ──────────────────────────────────── */
-    make_btn(scr, "Wire ON", 0, 134, 148, 24, on_hotwire_on);
+    /* ── Row 5: Hot Wire  (y=134, h=24)  2 × 148 px + 4 px = 300 px ─────── */
+    make_btn(scr, "Wire ON",  0,   134, 148, 24, on_hotwire_on);
     make_btn(scr, "Wire OFF", 152, 134, 148, 24, on_hotwire_off);
 
-    /* ── Row 6: Vacuum  (y=162, h=24)  4 × 72 px + 3 × 4 px = 300 px ────── */
-    make_btn(scr, "Vac ON", 0, 162, 72, 24, on_vacuum_on);
-    make_btn(scr, "Vac OFF", 76, 162, 72, 24, on_vacuum_off);
-    make_btn(scr, "Vac2 ON", 152, 162, 72, 24, on_vacuum2_on);
-    make_btn(scr, "Vac2 OFF", 228, 162, 72, 24, on_vacuum2_off);
+    /* ── Row 6: Vacuum + Agitator  (y=162, h=24)  6 × 46 px + 5 × 4 px = 296 px ── */
+    make_btn(scr, "Vac ON",    0,   162, 46, 24, on_vacuum_on);
+    make_btn(scr, "Vac OFF",   50,  162, 46, 24, on_vacuum_off);
+    make_btn(scr, "Vac2 ON",   100, 162, 46, 24, on_vacuum2_on);
+    make_btn(scr, "Vac2 OFF",  150, 162, 46, 24, on_vacuum2_off);
+    make_btn(scr, "Agitate",   200, 162, 46, 24, on_agitate);
+    make_btn(scr, "Agit Home", 250, 162, 46, 24, on_agitate_home);
 
     /* ── Status labels  (y=188, y=204) ───────────────────────────────────── */
     s_ops_lbl_status = lv_label_create(scr);

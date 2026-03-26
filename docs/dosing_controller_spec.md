@@ -133,11 +133,16 @@ Override via `-D` compiler flags without editing the file.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `SPAWN_STARTUP_FLOW_DETECT_UG` | 1 000 000 µg | Min per-tick delta to confirm prime flow |
-| `SPAWN_FLOW_NOFLOW_UG` | 500 000 µg | Min µg/window to avoid agitation |
+| `SPAWN_FLOW_NOFLOW_UG` | 500 000 µg | Min µg/window that counts as flowing (below this triggers a no-flow retry) |
 | `SPAWN_FLOW_MIN_UG` | 1 000 000 µg/window | Low-end target flow rate |
 | `SPAWN_FLOW_MAX_UG` | 5 000 000 µg/window | High-end target flow rate |
-| `SPAWN_MAX_RETRIES` | 100 | Agitation retries before bag-empty fault |
-| `SPAWN_AGITATE_MS` | 2 000 ms | Agitation hold-off duration |
+| `SPAWN_MAX_RETRIES` | 100 | No-flow retry count before `SPAWN_STATUS_BAG_EMPTY` fault _(see agitation note below)_ |
+| `SPAWN_AGITATE_MS` | 2 000 ms | Hold-off wait after a no-flow event before re-attempting _(see agitation note below)_ |
+
+> **Agitation in dosing — deprecated behaviour:**  
+> The original design used `SPAWN_MAX_RETRIES` / `SPAWN_AGITATE_MS` to automatically trigger an agitator cycle whenever flow fell below `SPAWN_FLOW_NOFLOW_UG` during a dose. In practice this coupling has proven ineffective: the agitator does not reliably restore flow mid-dose, and the retry loop introduces unnecessary delay and unpredictable dispensing pauses. The agitation parameters are retained in firmware for reference, but **agitation should no longer be relied upon as a flow-recovery mechanism inside the dosing state machine**.  
+>  
+> **Recommended practice:** Run a manual agitation cycle (via `MSG_AGITATE` / the **Agitate** button on the Operations screen) as a dedicated pre-dose preparation step before starting `MSG_DISPENSE_SPAWN`, rather than allowing the dosing SM to trigger it automatically. If the spawn block is known to bridge frequently, schedule periodic agitation between bag cycles at the `sys_sequence.c` level.
 
 ### EMA filtering
 
