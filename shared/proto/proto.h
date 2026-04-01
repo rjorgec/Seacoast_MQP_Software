@@ -147,7 +147,9 @@ typedef struct __attribute__((packed)) {
   uint16_t spawn_mass;    // mass of spawn remaining
   uint16_t innoc_percent; // spawn percentage of bag weight (x10)
   uint8_t bag_number; // how many bags have been innoculated from the same spawn
-  uint8_t flags; // SPAWN_FLAG_* bitmask (finish mode, homing); 0 = Finish A, no pre-home
+  /* SPAWN_FLAG_* bitmask (finish mode, homing).
+   * Default when flags == 0: Finish A, no pre-home. */
+  uint8_t flags;
 } pl_innoculate_bag_t;
 
 /** Minimum payload length for pl_innoculate_bag_t without flags (legacy). */
