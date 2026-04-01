@@ -366,14 +366,14 @@
 // #ifndef STEPPER_DEV_LIN_ARM
 // #define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
 // #endif
-#ifndef STEPPER_DEV_TURNTABLE
-#define STEPPER_DEV_TURNTABLE 1 /* Turntable / platform */
-#endif
+// #ifndef STEPPER_DEV_TURNTABLE
+// #define STEPPER_DEV_TURNTABLE 1 /* Turntable / platform */
+// #endif
 /* Uncomment each entry and bump DRV8434S_N_DEVICES when wired: */
 #ifndef STEPPER_DEV_AGITATOR
 #define STEPPER_DEV_AGITATOR 2 /* Agitator eccentric arm */
 #endif
-// #define STEPPER_DEV_HW_CARRIAGE 4  /* Hot wire carriage traverse */
+#define STEPPER_DEV_HW_CARRIAGE 1 /* Hot wire carriage traverse */
 // #define STEPPER_DEV_INDEXER     5  /* Bag depth/eject rack (indexer) */
 
 /* Default step delay used by the high-level stepper handlers (µs per step). */
