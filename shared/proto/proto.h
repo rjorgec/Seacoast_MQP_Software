@@ -12,8 +12,10 @@ extern "C" {
 
 /* Shared default for DRV8434S soft torque-limit threshold.
  * Both ESP and Pico firmware should source their fallback from this symbol
- * so the UART payload default cannot drift between projects. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u // 300u tripped too easily
+ * so the UART payload default cannot drift between projects.
+ * 100u is calibrated to avoid false stall trips seen with the previous
+ * 300u default during routine moves. */
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u
 
 /*
  * Wire format endianness is little-endian for all multi-byte fields.
@@ -145,7 +147,9 @@ typedef struct __attribute__((packed)) {
   uint16_t spawn_mass;    // mass of spawn remaining
   uint16_t innoc_percent; // spawn percentage of bag weight (x10)
   uint8_t bag_number; // how many bags have been innoculated from the same spawn
-  uint8_t flags; // SPAWN_FLAG_* bitmask (finish mode, homing); 0 = defaults
+  /* SPAWN_FLAG_* bitmask (finish mode, homing).
+   * Default when flags == 0: Finish A, no pre-home. */
+  uint8_t flags;
 } pl_innoculate_bag_t;
 
 /** Minimum payload length for pl_innoculate_bag_t without flags (legacy). */
@@ -296,7 +300,7 @@ typedef enum __attribute__((packed)) {
 
 /** MSG_HOTWIRE_TRAVERSE (0x4B) payload (1 byte) */
 typedef struct __attribute__((packed)) {
-  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return */
+  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return (retrace/home; Pico zeroes position on success) */
 } pl_hotwire_traverse_t;
 
 /** MSG_INDEXER_MOVE (0x4C) payload (1 byte) */

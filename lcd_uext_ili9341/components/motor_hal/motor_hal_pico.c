@@ -304,6 +304,8 @@ esp_err_t motor_vacuum2_set(bool enable)
 
 esp_err_t motor_hotwire_traverse(bool cut)
 {
+    /* Direction 0 = cut traverse; direction 1 = retrace/home.
+     * On successful retrace completion, Pico zeros the traverse position. */
     pl_hotwire_traverse_t pl = {.direction = cut ? 0u : 1u};
     uint8_t nack_code = 0u;
     esp_err_t err = pico_link_send_rpc(MSG_HOTWIRE_TRAVERSE,
