@@ -120,7 +120,8 @@ static bool s_flap2_stopped = false; /* flap2 reached its endpoint and was stopp
 static int32_t s_arm_pos_steps = 0;
 static int32_t s_rack_pos_steps = 0;
 static int32_t s_turntable_pos_steps = 0;
-static int32_t s_hotwire_pos_steps = 0;
+static int32_t s_hotwire_pos_steps = 0; /* traverser relative position; zeroed on successful retrace */
+static bool s_hotwire_zero_on_complete = false;
 static bool s_turntable_homed = false;
 static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
@@ -2010,10 +2011,16 @@ static void stepper_completion_tick(void)
                                               &steps_achieved);
 
             s_hotwire_pos_steps += steps_achieved;
+            if (result == MOTION_OK && s_hotwire_zero_on_complete)
+            {
+                s_hotwire_pos_steps = 0;
+            }
             send_motion_done(SUBSYS_HOTWIRE, result, s_hotwire_pos_steps);
             s_hotwire_pending.pending = false;
-            printf("Hotwire traverse done: result=%u pos=%li\n",
-                   (unsigned)result, (long)s_hotwire_pos_steps);
+            printf("Hotwire traverse done: result=%u pos=%li%s\n",
+                   (unsigned)result, (long)s_hotwire_pos_steps,
+                   (result == MOTION_OK && s_hotwire_zero_on_complete) ? " (retrace zeroed)" : "");
+            s_hotwire_zero_on_complete = false;
         }
     }
 #endif /* STEPPER_DEV_HW_CARRIAGE */
@@ -3399,7 +3406,7 @@ static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t le
  * @brief MSG_HOTWIRE_TRAVERSE (0x4B) — move the hot wire carriage stepper.
  *
  * Direction 0 = cut (traverse forward through spawn bag tip).
- * Direction 1 = return (retract to home position).
+ * Direction 1 = return (retract to home position and zero position on success).
  * Uses DRV8434S STEPPER_DEV_HW_CARRIAGE (device 4 — not wired in current HW).
  * When device 4 is not in the chain, this handler logs and NACKs.
  */
@@ -3432,6 +3439,7 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
     }
 
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
+    bool is_retrace = (p->direction != 0u);
     const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
     const uint32_t us_to_ms_ceiling_divisor_offset = US_PER_MS - 1u;
     int32_t steps = (p->direction == 0u)
@@ -3448,6 +3456,7 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
         drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_HW_CARRIAGE, NULL);
     }
     s_hotwire_pending.pending = false;
+    s_hotwire_zero_on_complete = false;
 
     if (!start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
                            steps,
@@ -3466,6 +3475,7 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
     s_hotwire_pending.start_ms = to_ms_since_boot(get_absolute_time());
     s_hotwire_pending.timeout_ms = timeout_ms;
     s_hotwire_pending.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
+    s_hotwire_zero_on_complete = is_retrace;
 
     printf("Hotwire Traverse: dir=%u steps=%li\n",
            (unsigned)p->direction, (long)steps);
@@ -4300,6 +4310,7 @@ void uart_server_init(void)
     s_rack_pos_steps = 0;
     s_turntable_pos_steps = 0;
     s_hotwire_pos_steps = 0;
+    s_hotwire_zero_on_complete = false;
     /* Turntable requires explicit homing before any GOTO command is valid.
      * MSG_TURNTABLE_HOME must be sent first; GOTO commands in UNCALIBRATED
      * state are NACKed to prevent uncontrolled turntable movement. */

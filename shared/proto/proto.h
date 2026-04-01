@@ -298,7 +298,7 @@ typedef enum __attribute__((packed)) {
 
 /** MSG_HOTWIRE_TRAVERSE (0x4B) payload (1 byte) */
 typedef struct __attribute__((packed)) {
-  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return */
+  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return (retrace/home; Pico zeroes position on success) */
 } pl_hotwire_traverse_t;
 
 /** MSG_INDEXER_MOVE (0x4C) payload (1 byte) */

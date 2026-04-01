@@ -145,7 +145,7 @@ See [`shared/proto/proto.h`](../shared/proto/proto.h) for all message IDs and pa
 | 0x47 | `MSG_VACUUM_SET`        | `pl_vacuum_set_t`        | Vacuum pump 1 ON/OFF                |
 | 0x48 | `MSG_VACUUM2_SET`       | `pl_vacuum2_set_t`       | Vacuum pump 2 ON/OFF (DRV8263 IN2)  |
 | 0x49 | `MSG_DISPENSE_SPAWN`    | `pl_innoculate_bag_t`    | Start Pico-side closed-loop dosing  |
-| 0x4B | `MSG_HOTWIRE_TRAVERSE`  | `pl_hotwire_traverse_t`  | Traverse hot wire carriage stepper  |
+| 0x4B | `MSG_HOTWIRE_TRAVERSE`  | `pl_hotwire_traverse_t`  | Traverse hot wire carriage stepper (0=cut, 1=return/retrace; successful retrace zeros traverse position) |
 | 0x4C | `MSG_INDEXER_MOVE`      | `pl_indexer_move_t`      | Move bag depth/eject rack           |
 | 0x4D | `MSG_ARM_HOME`          | _(none)_                 | Sensorlessly home arm, then back off |
 | 0x4E | `MSG_AGITATE`           | _(none)_                 | Trigger one agitation cycle (agitator eccentric arm) |
@@ -192,7 +192,7 @@ Start Dose | Abort
 ### Operations Screen buttons
 
 Flap Open/Close | Arm Home / Press / Pos1 / Pos2 | Rack Home / Extend / Press |  
-Turntable Home / Intake / Trash / Eject | HotWire ON/OFF | Vacuum ON/OFF/Vac2 ON/OFF | Agitate | Agit Home
+Turntable Home / Intake / Trash / Eject | HotWire ON/OFF/Cut/Rtn+Zero | Vacuum ON/OFF/Vac2 ON/OFF | Agitate | Agit Home
 
 - **Agitate** — `motor_agitate()` → `MSG_AGITATE` (len=0): runs `AGITATOR_N_CYCLES` forward+reverse strokes. Use as a pre-dose preparation step rather than relying on the automatic retry path inside the dosing state machine (see `dosing_controller_spec.md`).
 - **Agit Home** — `motor_agitate_home()` → `MSG_AGITATE` with `AGITATE_FLAG_DO_HOME`: sensorlessly homes the agitator to its mechanical endstop (stall-detect, same pattern as `MSG_ARM_HOME`), backs off, then runs `AGITATOR_N_CYCLES` cycles.
@@ -249,9 +249,10 @@ For the rotary arm, `MSG_ARM_HOME` defines the physical reference: home is the p
 6. `MSG_ARM_HOME` from several starting positions; verify the arm hits the hard stop and backs off to step 0 (`-ARM_HOME_BACKOFF_STEPS`)
 7. `MSG_ARM_MOVE` PRESS, then POS1/POS2, then `ARM_POS_HOME` (return to step 0 without re-homing)
 8. `MSG_HOTWIRE_SET` ON/OFF — verify DRV8263 IN1 output
-9. `MSG_VACUUM_SET` ON/OFF — verify RPM telemetry `MSG_VACUUM_STATUS`; note that loaded RPM (suction cup attached) is slightly below free-run RPM, and cup disconnection produces a brief high-RPM transient
-10. `MSG_AGITATE` — verify one agitation cycle and `MSG_MOTION_DONE` response
-11. Integrate Operations screen; verify all buttons including `Arm Home`, `Arm → Home Pos`, renamed turntable buttons (Intake/Trash/Eject), and `Agitate`
-12. Calibrate all `board_pins.h` position constants
-13. Test `MSG_DISPENSE_SPAWN` end-to-end with `MSG_SPAWN_STATUS`; run agitation manually before each dose rather than relying on in-dosing retry path
-14. Run `sys_sequence.c` Sequence screen through a full bag cycle
+9. `MSG_HOTWIRE_TRAVERSE` CUT then RETRACE — verify return motion and position zeroing on successful retrace
+10. `MSG_VACUUM_SET` ON/OFF — verify RPM telemetry `MSG_VACUUM_STATUS`; note that loaded RPM (suction cup attached) is slightly below free-run RPM, and cup disconnection produces a brief high-RPM transient
+11. `MSG_AGITATE` — verify one agitation cycle and `MSG_MOTION_DONE` response
+12. Integrate Operations screen; verify all buttons including `Arm Home`, `Arm → Home Pos`, renamed turntable buttons (Intake/Trash/Eject), `Cut`, and `Rtn+Zero`
+13. Calibrate all `board_pins.h` position constants
+14. Test `MSG_DISPENSE_SPAWN` end-to-end with `MSG_SPAWN_STATUS`; run agitation manually before each dose rather than relying on in-dosing retry path
+15. Run `sys_sequence.c` Sequence screen through a full bag cycle

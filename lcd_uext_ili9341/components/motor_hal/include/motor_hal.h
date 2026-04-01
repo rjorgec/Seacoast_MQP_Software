@@ -103,6 +103,7 @@ esp_err_t motor_vacuum2_set(bool enable);
 /**
  * @brief Traverse the hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE).
  * @param cut  true = cut direction (forward), false = return direction
+ *             (retrace to home; Pico zeroes traverse position on success)
  * @return ESP_OK if the command was ACK'd, error otherwise.
  *         Returns ESP_ERR_NOT_SUPPORTED if the device is not wired.
  *         MSG_MOTION_DONE is sent asynchronously by the Pico when done.

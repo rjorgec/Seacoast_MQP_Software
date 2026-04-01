@@ -387,8 +387,9 @@ static void on_hotwire_return(lv_event_t *e)
 {
     (void)e;
     esp_err_t err = motor_hotwire_traverse(false);
-    set_status(err == ESP_OK ? "Wire: RETURN..." : "Wire RETURN: FAILED");
-    ESP_LOGI(TAG, "Hotwire return traverse (%s)", esp_err_to_name(err));
+    set_status(err == ESP_OK ? "Wire: RETURN (zeroing)..." : "Wire RETURN: FAILED");
+    ESP_LOGI(TAG, "Hotwire return traverse (%s); Pico zeros position on success",
+             esp_err_to_name(err));
 }
 
 static void on_vacuum_on(lv_event_t *e)
@@ -806,7 +807,7 @@ void ui_show_home(void)
  *  y= 50  4-btn 72px: [Arm Home][Arm Press][Arm Pos1][Arm Pos2]
  *  y= 78  [Rack Home  96×24]  4  [Rack Ext 96×24]  4  [Rack Press 96×24]
  *  y=106  4-btn 72px: [Tbl Home][Intake][Trash][Eject]
- *  y=134  4-btn 72px: [Wire ON][Wire OFF][Cut][Return]
+ *  y=134  4-btn 72px: [Wire ON][Wire OFF][Cut][Rtn+Zero]
  *  y=162  6-btn 46px: [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]
  *  y=188  s_ops_lbl_status  (motion-done text)
  *  y=204  s_ops_lbl_vacuum  (vacuum status text)
@@ -869,7 +870,7 @@ void ui_show_operations(void)
     make_btn(scr, "Wire ON",  0,   134, 72, 24, on_hotwire_on);
     make_btn(scr, "Wire OFF", 76,  134, 72, 24, on_hotwire_off);
     make_btn(scr, "Cut",      152, 134, 72, 24, on_hotwire_cut);
-    make_btn(scr, "Return",   228, 134, 72, 24, on_hotwire_return);
+    make_btn(scr, "Rtn+Zero", 228, 134, 72, 24, on_hotwire_return);
 
     /* ── Row 6: Vacuum + Agitator  (y=162, h=24)  6 × 46 px + 5 × 4 px = 296 px ── */
     make_btn(scr, "Vac ON",    0,   162, 46, 24, on_vacuum_on);
