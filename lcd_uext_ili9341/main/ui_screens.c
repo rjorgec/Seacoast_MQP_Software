@@ -40,9 +40,11 @@ static lv_obj_t *s_dose_lbl_progress = NULL; /* "X.XX g / Y.YY g" */
 static lv_obj_t *s_dose_lbl_retries = NULL;  /* "Retries: N  Bag: N" */
 static lv_obj_t *s_dose_bar = NULL;          /* progress bar 0..1000 */
 static lv_obj_t *s_dose_lbl_innoc = NULL;    /* inoculation % display */
+static lv_obj_t *s_dose_lbl_mode = NULL;     /* finish mode button label */
 static uint32_t s_dose_target_ug = 0;
 static uint16_t s_dose_innoc_pct = 200; /* x10 → default 20.0 % */
 static uint8_t s_dose_bag_number = 0;
+static bool s_dose_finish_mode_b = false; /* false = Mode A, true = Mode B */
 
 /* ── Status helpers ─────────────────────────────────────────────────────── */
 
@@ -693,6 +695,7 @@ void ui_show_scale(void)
     s_dose_lbl_retries = NULL;
     s_dose_bar = NULL;
     s_dose_lbl_innoc = NULL;
+    s_dose_lbl_mode = NULL;
     s_dose_target_ug = 0;
 
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -764,6 +767,7 @@ void ui_show_home(void)
     s_dose_lbl_retries = NULL;
     s_dose_bar = NULL;
     s_dose_lbl_innoc = NULL;
+    s_dose_lbl_mode = NULL;
     s_dose_target_ug = 0;
     lbl_weight = NULL;
 
@@ -892,6 +896,15 @@ static void dose_update_innoc_label(void)
     lv_label_set_text(s_dose_lbl_innoc, buf);
 }
 
+static void dose_update_mode_label(void)
+{
+    if (!s_dose_lbl_mode)
+        return;
+    lv_label_set_text(s_dose_lbl_mode,
+                      s_dose_finish_mode_b ? "Finish: Mode B (slow taper)"
+                                           : "Finish: Mode A (close+topoff)");
+}
+
 static void on_innoc_minus(lv_event_t *e)
 {
     (void)e;
@@ -908,15 +921,25 @@ static void on_innoc_plus(lv_event_t *e)
     dose_update_innoc_label();
 }
 
+static void on_mode_toggle(lv_event_t *e)
+{
+    (void)e;
+    s_dose_finish_mode_b = !s_dose_finish_mode_b;
+    dose_update_mode_label();
+    ESP_LOGI(TAG, "Finish mode → %s", s_dose_finish_mode_b ? "B" : "A");
+}
+
 static void on_dose_start(lv_event_t *e)
 {
     (void)e;
 
+    uint8_t flags = s_dose_finish_mode_b ? (uint8_t)SPAWN_FLAG_FINISH_MODE_B : 0u;
     pl_innoculate_bag_t pl = {
         .bag_mass = 0,      /* unused by Pico — scale read internally */
         .spawn_mass = 1000, /* 1 kg remaining (informational) */
         .innoc_percent = s_dose_innoc_pct,
         .bag_number = s_dose_bag_number,
+        .flags = flags,
     };
 
     if (s_dose_lbl_status)
@@ -936,8 +959,9 @@ static void on_dose_start(lv_event_t *e)
     {
         s_dose_bag_number++;
         set_status("Dose running\xe2\x80\xa6");
-        ESP_LOGI(TAG, "MSG_DISPENSE_SPAWN sent (innoc=%u, bag=%u)",
-                 s_dose_innoc_pct, pl.bag_number);
+        ESP_LOGI(TAG, "MSG_DISPENSE_SPAWN sent (innoc=%u, bag=%u, mode=%c)",
+                 s_dose_innoc_pct, pl.bag_number,
+                 s_dose_finish_mode_b ? 'B' : 'A');
     }
     else
     {
@@ -1060,7 +1084,8 @@ void ui_dosing_on_spawn_status(const pl_spawn_status_t *pl)
  *    y= 68  retries label   "Retries: N   Bag: N"                              *
  *    y= 88  progress bar    300 × 18                                           *
  *    y=115  innoc label 90×24  [−  55×24]  [+  55×24]                         *
- *    y=152  [Start Dose 145×65]  4  [Abort 145×65]  (to bottom)                *
+ *    y=140  [Finish: Mode A (close+topoff) / Mode B (slow taper)  300×30]     *
+ *    y=173  [Start Dose 145×44]  4  [Abort 145×44]  (to bottom)                *
  * ─────────────────────────────────────────────────────────────────────────── */
 void ui_show_dosing(void)
 {
@@ -1078,6 +1103,7 @@ void ui_show_dosing(void)
     s_dose_lbl_retries = NULL;
     s_dose_bar = NULL;
     s_dose_lbl_innoc = NULL;
+    s_dose_lbl_mode = NULL;
     s_dose_target_ug = 0;
     lbl_weight = NULL;
 
@@ -1139,7 +1165,17 @@ void ui_show_dosing(void)
     make_btn(scr, " - ", 100, 113, 55, 24, on_innoc_minus);
     make_btn(scr, " + ", 159, 113, 55, 24, on_innoc_plus);
 
-    /* ── Start / Abort row (y=152) ───────────────────────────────────────── */
-    make_btn(scr, "Start Dose", 0, 152, 145, 65, on_dose_start);
-    make_btn(scr, "Abort", 155, 152, 145, 65, on_dose_abort);
+    /* ── Finish mode toggle (y=140) ──────────────────────────────────────── */
+    lv_obj_t *btn_mode = lv_btn_create(scr);
+    lv_obj_set_size(btn_mode, 300, 30);
+    lv_obj_align(btn_mode, LV_ALIGN_TOP_LEFT, 0, 140);
+    lv_obj_add_event_cb(btn_mode, on_mode_toggle, LV_EVENT_CLICKED, NULL);
+    s_dose_lbl_mode = lv_label_create(btn_mode);
+    lv_obj_set_style_text_font(s_dose_lbl_mode, &lv_font_montserrat_14, 0);
+    lv_obj_center(s_dose_lbl_mode);
+    dose_update_mode_label();
+
+    /* ── Start / Abort row (y=173) ───────────────────────────────────────── */
+    make_btn(scr, "Start Dose", 0, 173, 145, 44, on_dose_start);
+    make_btn(scr, "Abort", 155, 173, 145, 44, on_dose_abort);
 }
