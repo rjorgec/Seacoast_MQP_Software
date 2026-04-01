@@ -35,6 +35,8 @@
 #define UART_DECODED_FRAME_MAX ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 2u)
 #define VACUUM_RPM_TIMEOUT_MS 500u
 #define VACUUM_RPM_DEBOUNCE_US 200u
+#define US_PER_MS 1000u
+#define HOTWIRE_TIMEOUT_GUARD_MS 2000u
 
 /* All tuning #defines are in board_pins.h — see STEPPER_DEFAULT_STEP_DELAY_US,
  * SPAWN_*, AGITATOR_*, HOTWIRE_TRAVERSE_*, INDEXER_* etc. */
@@ -3431,14 +3433,14 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
 
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
     const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
-    /* Guard time to absorb scheduler jitter, motion-engine startup latency,
-     * and minor tuning variance in step timing. */
-    const uint32_t hotwire_timeout_guard_ms = 2000u;
+    const uint32_t us_to_ms_ceiling_adjust = US_PER_MS - 1u;
     int32_t steps = (p->direction == 0u)
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
-    uint32_t timeout_ms = ((((uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us) + 999u) / 1000u) +
-                          hotwire_timeout_guard_ms;
+    /* Add guard to absorb scheduler jitter, motion-engine startup latency,
+     * and minor tuning variance in step timing. */
+    uint32_t timeout_ms = ((((uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us) + us_to_ms_ceiling_adjust) / US_PER_MS) +
+                          HOTWIRE_TIMEOUT_GUARD_MS;
 
     if (s_motion.jobs[STEPPER_DEV_HW_CARRIAGE].active)
     {
