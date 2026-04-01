@@ -3441,12 +3441,12 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
     bool is_retrace = (p->direction != 0u);
     const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
-    const uint32_t us_to_ms_ceiling_divisor_offset = US_PER_MS - 1u;
+    const uint32_t us_to_ms_round_up = US_PER_MS - 1u;
     int32_t steps = (p->direction == 0u)
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
     uint32_t hotwire_motion_us = (uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us;
-    uint32_t hotwire_motion_ms = (hotwire_motion_us + us_to_ms_ceiling_divisor_offset) / US_PER_MS;
+    uint32_t hotwire_motion_ms = (hotwire_motion_us + us_to_ms_round_up) / US_PER_MS;
     /* Add guard to absorb scheduler jitter, motion-engine startup latency,
      * and minor tuning variance in step timing. */
     uint32_t timeout_ms = hotwire_motion_ms + HOTWIRE_TIMEOUT_GUARD_MS;
