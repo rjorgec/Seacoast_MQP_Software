@@ -561,15 +561,41 @@ static void send_spawn_status(spawn_status_code_t status)
 }
 
 /**
+ * @brief Return a short human-readable name for a spawn SM state.
+ */
+static const char *spawn_sm_state_name(spawn_sm_state_t s)
+{
+    switch (s)
+    {
+    case SPAWN_SM_IDLE:             return "IDLE";
+    case SPAWN_SM_HOMING:           return "HOMING";
+    case SPAWN_SM_PRIME:            return "PRIME";
+    case SPAWN_SM_DOSE_MAIN:        return "DOSE_MAIN";
+    case SPAWN_SM_FINISH_A_CLOSE:   return "FINISH_A_CLOSE";
+    case SPAWN_SM_CLOSE_CONFIRM:    return "CLOSE_CONFIRM";
+    case SPAWN_SM_FINISH_A_TOPOFF:  return "FINISH_A_TOPOFF";
+    case SPAWN_SM_FINISH_B_LOWFLOW: return "FINISH_B_LOWFLOW";
+    case SPAWN_SM_FAST_CLOSE:       return "FAST_CLOSE";
+    case SPAWN_SM_DONE:             return "DONE";
+    case SPAWN_SM_FAULT:            return "FAULT";
+    case SPAWN_SM_ABORTED:          return "ABORTED";
+    case SPAWN_SM_AGIT_CLOSING:     return "AGIT_CLOSING";
+    case SPAWN_SM_AGITATING:        return "AGITATING";
+    default:                        return "UNKNOWN";
+    }
+}
+
+/**
  * @brief Transition the spawn dosing SM to a new state and log the transition.
  */
 static void spawn_set_state(spawn_sm_state_t next)
 {
     if (s_spawn.state != next)
     {
+        const char *prev_name = spawn_sm_state_name(s_spawn.state);
         s_spawn.prev_state = s_spawn.state;
         s_spawn.state = next;
-        printf("Spawn SM: %u → %u\n", (unsigned)s_spawn.prev_state, (unsigned)next);
+        printf("Spawn SM: %s → %s\n", prev_name, spawn_sm_state_name(next));
     }
 }
 
@@ -715,8 +741,10 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
                                 ? (s_spawn.target_ug - s_spawn.dispensed_ug)
                                 : 0u;
 
-    printf("Spawn[%u]: mass=%.3fg disp=%luug remain=%luug ema_flow=%luug/tick\n",
-           (unsigned)s_spawn.state, m,
+    printf("Spawn[%s|M%c]: mass=%.3fg disp=%luug remain=%luug ema_flow=%luug/tick\n",
+           spawn_sm_state_name(s_spawn.state),
+           s_spawn.finish_mode == (uint8_t)SPAWN_FINISH_MODE_B ? 'B' : 'A',
+           m,
            (unsigned long)s_spawn.dispensed_ug,
            (unsigned long)remaining_ug,
            (unsigned long)s_spawn.ema_flow_ug);
