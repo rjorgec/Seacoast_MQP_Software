@@ -12,8 +12,10 @@ extern "C" {
 
 /* Shared default for DRV8434S soft torque-limit threshold.
  * Both ESP and Pico firmware should source their fallback from this symbol
- * so the UART payload default cannot drift between projects. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u // 300u tripped too easily
+ * so the UART payload default cannot drift between projects.
+ * 100u is calibrated to avoid false stall trips seen with the previous
+ * 300u default during routine moves. */
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u
 
 /*
  * Wire format endianness is little-endian for all multi-byte fields.
