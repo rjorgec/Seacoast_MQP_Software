@@ -36,7 +36,8 @@
 #define VACUUM_RPM_TIMEOUT_MS 500u
 #define VACUUM_RPM_DEBOUNCE_US 200u
 #define US_PER_MS 1000u
-#define HOTWIRE_TIMEOUT_GUARD_MS 2000u
+
+/* HOTWIRE_TIMEOUT_GUARD_MS is defined in board_pins.h, with a safe default there. */
 
 /* All tuning #defines are in board_pins.h — see STEPPER_DEFAULT_STEP_DELAY_US,
  * SPAWN_*, AGITATOR_*, HOTWIRE_TRAVERSE_*, INDEXER_* etc. */
@@ -117,11 +118,18 @@ static bool s_flap2_stopped = false; /* flap2 reached its endpoint and was stopp
 
 /* ── Stepper absolute position tracking ────────────────────────────────────── */
 
+typedef enum {
+    HOTWIRE_HOME_IDLE = 0,
+    HOTWIRE_HOME_SEEK,
+    HOTWIRE_HOME_BACKOFF,
+} hotwire_homing_phase_t;
+
 static int32_t s_arm_pos_steps = 0;
 static int32_t s_rack_pos_steps = 0;
 static int32_t s_turntable_pos_steps = 0;
 static int32_t s_hotwire_pos_steps = 0; /* traverser relative position; zeroed on successful retrace */
 static bool s_hotwire_zero_on_complete = false;
+static hotwire_homing_phase_t s_hotwire_homing_phase = HOTWIRE_HOME_IDLE;
 static bool s_turntable_homed = false;
 static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
@@ -1972,6 +1980,8 @@ static void stepper_completion_tick(void)
     }
 #endif /* STEPPER_DEV_LIN_ARM */
 
+#ifdef STEPPER_DEV_TURNTABLE
+
     /* ── TURNTABLE — device STEPPER_DEV_TURNTABLE ───────────── */
     if (s_turntable_pending.pending)
     {
@@ -1994,6 +2004,7 @@ static void stepper_completion_tick(void)
                    (unsigned)result, (long)s_turntable_pos_steps);
         }
     }
+#endif /* STEPPER_DEV_TURNTABLE */
 
 #ifdef STEPPER_DEV_HW_CARRIAGE
     /* ── HOTWIRE CARRIAGE — device STEPPER_DEV_HW_CARRIAGE ───────── */
@@ -2010,6 +2021,53 @@ static void stepper_completion_tick(void)
                                               timeout && !job_done,
                                               &steps_achieved);
 
+            if (s_hotwire_homing_phase == HOTWIRE_HOME_SEEK)
+            {
+                if (result == MOTION_STALLED)
+                {
+                    s_hotwire_pos_steps = 0;
+                    printf("Hotwire home: hard stop found, backing off %u steps\n",
+                           (unsigned)HOTWIRE_HOME_BACKOFF_STEPS);
+
+                    if (start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                                          -(int32_t)HOTWIRE_HOME_BACKOFF_STEPS,
+                                          (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
+                                          (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                                          (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US))
+                    {
+                        s_hotwire_homing_phase = HOTWIRE_HOME_BACKOFF;
+                        s_hotwire_pending.start_ms = to_ms_since_boot(get_absolute_time());
+                        s_hotwire_pending.timeout_ms = HOTWIRE_HOME_TIMEOUT_MS;
+                        return;
+                    }
+
+                    result = MOTION_FAULT;
+                }
+                else
+                {
+                    result = MOTION_TIMEOUT; /* homing search failed */
+                }
+
+                s_hotwire_homing_phase = HOTWIRE_HOME_IDLE;
+                s_hotwire_pending.pending = false;
+                send_motion_done(SUBSYS_HOTWIRE, result, s_hotwire_pos_steps);
+                printf("Hotwire home seek done: result=%u pos=%li\n",
+                       (unsigned)result, (long)s_hotwire_pos_steps);
+                return;
+            }
+
+            if (s_hotwire_homing_phase == HOTWIRE_HOME_BACKOFF)
+            {
+                s_hotwire_pos_steps += steps_achieved;
+                s_hotwire_homing_phase = HOTWIRE_HOME_IDLE;
+                s_hotwire_pending.pending = false;
+                send_motion_done(SUBSYS_HOTWIRE, result, s_hotwire_pos_steps);
+                printf("Hotwire home backoff done: result=%u pos=%li\n",
+                       (unsigned)result, (long)s_hotwire_pos_steps);
+                return;
+            }
+
+            /* Normal traverse completion */
             s_hotwire_pos_steps += steps_achieved;
             if (result == MOTION_OK && s_hotwire_zero_on_complete)
             {
@@ -2777,10 +2835,12 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
         current_steps = s_rack_pos_steps;
     }
 #endif
+#ifdef STEPPER_DEV_TURNTABLE
     else if (dev_idx == (uint8_t)STEPPER_DEV_TURNTABLE)
     {
         current_steps = s_turntable_pos_steps;
     }
+#endif /* STEPPER_DEV_TURNTABLE */
     else
     {
         send_nack(seq, NACK_UNKNOWN);
@@ -3246,9 +3306,11 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     printf("Turntable GOTO → %li steps\n", (long)target);
+    #ifdef STEPPER_DEV_TURNTABLE
     (void)start_stepper_motion((uint8_t)STEPPER_DEV_TURNTABLE, target, &s_turntable_pending,
                                SUBSYS_TURNTABLE,
                                (uint32_t)TURNTABLE_MOTION_TIMEOUT_MS, seq);
+    #endif /* STEPPER_DEV_TURNTABLE */
 }
 
 /**
@@ -3265,11 +3327,14 @@ static void handle_turntable_home(uint16_t seq)
     }
 
     /* Cancel any in-progress turntable motion. */
+    
+    #ifdef STEPPER_DEV_TURNTABLE
     if (s_motion.jobs[STEPPER_DEV_TURNTABLE].active)
     {
         drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE, NULL);
         s_turntable_pending.pending = false;
     }
+    #endif /* STEPPER_DEV_TURNTABLE */
 
     s_turntable_pos_steps = 0;
     s_turntable_homed = true;
@@ -3439,13 +3504,49 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
     }
 
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
-    bool is_retrace = (p->direction != 0u);
     const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
     const uint32_t us_to_ms_ceiling_bias = US_PER_MS - 1u;
-    int32_t steps = (p->direction == 0u)
-                        ? (int32_t)HOTWIRE_TRAVERSE_STEPS
-                        : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
-    uint32_t hotwire_motion_us = (uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us;
+
+    if (p->direction == 1u)
+    {
+        /* Start soft-stall homing toward hard stop (return direction). */
+        if (s_motion.jobs[STEPPER_DEV_HW_CARRIAGE].active)
+        {
+            drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_HW_CARRIAGE, NULL);
+        }
+
+        s_hotwire_pending.pending = false;
+        s_hotwire_zero_on_complete = false;
+        s_hotwire_homing_phase = HOTWIRE_HOME_SEEK;
+
+        if (!start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                               (int32_t)HOTWIRE_HOME_SEARCH_STEPS,
+                               (uint16_t)STEPPER_SOFT_TORQUE_LIMIT,
+                               (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                               step_delay_us))
+        {
+            printf("Hotwire home: failed to start search motion\n");
+            send_nack(seq, NACK_UNKNOWN);
+            return;
+        }
+
+        s_hotwire_pending.pending = true;
+        s_hotwire_pending.target_steps = s_hotwire_pos_steps + HOTWIRE_HOME_SEARCH_STEPS;
+        s_hotwire_pending.subsys = SUBSYS_HOTWIRE;
+        s_hotwire_pending.start_ms = to_ms_since_boot(get_absolute_time());
+        s_hotwire_pending.timeout_ms = HOTWIRE_HOME_TIMEOUT_MS;
+        s_hotwire_pending.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
+
+        printf("Hotwire home started: search=%u backoff=%u\n",
+               (unsigned)HOTWIRE_HOME_SEARCH_STEPS,
+               (unsigned)HOTWIRE_HOME_BACKOFF_STEPS);
+        send_ack(seq);
+        return;
+    }
+
+    bool is_retrace = false;
+    int32_t steps = (int32_t)HOTWIRE_TRAVERSE_STEPS;
+    uint32_t hotwire_motion_us = (uint32_t)(steps < 0 ? -steps : steps) * step_delay_us;
     uint32_t hotwire_motion_ms = (hotwire_motion_us + us_to_ms_ceiling_bias) / US_PER_MS;
     /* Add guard to absorb scheduler jitter, motion-engine startup latency,
      * and minor tuning variance in step timing. */
@@ -4106,6 +4207,39 @@ static void init_drv8434s_chain(void)
         if (!drv8434s_chain_set_spi_step_mode(&s_stepper_chain, k, NULL))
         {
             printf("uart_server: DRV8434S set SPI step mode failed (dev %u)\n", k);
+            return;
+        }
+    }
+
+    /* Set microstep mode per device: hotwire full-step, other devices can be fine-step. */
+    for (uint8_t k = 0; k < s_stepper_chain.cfg.n_devices; ++k)
+    {
+        drv8434s_microstep_t mode = (drv8434s_microstep_t)DRV8434S_MICROSTEP_MODE;
+
+        if (k == (uint8_t)STEPPER_DEV_HW_CARRIAGE)
+        {
+            mode = (drv8434s_microstep_t)DRV8434S_HW_CARRIAGE_MICROSTEP_MODE;
+        }
+        else if (k == (uint8_t)STEPPER_DEV_ROT_ARM)
+        {
+            mode = (drv8434s_microstep_t)DRV8434S_ARM_MICROSTEP_MODE;
+        }
+#ifdef STEPPER_DEV_LIN_ARM
+        else if (k == (uint8_t)STEPPER_DEV_LIN_ARM)
+        {
+            mode = (drv8434s_microstep_t)DRV8434S_RACK_MICROSTEP_MODE;
+        }
+#endif
+#ifdef STEPPER_DEV_TURNTABLE
+        else if (k == (uint8_t)STEPPER_DEV_TURNTABLE)
+        {
+            mode = (drv8434s_microstep_t)DRV8434S_TURNTABLE_MICROSTEP_MODE;
+        }
+#endif
+
+        if (!drv8434s_chain_set_microstep(&s_stepper_chain, k, mode, NULL))
+        {
+            printf("uart_server: DRV8434S set microstep mode failed (dev %u)\n", k);
             return;
         }
     }

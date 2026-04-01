@@ -224,6 +224,12 @@ All hardware calibration constants are in [`pico_fw/src/board_pins.h`](../pico_f
 | `TURNTABLE_STEPS_TRASH`      | 1250     | Steps from INTAKE endstop to trash position    |
 | `TURNTABLE_STEPS_EJECT`      | 2500     | Steps from INTAKE endstop to eject position    |
 | `HOTWIRE_ENABLE_DUTY`        | 4095     | Full on; current set by external Rsense        |
+| `HOTWIRE_TRAVERSE_STEPS`     | -4000    | Default hotwire cut travel steps (full-step, no subdivision) |
+| `HOTWIRE_TRAVERSE_RETRACE_STEPS` | 4000 | Default hotwire return steps (home)            |
+| `DRV8434S_MICROSTEP_MODE`    | 6        | Default microstep mode for non-hotwire devices (1/16) |
+| `DRV8434S_HW_CARRIAGE_MICROSTEP_MODE` | 0 | Hotwire carriage microstep mode (full-step) |
+| `HOTWIRE_TRAVERSE_STEP_DELAY_US` | 2u    | Hotwire traverse step interval (µs)            |
+| `HOTWIRE_TIMEOUT_GUARD_MS`   | 8000     | Additional guard time for hotwire traverse/motion |
 | `SPAWN_FLOW_NOFLOW_UG`       | 500000   | Min µg/window to count as flowing              |
 | `SPAWN_MAX_RETRIES`          | 100      | Agitation retries before SPAWN_STATUS_BAG_EMPTY|
 | `DRV8434S_SPI_WATCHDOG_INTERVAL_MS` | 2000 | Idle SPI health check period             |

@@ -211,9 +211,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Hardware:** DRV8434S on SPI0 daisy-chain, device index 4 (when wired). Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
 
-**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward `HOTWIRE_TRAVERSE_STEPS` (default: 1000) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 2000 µs/step). This cuts the tip. It must traverse fast so a lower step resolution and faster step rate are used to spin a 200 step/rev motor driving a 20tpi lead screw at > 1 inch/s.
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward `HOTWIRE_TRAVERSE_STEPS` (default: -4000, full-step no subdivision) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 2 µs/step). This cuts the tip quickly. 0=full-step mode, no microstep subdivision (DRV8434S_CTRL3_MICROSTEP_MODE=0).
 
-**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse the same number of steps. This retracts the wire.
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse `HOTWIRE_TRAVERSE_RETRACE_STEPS` (default: 4000) and zero position on successful return. Timeout is bounded by traversal time + `HOTWIRE_TIMEOUT_GUARD_MS` (default: 8000 ms).
 
 **Activation:** To uncomment `STEPPER_DEV_HW_CARRIAGE` in `board_pins.h` and increment `DRV8434S_N_DEVICES` to include this device.
 

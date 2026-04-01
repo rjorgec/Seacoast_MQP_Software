@@ -141,6 +141,29 @@
 #define DRV8434S_SPI_WATCHDOG_INTERVAL_MS 2000
 #endif
 
+#ifndef DRV8434S_MICROSTEP_MODE
+#define DRV8434S_MICROSTEP_MODE                                                \
+  6u /* default 1/16 microstep for general chain devices */
+#endif
+
+#ifndef DRV8434S_HW_CARRIAGE_MICROSTEP_MODE
+#define DRV8434S_HW_CARRIAGE_MICROSTEP_MODE                                    \
+  0u /* hotwire carriage: full-step                                            \
+      */
+#endif
+
+#ifndef DRV8434S_ARM_MICROSTEP_MODE
+#define DRV8434S_ARM_MICROSTEP_MODE 6u /* arm: default 1/16 */
+#endif
+
+#ifndef DRV8434S_RACK_MICROSTEP_MODE
+#define DRV8434S_RACK_MICROSTEP_MODE 6u /* rack: default 1/16 */
+#endif
+
+#ifndef DRV8434S_TURNTABLE_MICROSTEP_MODE
+#define DRV8434S_TURNTABLE_MICROSTEP_MODE 6u /* turntable: default 1/16 */
+#endif
+
 // =========================
 // Optional compile-time guards
 // =========================
@@ -202,13 +225,16 @@
 #define ARM_MOTION_TIMEOUT_MS 5000
 #endif
 #ifndef ARM_HOME_SEARCH_STEPS
-#define ARM_HOME_SEARCH_STEPS 5000
+#define ARM_HOME_SEARCH_STEPS                                                  \
+  25000 /* increased search distance for faster home movement */
 #endif
 #ifndef ARM_HOME_STEP_DELAY_US
-#define ARM_HOME_STEP_DELAY_US 4000u // arm speed for home
+#define ARM_HOME_STEP_DELAY_US                                                 \
+  1000u /* faster arm homing steps (microseconds per step) */
 #endif
 #ifndef ARM_HOME_TIMEOUT_MS
-#define ARM_HOME_TIMEOUT_MS 15000
+#define ARM_HOME_TIMEOUT_MS                                                    \
+  30000 /* allow more time for longer search in fast mode */
 #endif
 #ifndef ARM_HOME_TORQUE_LIMIT
 #define ARM_HOME_TORQUE_LIMIT 120u //
@@ -625,10 +651,30 @@
 /* ================================================================== */
 
 #ifndef HOTWIRE_TRAVERSE_STEPS
-#define HOTWIRE_TRAVERSE_STEPS 1000 /* steps to traverse full cut distance */
+#define HOTWIRE_TRAVERSE_STEPS                                                 \
+  -12500 /* full-step traversal distance (no microstep) */
+#endif
+#ifndef HOTWIRE_TRAVERSE_RETRACE_STEPS
+#define HOTWIRE_TRAVERSE_RETRACE_STEPS 12500 /* full-step return distance */
 #endif
 #ifndef HOTWIRE_TRAVERSE_STEP_DELAY_US
-#define HOTWIRE_TRAVERSE_STEP_DELAY_US 2000u /* µs per step */
+#define HOTWIRE_TRAVERSE_STEP_DELAY_US 1000u /* µs per step; */
+#endif
+#ifndef HOTWIRE_TIMEOUT_GUARD_MS
+#define HOTWIRE_TIMEOUT_GUARD_MS                                               \
+  8000u /* additional guard to absorb jitter/latency */
+#endif
+#ifndef HOTWIRE_HOME_SEARCH_STEPS
+#define HOTWIRE_HOME_SEARCH_STEPS                                              \
+  14000 /* min search steps toward hard stop                                   \
+         */
+#endif
+#ifndef HOTWIRE_HOME_BACKOFF_STEPS
+#define HOTWIRE_HOME_BACKOFF_STEPS 100 /* release after hitting hard stop */
+#endif
+#ifndef HOTWIRE_HOME_TIMEOUT_MS
+#define HOTWIRE_HOME_TIMEOUT_MS                                                \
+  15000u /* ms timeout for hotwire homing search/backoff */
 #endif
 
 /* ================================================================== */
