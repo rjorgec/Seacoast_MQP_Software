@@ -118,6 +118,7 @@ static bool s_flap2_stopped = false; /* flap2 reached its endpoint and was stopp
 static int32_t s_arm_pos_steps = 0;
 static int32_t s_rack_pos_steps = 0;
 static int32_t s_turntable_pos_steps = 0;
+static int32_t s_hotwire_pos_steps = 0;
 static bool s_turntable_homed = false;
 static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
@@ -168,6 +169,7 @@ typedef struct
 static stepper_pending_t s_arm_pending;
 static stepper_pending_t s_rack_pending;
 static stepper_pending_t s_turntable_pending;
+static stepper_pending_t s_hotwire_pending;
 static stepper_pending_t s_agitator_pending; /* MSG_AGITATE standalone cycle */
 
 typedef enum
@@ -1990,6 +1992,30 @@ static void stepper_completion_tick(void)
         }
     }
 
+#ifdef STEPPER_DEV_HW_CARRIAGE
+    /* ── HOTWIRE CARRIAGE — device STEPPER_DEV_HW_CARRIAGE ───────── */
+    if (s_hotwire_pending.pending)
+    {
+        bool job_done = !s_motion.jobs[STEPPER_DEV_HW_CARRIAGE].active;
+        bool timeout = (now_ms - s_hotwire_pending.start_ms) >= s_hotwire_pending.timeout_ms;
+
+        if (job_done || timeout)
+        {
+            int32_t steps_achieved = 0;
+            motion_result_t result =
+                consume_stepper_motion_result((uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                                              timeout && !job_done,
+                                              &steps_achieved);
+
+            s_hotwire_pos_steps += steps_achieved;
+            send_motion_done(SUBSYS_HOTWIRE, result, s_hotwire_pos_steps);
+            s_hotwire_pending.pending = false;
+            printf("Hotwire traverse done: result=%u pos=%li\n",
+                   (unsigned)result, (long)s_hotwire_pos_steps);
+        }
+    }
+#endif /* STEPPER_DEV_HW_CARRIAGE */
+
 #ifdef STEPPER_DEV_AGITATOR
     /* ── AGITATOR — multi-phase: homing → backoff → N×(forward+reverse) ─── */
     if (s_agitator_pending.pending)
@@ -3404,27 +3430,39 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
     }
 
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
+    const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
     int32_t steps = (p->direction == 0u)
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
+    uint32_t timeout_ms = (((uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us) / 1000u) + 2000u;
+
+    if (s_motion.jobs[STEPPER_DEV_HW_CARRIAGE].active)
+    {
+        drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_HW_CARRIAGE, NULL);
+    }
+    s_hotwire_pending.pending = false;
 
     if (!start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
                            steps,
                            0u,
                            (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
-                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
+                           step_delay_us))
     {
         printf("Hotwire Traverse: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
+    s_hotwire_pending.pending = true;
+    s_hotwire_pending.target_steps = s_hotwire_pos_steps + steps;
+    s_hotwire_pending.subsys = SUBSYS_HOTWIRE;
+    s_hotwire_pending.start_ms = to_ms_since_boot(get_absolute_time());
+    s_hotwire_pending.timeout_ms = timeout_ms;
+    s_hotwire_pending.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
+
     printf("Hotwire Traverse: dir=%u steps=%li\n",
            (unsigned)p->direction, (long)steps);
     send_ack(seq);
-    /* Note: MOTION_DONE for STEPPER_DEV_HW_CARRIAGE is not yet wired to
-     * stepper_completion_tick — add a pending tracker when the device is
-     * physically installed and DRV8434S_N_DEVICES is bumped. */
 #endif
 }
 
@@ -4242,6 +4280,7 @@ void uart_server_init(void)
 
     memset(&s_arm_pending, 0, sizeof(s_arm_pending));
     memset(&s_rack_pending, 0, sizeof(s_rack_pending));
+    memset(&s_hotwire_pending, 0, sizeof(s_hotwire_pending));
     memset(&s_agitator_pending, 0, sizeof(s_agitator_pending));
     memset(&s_turntable_pending, 0, sizeof(s_turntable_pending));
 
@@ -4253,6 +4292,7 @@ void uart_server_init(void)
     reset_arm_press_retry();
     s_rack_pos_steps = 0;
     s_turntable_pos_steps = 0;
+    s_hotwire_pos_steps = 0;
     /* Turntable requires explicit homing before any GOTO command is valid.
      * MSG_TURNTABLE_HOME must be sent first; GOTO commands in UNCALIBRATED
      * state are NACKed to prevent uncontrolled turntable movement. */

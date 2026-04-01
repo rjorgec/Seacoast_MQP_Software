@@ -375,6 +375,22 @@ static void on_hotwire_off(lv_event_t *e)
     ESP_LOGI(TAG, "Hotwire off (%s)", esp_err_to_name(err));
 }
 
+static void on_hotwire_cut(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_hotwire_traverse(true);
+    set_status(err == ESP_OK ? "Wire: CUT..." : "Wire CUT: FAILED");
+    ESP_LOGI(TAG, "Hotwire cut traverse (%s)", esp_err_to_name(err));
+}
+
+static void on_hotwire_return(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = motor_hotwire_traverse(false);
+    set_status(err == ESP_OK ? "Wire: RETURN..." : "Wire RETURN: FAILED");
+    ESP_LOGI(TAG, "Hotwire return traverse (%s)", esp_err_to_name(err));
+}
+
 static void on_vacuum_on(lv_event_t *e)
 {
     (void)e;
@@ -790,7 +806,7 @@ void ui_show_home(void)
  *  y= 50  4-btn 72px: [Arm Home][Arm Press][Arm Pos1][Arm Pos2]
  *  y= 78  [Rack Home  96×24]  4  [Rack Ext 96×24]  4  [Rack Press 96×24]
  *  y=106  4-btn 72px: [Tbl Home][Intake][Trash][Eject]
- *  y=134  [Wire ON  148×24]  4  [Wire OFF  148×24]
+ *  y=134  4-btn 72px: [Wire ON][Wire OFF][Cut][Return]
  *  y=162  6-btn 46px: [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]
  *  y=188  s_ops_lbl_status  (motion-done text)
  *  y=204  s_ops_lbl_vacuum  (vacuum status text)
@@ -849,9 +865,11 @@ void ui_show_operations(void)
     make_btn(scr, "Trash",    152, 106, 72, 24, on_turntable_trash);
     make_btn(scr, "Eject",    228, 106, 72, 24, on_turntable_eject);
 
-    /* ── Row 5: Hot Wire  (y=134, h=24)  2 × 148 px + 4 px = 300 px ─────── */
-    make_btn(scr, "Wire ON",  0,   134, 148, 24, on_hotwire_on);
-    make_btn(scr, "Wire OFF", 152, 134, 148, 24, on_hotwire_off);
+    /* ── Row 5: Hot Wire  (y=134, h=24)  4 × 72 px + 3 × 4 px = 300 px ───── */
+    make_btn(scr, "Wire ON",  0,   134, 72, 24, on_hotwire_on);
+    make_btn(scr, "Wire OFF", 76,  134, 72, 24, on_hotwire_off);
+    make_btn(scr, "Cut",      152, 134, 72, 24, on_hotwire_cut);
+    make_btn(scr, "Return",   228, 134, 72, 24, on_hotwire_return);
 
     /* ── Row 6: Vacuum + Agitator  (y=162, h=24)  6 × 46 px + 5 × 4 px = 296 px ── */
     make_btn(scr, "Vac ON",    0,   162, 46, 24, on_vacuum_on);
