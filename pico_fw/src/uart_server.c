@@ -3431,11 +3431,13 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
 
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
     const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
-    const uint32_t hotwire_timeout_guard_ms = 2000u; /* scheduler jitter + startup margin */
+    /* Guard time to absorb scheduler jitter, motion-engine startup latency,
+     * and minor tuning variance in step timing. */
+    const uint32_t hotwire_timeout_guard_ms = 2000u;
     int32_t steps = (p->direction == 0u)
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
-    uint32_t timeout_ms = (((uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us) / 1000u) +
+    uint32_t timeout_ms = ((((uint32_t)HOTWIRE_TRAVERSE_STEPS * step_delay_us) + 999u) / 1000u) +
                           hotwire_timeout_guard_ms;
 
     if (s_motion.jobs[STEPPER_DEV_HW_CARRIAGE].active)
