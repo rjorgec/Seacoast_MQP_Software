@@ -1,7 +1,7 @@
 # NLSpec: ESP32-C6 Firmware
 
 ## Version
-0.1.1
+0.1.2
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -77,6 +77,7 @@ ESP_ERROR_CHECK(pico_link_init(&link));
 |-------------|---------|
 | `MSG_MOTION_DONE` | `sys_sequence_notify_motion_done()` — notify sys_seq task; `ui_ops_on_motion_done()` — update Operations screen status |
 | `MSG_VACUUM_STATUS` | `ui_ops_on_vacuum_status()` — update vacuum status label |
+| `MSG_ARM_SEAL_EVENT` | `sys_sequence_notify_arm_seal_event()` — notify bag-open retry logic; `ui_ops_on_arm_seal_event()` — operator visibility |
 | `MSG_SPAWN_STATUS` | `sys_sequence_notify_spawn_status()` — notify sys_seq task (preferred path); `ui_dosing_on_spawn_status()` — update Dosing screen (legacy path) |
 | All others | `ui_screens_pico_rx_handler()` — weight display, generic status |
 
@@ -256,8 +257,19 @@ The ESP32 receives unsolicited messages from the Pico that must be routed to the
 |---------|---------|
 | `MSG_MOTION_DONE` | Extract `pl_motion_done_t`, call `ui_ops_on_motion_done()` |
 | `MSG_VACUUM_STATUS` | Extract `pl_vacuum_status_t`, call `ui_ops_on_vacuum_status()` |
+| `MSG_ARM_SEAL_EVENT` | Extract `pl_arm_seal_event_t`, call `ui_ops_on_arm_seal_event()`, and notify `sys_sequence_notify_arm_seal_event()` |
 | `MSG_SPAWN_STATUS` | Extract `pl_spawn_status_t`, call `ui_dosing_on_spawn_status()` |
 | `MSG_HX711_MEASURE` ACK | Extract `pl_hx711_mass_t`, update weight label via `ui_screens_pico_rx_handler()` |
+
+## 6.1 Bag-Opening Recovery on Arm Seal Loss
+
+When `MSG_ARM_SEAL_EVENT(LOST)` arrives during bag opening:
+- transition to `SYS_OPEN_RECOVERING`,
+- execute deterministic retry sequence (backoff/re-press/re-open),
+- retry at most `ARM_OPEN_RETRY_MAX` (default 3),
+- if still failing, transition to `SYS_ERROR` and safe-stop.
+
+`MSG_ARM_SEAL_EVENT(RESTORED)` is surfaced to the UI and clears retry-latched context on the Pico side.
 
 All UI updates from the RX callback must acquire the LVGL lock (`lvgl_port_lock(0)`) before modifying widgets and release it (`lvgl_port_unlock()`) after.
 
@@ -287,18 +299,24 @@ The following are explicitly left to implementer choice:
 - [ ] Operations screen displays all actuator buttons listed in Section 4.4
 - [ ] Operations screen updates status label on MSG_MOTION_DONE receipt
 - [ ] Operations screen updates vacuum status on MSG_VACUUM_STATUS receipt
+- [ ] Operations/auto UI surfaces `MSG_ARM_SEAL_EVENT` with reason (transient/steady/stale tach)
 - [ ] Dosing screen allows setting inoculation percentage and starting a dose
 - [ ] Dosing screen displays spawn status for all 8 status codes per Section 4.5
 
-### 8.3 motor_hal
+### 8.3 Sequence Recovery (Bag Opening)
+- [ ] `MSG_ARM_SEAL_EVENT(LOST)` during bag opening transitions to `SYS_OPEN_RECOVERING`
+- [ ] Sequence retries bag opening at most `ARM_OPEN_RETRY_MAX` times
+- [ ] Exceeded retries transitions to `SYS_ERROR` with safe-stop
+
+### 8.4 motor_hal
 - [ ] All motor_hal functions listed in Section 3 compile and send the correct message type with correct payload
 
-### 8.4 Control Task
+### 8.5 Control Task
 - [ ] control_task processes CTRL_CMD_START, CTRL_CMD_STOP, CTRL_CMD_PAUSE, CTRL_CMD_TARE
 - [ ] dosing_tick() is called at 20 ms intervals while running
 - [ ] dosing_abort() closes flaps and sends MSG_CTRL_STOP
 
-### 8.5 Build
+### 8.6 Build
 - [ ] Firmware compiles cleanly with ESP-IDF v5.5.x targeting ESP32-C6
 - [ ] LVGL v9.4.x via esp_lvgl_port v2.7.x
 - [ ] All ESP_LOGx tags match source file names

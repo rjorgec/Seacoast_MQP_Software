@@ -194,7 +194,7 @@
  * MSG_ARM_HOME. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS, so
  * the idle post-home position is typically negative. */
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS -3500 /* steps to press attachment */
+#define ARM_STEPS_PRESS -3800 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
 #define ARM_STEPS_POS1 -500 /* absolute position 1 */
@@ -219,7 +219,7 @@
 #endif
 #ifndef ARM_PRESS_RETRY_RPM_DELTA
 #define ARM_PRESS_RETRY_RPM_DELTA                                              \
-  2000u /* minimum absolute RPM change that counts as a successful press */
+  10u /* corrected to observed 10-15 RPM behavior; 2000 was out-of-scale */
 #endif
 #ifndef ARM_MOTION_TIMEOUT_MS
 #define ARM_MOTION_TIMEOUT_MS 5000
@@ -379,6 +379,41 @@
 #endif
 #ifndef VACUUM_STATUS_SEND_INTERVAL_MS
 #define VACUUM_STATUS_SEND_INTERVAL_MS 5000 /* unsolicited status period */
+#endif
+
+/* Rotary arm seal monitor tunables (vacuum RPM, Pico-side). */
+#ifndef ARM_SEAL_EMA_ALPHA_X1000
+#define ARM_SEAL_EMA_ALPHA_X1000 250u /* 0.25 */
+#endif
+#if ARM_SEAL_EMA_ALPHA_X1000 > 1000u
+#error "ARM_SEAL_EMA_ALPHA_X1000 must be <= 1000"
+#endif
+#ifndef ARM_SEAL_BASELINE_WINDOW_MS
+#define ARM_SEAL_BASELINE_WINDOW_MS 300u
+#endif
+#ifndef ARM_SEAL_BASELINE_MIN_SAMPLES
+#define ARM_SEAL_BASELINE_MIN_SAMPLES 3u
+#endif
+#ifndef ARM_SEAL_BASELINE_TIMEOUT_MS
+#define ARM_SEAL_BASELINE_TIMEOUT_MS 1000u
+#endif
+#ifndef ARM_SEAL_TRANSIENT_DELTA_RPM
+#define ARM_SEAL_TRANSIENT_DELTA_RPM 60u
+#endif
+#ifndef ARM_SEAL_TRANSIENT_DEBOUNCE_MS
+#define ARM_SEAL_TRANSIENT_DEBOUNCE_MS 80u
+#endif
+#ifndef ARM_SEAL_STEADY_DELTA_RPM
+#define ARM_SEAL_STEADY_DELTA_RPM 15u
+#endif
+#ifndef ARM_SEAL_STEADY_HOLD_MS
+#define ARM_SEAL_STEADY_HOLD_MS 800u
+#endif
+#ifndef ARM_SEAL_TACH_STALE_MS
+#define ARM_SEAL_TACH_STALE_MS 200u
+#endif
+#ifndef ARM_SEAL_RESTORE_DEBOUNCE_MS
+#define ARM_SEAL_RESTORE_DEBOUNCE_MS 200u
 #endif
 
 /* ================================================================== */

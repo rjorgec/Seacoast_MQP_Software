@@ -10,6 +10,7 @@
 #include "pico/time.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "hardware/spi.h"
 #include "hardware/uart.h"
 
@@ -212,6 +213,41 @@ static uint32_t s_vacuum_last_status_ms = 0;
 static vacuum_status_code_t s_vacuum_status = VACUUM_OFF;
 static uint16_t s_vacuum_last_rpm = 0u;
 static bool s_vacuum_rpm_valid = false;
+static uint16_t s_vacuum_last_sample_age_ms = 0u;
+
+typedef enum
+{
+    SEAL_MON_DISABLED = 0,
+    SEAL_MON_BASELINING,
+    SEAL_MON_SEALED_OK,
+    SEAL_MON_LOST_LATCHED,
+} arm_seal_mon_state_t;
+
+typedef struct
+{
+    arm_seal_mon_state_t state;
+    uint16_t rpm_filt;
+    uint16_t rpm_baseline_sealed;
+    uint32_t ema_last_sample_ms;
+    uint32_t baseline_start_ms;
+    uint32_t baseline_sum;
+    uint16_t baseline_samples;
+    uint32_t baseline_last_sample_ms;
+    uint32_t transient_start_ms;
+    uint32_t steady_start_ms;
+    uint32_t restore_start_ms;
+    bool rpm_filt_init;
+    bool restore_pending;
+    bool rearm_requested;
+    bool pending_press_baseline;
+    arm_seal_reason_t last_reason;
+} arm_seal_mon_t;
+
+static arm_seal_mon_t s_arm_seal = {
+    .state = SEAL_MON_DISABLED,
+    .last_reason = ARM_SEAL_REASON_UNKNOWN,
+};
+static bool s_arm_last_cmd_press = false;
 
 /* ── Dosing callback ─────────────────────────────────────────────────────── */
 
@@ -393,6 +429,97 @@ static void send_vacuum_status(vacuum_status_code_t status, uint16_t rpm)
         .rpm = rpm,
     };
     (void)uart_send_frame(MSG_VACUUM_STATUS, 0u, &pl, (uint16_t)sizeof(pl));
+}
+
+static int16_t arm_seal_delta_rpm(uint16_t rpm_filt, uint16_t rpm_baseline)
+{
+    int32_t delta = (int32_t)rpm_filt - (int32_t)rpm_baseline;
+    if (delta > INT16_MAX)
+    {
+        return INT16_MAX;
+    }
+    if (delta < INT16_MIN)
+    {
+        return INT16_MIN;
+    }
+    return (int16_t)delta;
+}
+
+static void send_arm_seal_event(arm_seal_event_t event, arm_seal_reason_t reason)
+{
+    pl_arm_seal_event_t pl = {
+        .event = (uint8_t)event,
+        .reason = (uint8_t)reason,
+        .rpm_baseline = s_arm_seal.rpm_baseline_sealed,
+        .rpm_filt = s_arm_seal.rpm_filt,
+        .delta_rpm = arm_seal_delta_rpm(s_arm_seal.rpm_filt, s_arm_seal.rpm_baseline_sealed),
+        .age_ms = s_vacuum_last_sample_age_ms,
+    };
+    (void)uart_send_frame(MSG_ARM_SEAL_EVENT, 0u, &pl, (uint16_t)sizeof(pl));
+}
+
+static bool arm_motion_opening_related(void)
+{
+    if (!s_arm_pending.pending)
+    {
+        return false;
+    }
+    return s_arm_pending.target_steps == (int32_t)ARM_STEPS_POS1 ||
+           s_arm_pending.target_steps == (int32_t)ARM_STEPS_POS2;
+}
+
+static void arm_seal_reset_threshold_timers(void)
+{
+    s_arm_seal.transient_start_ms = 0u;
+    s_arm_seal.steady_start_ms = 0u;
+}
+
+static void arm_seal_begin_baselining(uint32_t now_ms)
+{
+    s_arm_seal.state = SEAL_MON_BASELINING;
+    s_arm_seal.baseline_start_ms = now_ms;
+    s_arm_seal.baseline_sum = 0u;
+    s_arm_seal.baseline_samples = 0u;
+    s_arm_seal.baseline_last_sample_ms = 0u;
+    s_arm_seal.rpm_filt_init = false;
+    s_arm_seal.restore_pending = false;
+    s_arm_seal.restore_start_ms = 0u;
+    s_arm_seal.rpm_baseline_sealed = 0u;
+    arm_seal_reset_threshold_timers();
+}
+
+static void finish_arm_motion(motion_result_t result, bool require_rehome);
+
+static void arm_seal_mark_lost(arm_seal_reason_t reason)
+{
+    if (s_arm_seal.state == SEAL_MON_LOST_LATCHED)
+    {
+        return;
+    }
+
+    s_arm_seal.state = SEAL_MON_LOST_LATCHED;
+    s_arm_seal.last_reason = reason;
+    s_arm_seal.restore_pending = false;
+    s_arm_seal.restore_start_ms = 0u;
+    arm_seal_reset_threshold_timers();
+    send_arm_seal_event(ARM_SEAL_EVENT_LOST, reason);
+
+    if (s_arm_pending.pending)
+    {
+        int32_t steps_achieved = 0;
+        drv8434s_motion_result_t cancelled = {0};
+        if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_ROT_ARM, &cancelled))
+        {
+            steps_achieved = cancelled.steps_achieved;
+        }
+        else
+        {
+            steps_achieved = s_motion.jobs[STEPPER_DEV_ROT_ARM].steps_achieved;
+        }
+        s_arm_pos_steps += steps_achieved;
+        s_arm_pending.pending = false;
+        finish_arm_motion(MOTION_STALLED, false);
+    }
 }
 
 /* ── Spawn dosing helpers ─────────────────────────────────────────────────── */
@@ -609,6 +736,8 @@ static bool start_arm_internal_relative_move(int32_t relative_steps,
                                              uint32_t timeout_ms);
 static bool start_arm_home_backoff(void);
 static void arm_press_retry_tick(void);
+static void arm_seal_monitor_tick(void);
+static void finish_arm_motion(motion_result_t result, bool require_rehome);
 
 static bool dispense_spawn_callback(struct repeating_timer *t)
 {
@@ -2290,6 +2419,7 @@ static void vacuum_sm_tick(void)
 {
     if (!s_vacuum_on)
     {
+        s_vacuum_last_sample_age_ms = 0u;
         return;
     }
 
@@ -2312,9 +2442,10 @@ static void vacuum_sm_tick(void)
         uint16_t rpm = 0u;
         bool rpm_valid = false;
 
+        uint32_t pulse_age_ms = 0u;
         if (last_pulse_time_us != 0u)
         {
-            uint32_t pulse_age_ms = (time_us_32() - last_pulse_time_us) / 1000u;
+            pulse_age_ms = (time_us_32() - last_pulse_time_us) / 1000u;
             if (pulse_age_ms < VACUUM_RPM_TIMEOUT_MS)
             {
                 uint32_t avg_period_us = 0u;
@@ -2340,6 +2471,7 @@ static void vacuum_sm_tick(void)
 
         s_vacuum_last_rpm = rpm;
         s_vacuum_rpm_valid = rpm_valid;
+        s_vacuum_last_sample_age_ms = rpm_valid ? (uint16_t)pulse_age_ms : UINT16_MAX;
 
         vacuum_status_code_t new_status =
             (rpm < (uint16_t)VACUUM_RPM_BLOCKED_THRESHOLD) ? VACUUM_BLOCKED : VACUUM_OK;
@@ -2457,6 +2589,160 @@ static void arm_press_retry_tick(void)
            (unsigned)s_arm_press_retry.retries_started,
            (unsigned)ARM_PRESS_RETRY_MAX_RETRIES,
            (unsigned)ARM_PRESS_RETRY_BACKOFF_STEPS);
+}
+
+static void arm_seal_monitor_tick(void)
+{
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+    if (!s_vacuum_on)
+    {
+        s_arm_seal.state = SEAL_MON_DISABLED;
+        s_arm_seal.rearm_requested = false;
+        s_arm_seal.pending_press_baseline = false;
+        s_arm_seal.restore_pending = false;
+        s_arm_seal.rpm_filt_init = false;
+        arm_seal_reset_threshold_timers();
+        return;
+    }
+
+    if (!s_vacuum_rpm_valid)
+    {
+        if (s_arm_seal.state == SEAL_MON_SEALED_OK && arm_motion_opening_related() &&
+            s_vacuum_last_sample_age_ms >= (uint16_t)ARM_SEAL_TACH_STALE_MS)
+        {
+            arm_seal_mark_lost(ARM_SEAL_REASON_STALE_TACH);
+        }
+        return;
+    }
+
+    if (!s_arm_seal.rpm_filt_init)
+    {
+        s_arm_seal.rpm_filt = s_vacuum_last_rpm;
+        s_arm_seal.rpm_filt_init = true;
+    }
+    else
+    {
+        uint32_t alpha = (uint32_t)ARM_SEAL_EMA_ALPHA_X1000;
+        uint32_t prev = s_arm_seal.rpm_filt;
+        uint32_t curr = s_vacuum_last_rpm;
+        s_arm_seal.rpm_filt = (uint16_t)((alpha * curr + (1000u - alpha) * prev) / 1000u);
+    }
+    s_arm_seal.ema_last_sample_ms = now_ms;
+
+    if (s_arm_seal.pending_press_baseline &&
+        !s_arm_pending.pending &&
+        !arm_press_retry_active() &&
+        s_arm_last_cmd_press)
+    {
+        s_arm_seal.pending_press_baseline = false;
+        if (s_arm_seal.state != SEAL_MON_LOST_LATCHED || s_arm_seal.rearm_requested)
+        {
+            arm_seal_begin_baselining(now_ms);
+        }
+    }
+
+    if (s_arm_seal.state == SEAL_MON_BASELINING)
+    {
+        if (s_arm_seal.baseline_samples == 0u)
+        {
+            s_arm_seal.baseline_last_sample_ms = now_ms;
+            s_arm_seal.baseline_sum = s_arm_seal.rpm_filt;
+            s_arm_seal.baseline_samples = 1u;
+        }
+        else if ((now_ms - s_arm_seal.baseline_last_sample_ms) >= (uint32_t)VACUUM_RPM_SAMPLE_MS)
+        {
+            s_arm_seal.baseline_last_sample_ms = now_ms;
+            s_arm_seal.baseline_sum += s_arm_seal.rpm_filt;
+            ++s_arm_seal.baseline_samples;
+        }
+
+        if ((now_ms - s_arm_seal.baseline_start_ms) >= (uint32_t)ARM_SEAL_BASELINE_WINDOW_MS &&
+            s_arm_seal.baseline_samples >= (uint16_t)ARM_SEAL_BASELINE_MIN_SAMPLES)
+        {
+            s_arm_seal.rpm_baseline_sealed =
+                (uint16_t)(s_arm_seal.baseline_sum / s_arm_seal.baseline_samples);
+            s_arm_seal.state = SEAL_MON_SEALED_OK;
+            if (s_arm_seal.rearm_requested)
+            {
+                s_arm_seal.restore_pending = true;
+            }
+            arm_seal_reset_threshold_timers();
+            return;
+        }
+
+        if ((now_ms - s_arm_seal.baseline_start_ms) >= (uint32_t)ARM_SEAL_BASELINE_TIMEOUT_MS)
+        {
+            printf("WARN: arm seal baselining timeout samples=%u\n",
+                   (unsigned)s_arm_seal.baseline_samples);
+            s_arm_seal.baseline_start_ms = now_ms;
+            s_arm_seal.baseline_sum = 0u;
+            s_arm_seal.baseline_samples = 0u;
+        }
+        return;
+    }
+
+    if (s_arm_seal.state != SEAL_MON_SEALED_OK)
+    {
+        return;
+    }
+
+    int16_t delta = arm_seal_delta_rpm(s_arm_seal.rpm_filt, s_arm_seal.rpm_baseline_sealed);
+    if (delta >= (int16_t)ARM_SEAL_TRANSIENT_DELTA_RPM)
+    {
+        if (s_arm_seal.transient_start_ms == 0u)
+        {
+            s_arm_seal.transient_start_ms = now_ms;
+        }
+        if ((now_ms - s_arm_seal.transient_start_ms) >= (uint32_t)ARM_SEAL_TRANSIENT_DEBOUNCE_MS)
+        {
+            arm_seal_mark_lost(ARM_SEAL_REASON_TRANSIENT);
+            return;
+        }
+    }
+    else
+    {
+        s_arm_seal.transient_start_ms = 0u;
+    }
+
+    if (delta >= (int16_t)ARM_SEAL_STEADY_DELTA_RPM)
+    {
+        if (s_arm_seal.steady_start_ms == 0u)
+        {
+            s_arm_seal.steady_start_ms = now_ms;
+        }
+        if ((now_ms - s_arm_seal.steady_start_ms) >= (uint32_t)ARM_SEAL_STEADY_HOLD_MS)
+        {
+            arm_seal_mark_lost(ARM_SEAL_REASON_STEADY);
+            return;
+        }
+    }
+    else
+    {
+        s_arm_seal.steady_start_ms = 0u;
+    }
+
+    if (s_arm_seal.restore_pending &&
+        s_arm_seal.rpm_baseline_sealed > 0u &&
+        delta < (int16_t)ARM_SEAL_STEADY_DELTA_RPM)
+    {
+        if (s_arm_seal.restore_start_ms == 0u)
+        {
+            s_arm_seal.restore_start_ms = now_ms;
+        }
+        if ((now_ms - s_arm_seal.restore_start_ms) >= (uint32_t)ARM_SEAL_RESTORE_DEBOUNCE_MS)
+        {
+            s_arm_seal.state = SEAL_MON_SEALED_OK;
+            s_arm_seal.restore_pending = false;
+            s_arm_seal.rearm_requested = false;
+            s_arm_seal.restore_start_ms = 0u;
+            send_arm_seal_event(ARM_SEAL_EVENT_RESTORED, s_arm_seal.last_reason);
+        }
+    }
+    else
+    {
+        s_arm_seal.restore_start_ms = 0u;
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -3170,6 +3456,15 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     printf("Arm move → %li steps\n", (long)target);
+    s_arm_last_cmd_press = (target == (int32_t)ARM_STEPS_PRESS);
+    if (s_arm_last_cmd_press)
+    {
+        s_arm_seal.pending_press_baseline = true;
+        if (s_arm_seal.state == SEAL_MON_LOST_LATCHED)
+        {
+            s_arm_seal.rearm_requested = true;
+        }
+    }
     if (start_stepper_motion((uint8_t)STEPPER_DEV_ROT_ARM, target, &s_arm_pending,
                              SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq))
     {
@@ -3193,6 +3488,7 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
     else
     {
+        s_arm_seal.pending_press_baseline = false;
         reset_arm_press_retry();
     }
 }
@@ -3405,6 +3701,13 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
         s_vacuum_status = VACUUM_OFF;
         s_vacuum_last_rpm = 0u;
         s_vacuum_rpm_valid = false;
+        s_vacuum_last_sample_age_ms = 0u;
+        s_arm_seal.state = SEAL_MON_DISABLED;
+        s_arm_seal.rearm_requested = false;
+        s_arm_seal.pending_press_baseline = false;
+        s_arm_seal.restore_pending = false;
+        s_arm_seal.restore_start_ms = 0u;
+        arm_seal_reset_threshold_timers();
         send_vacuum_status(VACUUM_OFF, 0u);
         printf("Vacuum OFF\n");
     }
@@ -3423,6 +3726,11 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
         restore_interrupts(saved);
         s_vacuum_last_rpm = 0u;
         s_vacuum_rpm_valid = false;
+        s_vacuum_last_sample_age_ms = 0u;
+        s_arm_seal.state = SEAL_MON_DISABLED;
+        s_arm_seal.restore_pending = false;
+        s_arm_seal.restore_start_ms = 0u;
+        arm_seal_reset_threshold_timers();
         printf("Vacuum ON\n");
     }
 
@@ -4493,6 +4801,7 @@ void uart_server_poll(void)
 
     /* ── Run state-machine ticks before processing incoming bytes ── */
     vacuum_sm_tick();
+    arm_seal_monitor_tick();
     flap_sm_tick();
     stepper_completion_tick();
     arm_press_retry_tick();
