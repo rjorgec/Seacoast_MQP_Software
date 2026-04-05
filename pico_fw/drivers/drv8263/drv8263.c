@@ -107,11 +107,13 @@ bool drv8263_init(drv8263_t *dev, const drv8263_config_t *cfg)
     dev->last_current_adc.sum = drv8263_read_current(dev) * ADC_AVERAGES;
     dev->last_current_adc.average = dev->last_current_adc.sum / ADC_AVERAGES;
 
+    #ifdef ACTUATOR_DEBUG
     printf("DRV8263: Initialized on pins A=%d, B=%d, Sense=%d (ADC%d)\n",
            cfg->ctrl_a_pin, cfg->ctrl_b_pin, cfg->sense_pin, cfg->sense_adc_channel);
     printf("DRV8263: PWM freq=%u Hz, Current thresholds: %u - %u\n",
            cfg->pwm_frequency_hz, cfg->current_low_threshold, cfg->current_high_threshold);
     printf("DRV8263: ADC val=%u\n", dev->last_current_adc.average);
+    #endif
 
     return true;
 }
@@ -274,8 +276,10 @@ static bool drv8263_current_monitor_callback(repeating_timer_t *rt)
         }
 
         const char *status_str[] = {"OK", "OVERCURRENT", "UNDERCURRENT"};
+        #ifdef ACTUATOR_DEBUG
         printf("DRV8263: Current status changed to %s (ADC=%u)\n",
                status_str[new_status], current_adc);
+        #endif
     }
 
     return true; /* Continue monitoring */
@@ -322,13 +326,18 @@ bool drv8263_start_current_monitoring(drv8263_t *dev)
 
     if (success)
     {
+
+        #ifdef ACTUATOR_DEBUG
         printf("DRV8263: Current monitoring started (interval=%u ms, blanking=%u ms)\n",
                dev->config.current_check_interval_ms, dev->config.startup_blanking_ms);
+        #endif
     }
     else
     {
         dev->monitoring_enabled = false;
+        #ifdef ACTUATOR_DEBUG
         printf("DRV8263: Failed to start current monitoring\n");
+        #endif
     }
 
     return success;
@@ -349,7 +358,9 @@ void drv8263_stop_current_monitoring(drv8263_t *dev)
     dev->monitoring_enabled = false;
     cancel_repeating_timer(&pdata->timer);
 
+    #ifdef ACTUATOR_DEBUG
     printf("DRV8263: Current monitoring stopped\n");
+    #endif
 }
 
 /**
@@ -378,7 +389,9 @@ void drv8263_set_current_thresholds(drv8263_t *dev, uint16_t low_threshold, uint
     dev->config.current_low_threshold = low_threshold;
     dev->config.current_high_threshold = high_threshold;
 
+    #ifdef ACTUATOR_DEBUG
     printf("DRV8263: Current thresholds updated: %u - %u\n", low_threshold, high_threshold);
+    #endif
 }
 
 /**
@@ -445,5 +458,7 @@ void drv8263_emergency_stop(drv8263_t *dev)
     dev->current_speed = 0;
     drv8263_apply_motor_control(dev);
 
+    #ifdef ACTUATOR_DEBUG
     printf("DRV8263: EMERGENCY STOP activated\n");
+    #endif
 }

@@ -1,7 +1,7 @@
 # NLSpec: Raspberry Pi Pico 2 Firmware
 
 ## Version
-0.1.2
+0.2.0
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -249,12 +249,12 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 ### 3.1 Overview
 
 When `MSG_DISPENSE_SPAWN` is received, the Pico runs a closed-loop dosing algorithm that:
-1. Opens the hopper flaps
-2. Reads the load cell continuously
-3. Controls flap position to regulate spawn flow rate
-4. Detects and recovers from material bridging
-5. Closes flaps when target mass is dispensed
-6. Reports progress via `MSG_SPAWN_STATUS`
+1. Optionally homes flaps to the closed endpoint
+2. Opens the hopper flaps (PRIME) until initial flow is detected
+3. Runs proportional closed-loop control (DOSE_MAIN) to regulate spawn flow rate
+4. Detects and recovers from material bridging via agitation
+5. Closes flaps when target mass (minus preempt margin) is dispensed
+6. Reports progress via `MSG_SPAWN_STATUS` and prints a summary at completion
 
 ### 3.2 Initiation
 
@@ -274,37 +274,90 @@ Where `innoc_percent` is in tenths of a percent (e.g., 250 = 25.0%).
 
 The dosing algorithm runs on a `repeating_timer` at `SPAWN_TIMER_PERIOD_MS` (default: 50 ms) intervals. Each tick:
 
-1. **Read the load cell** — single-shot reading via `pico-scale`.
-2. **Compute dispensed mass** — `dispensed_ug = current_mass_ug - start_mass_ug`.
-3. **Flow detection** — over a window of `SPAWN_FLOW_WINDOW_MS` (default: 100 ms), if dispensed mass has not increased, flow has stalled.
-4. **Control action** — based on current dosing state (see 3.4).
-5. **Report status** — send `MSG_SPAWN_STATUS` with current state, dispensed mass, target, retries.
+1. **Read the load cell** — drains all queued HX711 FIFO entries, averages them for a noise-tolerant reading.
+2. **Compute dispensed mass** — `dispensed_ug = current_mass_ug - start_mass_ug`, with spike rejection: single-tick jumps exceeding `SPAWN_FLOW_SPIKE_CLAMP_UG` hold the previous value.
+3. **High-water mark** — tracks maximum `dispensed_ug` in the current flow window for noise-robust no-flow detection.
+4. **Per-tick delta** — signed delta computed from consecutive `dispensed_ug` values. Positive-only version is spike-clamped for logging; the **signed** delta feeds the EMA so flap-momentum bounces cancel out rather than accumulating a false DC bias. EMA α = `SPAWN_EMA_ALPHA_X1000` / 1000 (default 0.2), clamped ≥ 0.
+5. **Control action** — based on current dosing state (see 3.4).
+6. **Report status** — send `MSG_SPAWN_STATUS` with current state, dispensed mass, target, retries.
+7. **Diagnostic CSV** — per-tick CSV data row printed only when `SPAWN_VERBOSE_LOG` is defined.
 
 ### 3.4 Dosing State Machine
 
 | State | Entry Condition | Behavior | Exit Condition |
 |-------|----------------|----------|----------------|
-| STARTUP_OPEN | Dose begins | Drive flaps open at full PWM. Wait for first weight change. | Weight change detected → RUNNING |
-| RUNNING | Flow detected | Flaps held at dosing PWM. Monitor flow rate. | `dispensed_ug >= target_ug` → DONE. No flow for window → STALLED. |
-| STALLED | No flow detected for `SPAWN_FLOW_WINDOW_MS` | Close flaps. Activate agitator (eccentric arm stepper) gently. | After agitation period → re-open flaps → RUNNING (retry). Max retries exceeded → BAG_EMPTY. |
-| AGITATING | Bridge detected | Agitator kneads bag side. Flaps closed. | Agitation time elapsed → re-open → RUNNING. |
-| DONE | Target mass reached | Close flaps. Stop timer. | Send SPAWN_STATUS(DONE). Terminal. |
-| BAG_EMPTY | Retries exhausted or insufficient spawn | Close flaps. Stop timer. | Send SPAWN_STATUS(BAG_EMPTY). Terminal. |
-| ERROR | Sensor failure, driver fault | Close flaps. Stop timer. | Send SPAWN_STATUS(ERROR). Terminal. |
+| HOMING | `do_home` flag set | Drive flaps to closed endpoint via torque-monitored close. | FLAP_SM_CLOSED or timeout → PRIME |
+| PRIME | After HOMING (or directly) | Drive flaps open at `SPAWN_OPEN_PWM`. Monitor undercurrent (end-of-travel). | `tick_delta >= SPAWN_STARTUP_FLOW_DETECT_UG` → DOSE_MAIN. Undercurrent with no flow → FAULT. |
+| DOSE_MAIN | Flow confirmed | Proportional closed-loop nudge control. Per-tick desired rate interpolated linearly between `SPAWN_TICK_MIN_UG` and `SPAWN_TICK_MAX_UG` based on remaining mass vs target. Burst-flow emergency close if delta exceeds desired × `SPAWN_FLOW_BURST_FACTOR`. | `dispensed_ug >= target_ug - SPAWN_CLOSE_PREEMPT_UG` → CLOSE_CONFIRM. No-flow detected (see 3.5) → open retries, then AGIT_CLOSING. |
+| AGIT_CLOSING | No-flow after open retries | Fast-close flaps before agitation. | FLAP_SM_CLOSED or timeout → AGITATING. |
+| AGITATING | Flaps closed | Agitator runs N×(forward+reverse) knead cycles. | Cycles complete: retries < max → re-PRIME. Retries exhausted → BAG_EMPTY. |
+| CLOSE_CONFIRM | Fast-close issued | Wait for flap state machine to confirm closed or timeout. | Confirmed → DONE. |
+| DONE | Target mass reached | Close flaps. Stop timer. Print summary. | Send SPAWN_STATUS(DONE). Terminal. |
+| BAG_EMPTY | Retries exhausted | Close flaps. Stop timer. | Send SPAWN_STATUS(BAG_EMPTY). Terminal. |
+| FAULT | Sensor/driver fault or flow failure | Close flaps. Stop timer. | Send SPAWN_STATUS(ERROR/FLOW_FAILURE). Terminal. |
 | ABORTED | MSG_CTRL_STOP received | Close flaps. Stop timer. | Send SPAWN_STATUS(ABORTED). Terminal. |
 
-### 3.5 Flap Nudging
+### 3.5 No-Flow Detection and Recovery
 
-During RUNNING state, if flow rate drops but is not zero, the algorithm applies short position-nudge pulses to the flap motors to maintain flow without fully re-opening. A nudge drives the motor for a brief pulse (`nudge_until` timestamp), then stops and waits for the next timer tick to evaluate.
+No-flow is evaluated at each `SPAWN_FLOW_WINDOW_MS` (500 ms) boundary during DOSE_MAIN:
 
-### 3.6 Defaults and Boundaries
+1. **Dual-condition check**: flow is considered stopped only when **both**:
+   - `ema_flow_ug < SPAWN_NOFLOW_EMA_THRESHOLD_UG` (default 5000 µg/tick)
+   - High-water-mark window delta `< SPAWN_FLOW_NOFLOW_UG` (default 5000 µg)
+2. **Open retry before agitation**: When no-flow is detected, up to `SPAWN_NOFLOW_OPEN_RETRIES` (default 3) open nudge pulses are tried first. Each stops any active motor, issues an open pulse, and resets the flow window. Only after all retries fail does the state machine escalate to close + agitate.
+3. **Auto-reset**: When a window completes with detected flow, the open-retry counter resets to 0.
+
+### 3.6 Proportional Flow Control
+
+During DOSE_MAIN, the target per-tick flow rate is interpolated:
+
+| Remaining mass | Desired flow rate |
+|---|---|
+| `> target / SPAWN_PROP_UPPER` (default /2) | `SPAWN_TICK_MAX_UG` (500,000 µg/tick) |
+| Between upper and lower thresholds | Linear interpolation (uint64 safe) |
+| `< target / SPAWN_PROP_LOWER` (default /10) | `SPAWN_TICK_MIN_UG` (100,000 µg/tick) |
+
+Nudge decisions compare EMA flow vs desired rate ± `SPAWN_TICK_DEADBAND`. Direction-reversal holdoff (`SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS`) prevents hunting.
+
+**Important:** `remaining_ug` is computed relative to the **effective target** (`target_ug − SPAWN_CLOSE_PREEMPT_UG`), not the raw target. This ensures the proportional ramp decelerates before the preempt close trigger fires.
+
+**End-of-travel detection during nudges:** Open nudges in DOSE_MAIN enable DRV8263 current monitoring. At nudge expiry, before stopping the motor, both flap ADC readings are checked against `FLAP_OPEN_CURRENT_DROP_TH`. If both are below threshold (&&), the flaps have reached fully-open end-of-travel (bag empty), and `SPAWN_STATUS_FLOW_FAILURE` is reported.
+
+### 3.7 Close Preempt Margin
+
+DOSE_MAIN closes the flaps `SPAWN_CLOSE_PREEMPT_UG` (default 500,000 µg = 0.5 g) before the actual target to compensate for inoculant squeezed out as the flaps close. Both the proportional ramp's `remaining_ug` and the close trigger use the same effective target:
+
+```
+effective_target = target_ug - SPAWN_CLOSE_PREEMPT_UG
+remaining_ug     = effective_target - dispensed_ug        (for proportional ramp)
+close when:        dispensed_ug >= effective_target        (fast-close trigger)
+```
+
+### 3.8 Dose Summary
+
+At completion (DONE state), a single-line summary is printed:
+```
+Spawn DONE: time=XX.Xs  target=XXXug  actual=XXXug  error=XXXug  retries=N
+```
+This always prints regardless of `SPAWN_VERBOSE_LOG`. The detailed per-tick CSV data is only emitted when `SPAWN_VERBOSE_LOG` is defined at compile time.
+
+### 3.9 Defaults and Boundaries
 
 | Parameter | Default | Unit | Notes |
 |-----------|---------|------|-------|
 | `SPAWN_TIMER_PERIOD_MS` | 50 | ms | Dosing loop tick rate |
-| `SPAWN_FLOW_WINDOW_MS` | 100 | ms | Window for flow detection |
-| `SPAWN_SCALE_READ_SAMPLES` | 1 | — | Single-shot for speed |
-| Max agitation retries | 3 | — | Per dose attempt. Configurable via `s_spawn.max_retries`. |
+| `SPAWN_FLOW_WINDOW_MS` | 500 | ms | Window for flow detection |
+| `SPAWN_EMA_ALPHA_X1000` | 200 | ×1000 | EMA smoothing (α=0.2, lower = more smoothing) |
+| `SPAWN_FLOW_NOFLOW_UG` | 5,000 | µg | Min µg/window to count as flowing |
+| `SPAWN_NOFLOW_EMA_THRESHOLD_UG` | 5,000 | µg/tick | EMA below this = potential no-flow |
+| `SPAWN_NOFLOW_OPEN_RETRIES` | 3 | — | Open nudge attempts before agitation |
+| `SPAWN_CLOSE_PREEMPT_UG` | 500,000 | µg | Close margin for squeeze overshoot |
+| `SPAWN_FLOW_SPIKE_CLAMP_UG` | 100,000,000 | µg | Max believable per-tick jump |
+| `SPAWN_STARTUP_FLOW_DETECT_UG` | 1,000,000 | µg | Min change to confirm prime flow |
+| `SPAWN_MAX_RETRIES` | 100 | — | Agitation retries before bag-empty |
+| `SPAWN_TICK_DEADBAND` | 50,000 | µg/tick | ±deadband — no nudge within band |
+| `SPAWN_NUDGE_OPEN_MS` | 300 | ms | Open nudge pulse duration |
+| `SPAWN_NUDGE_CLOSE_MS` | 200 | ms | Close nudge pulse duration |
 
 ---
 
@@ -414,9 +467,16 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 ### 6.3 Spawn Dosing
 - [ ] MSG_DISPENSE_SPAWN initiates closed-loop dosing with correct target calculation
 - [ ] Dosing reports progress via MSG_SPAWN_STATUS at each timer tick
+- [ ] Proportional flow control interpolates desired rate using uint64 arithmetic (no overflow)
+- [ ] EMA uses signed deltas to cancel flap-momentum DC bias
+- [ ] Spike guard on dispensed_ug rejects single-tick jumps exceeding SPAWN_FLOW_SPIKE_CLAMP_UG
+- [ ] No-flow detection uses dual condition (EMA + high-water-mark) with open-retry before agitation
+- [ ] End-of-travel detected at nudge expiry via ADC threshold check on both flaps (&&)
+- [ ] Close preempt margin applied to both proportional ramp and close trigger
 - [ ] Bridge detection triggers agitation and retry
 - [ ] MSG_CTRL_STOP aborts an active dose and closes flaps
-- [ ] On completion, flaps are closed and SPAWN_STATUS_DONE is sent
+- [ ] On completion, flaps are closed, SPAWN_STATUS_DONE sent, and summary printed
+- [ ] Detailed CSV data gated behind SPAWN_VERBOSE_LOG compile flag
 
 ### 6.4 Safety
 - [ ] All actuators drive to safe state on unrecoverable error

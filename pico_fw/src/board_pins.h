@@ -483,10 +483,10 @@
 #define SPAWN_FLOW_NOFLOW_UG 5000u /* min µg/window to count as flowing */
 #endif
 #ifndef SPAWN_FLOW_MIN_UG
-#define SPAWN_FLOW_MIN_UG 1000000u /* low-end flow target (µg/window) */
+#define SPAWN_FLOW_MIN_UG 5000000u /* low-end flow target (µg/window) */
 #endif
 #ifndef SPAWN_FLOW_MAX_UG
-#define SPAWN_FLOW_MAX_UG 5000000u /* high-end flow target (µg/window) */
+#define SPAWN_FLOW_MAX_UG 12000000u /* high-end flow target (µg/window) */
 #endif
 #ifndef SPAWN_MAX_RETRIES
 #define SPAWN_MAX_RETRIES 100 /* agitation retries before bag-empty */
@@ -499,6 +499,29 @@
   1000000u /* min µg change to confirm prime flow */
 #endif
 
+/* ── No-flow open retry before agitation ───────────────────────────── *
+ * When a flow window expires with no detected flow, try issuing this   *
+ * many additional open nudge pulses before escalating to the expensive  *
+ * close-flaps + agitate cycle.  Each retry resets the flow window.     */
+#ifndef SPAWN_NOFLOW_OPEN_RETRIES
+#define SPAWN_NOFLOW_OPEN_RETRIES 3u
+#endif
+
+/* EMA flow threshold (µg/tick) below which flow is considered stopped. *
+ * Used together with a high-water-mark window delta for noise-robust   *
+ * no-flow detection.  Should be well below SPAWN_TICK_MIN_UG but       *
+ * above the sensor noise floor.                                         */
+#ifndef SPAWN_NOFLOW_EMA_THRESHOLD_UG
+#define SPAWN_NOFLOW_EMA_THRESHOLD_UG 5000u
+#endif
+
+/* Close preempt margin (µg).  DOSE_MAIN closes the flaps this far      *
+ * before the actual target to compensate for inoculant squeezed out     *
+ * as the flaps close.  Calibrate on hardware.                           */
+#ifndef SPAWN_CLOSE_PREEMPT_UG
+#define SPAWN_CLOSE_PREEMPT_UG 6086400u /* Calculated from measured data */
+#endif
+
 /* ── EMA filtering ─────────────────────────────────────────────────── *
  * Alpha scaled by 1000 (integer maths, no floating point in ISR).     *
  * alpha_x1000 = 250 ≈ α = 0.25 (range 50–500).                        *
@@ -506,7 +529,7 @@
 
 #ifndef SPAWN_EMA_ALPHA_X1000
 #define SPAWN_EMA_ALPHA_X1000                                                  \
-  500u /* EMA smoothing factor ×1000; range 50–500 */
+  200u /* EMA smoothing factor ×1000; range 50–500 (lower = more smoothing) */
 #endif
 
 /* ── Flow spike clamp ──────────────────────────────────────────────── *
@@ -632,6 +655,30 @@
 #ifndef SPAWN_CLOSE_THRESHOLD_UG
 #define SPAWN_CLOSE_THRESHOLD_UG                                               \
   500000u /* 0.5 g — issue final close from low-flow */
+#endif
+
+/* Define SPAWN_VERBOSE_LOG to re-enable per-event diagnostic prints during
+ * dosing.  By default these are suppressed so only the CSV data lines appear
+ * on the serial port.  Enable with -DSPAWN_VERBOSE_LOG in the build or by
+ * uncommenting the line below. */
+/* #define SPAWN_VERBOSE_LOG */
+
+/* ── Burst-flow emergency close ─────────────────────────────────────── *
+ * If the raw per-tick mass delta exceeds the current desired flow rate  *
+ * by SPAWN_FLOW_BURST_FACTOR, the flap is closed immediately at        *
+ * SPAWN_FAST_CLOSE_PWM for SPAWN_EMERGENCY_CLOSE_MS, bypassing the     *
+ * direction-reversal holdoff and any in-progress open nudge.           *
+ * Tune BURST_FACTOR on real hardware with MATLAB data; start at 4.     */
+
+#ifndef SPAWN_FLOW_BURST_FACTOR
+#define SPAWN_FLOW_BURST_FACTOR 6u /* burst = desired_tick × factor       */
+#endif
+#ifndef SPAWN_BURST_MIN_UG
+#define SPAWN_BURST_MIN_UG                                                     \
+  1500000u /* abs floor: 1.5 g per 50 ms tick = 30 g/s */
+#endif
+#ifndef SPAWN_EMERGENCY_CLOSE_MS
+#define SPAWN_EMERGENCY_CLOSE_MS 400u /* emergency close pulse (ms)        */
 #endif
 
 /* ================================================================== */
