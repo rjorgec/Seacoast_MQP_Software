@@ -436,7 +436,7 @@
 #define SPAWN_TIMER_PERIOD_MS 50u /* control loop period (ms); range 20–100 */
 #endif
 #ifndef SPAWN_FLOW_WINDOW_MS
-#define SPAWN_FLOW_WINDOW_MS 100u /* flow-rate measurement window (ms) */
+#define SPAWN_FLOW_WINDOW_MS 500u /* flow-rate measurement window (ms) */
 #endif
 #ifndef SPAWN_SCALE_READ_SAMPLES
 #define SPAWN_SCALE_READ_SAMPLES 1u /* HX711 averaging samples per tick */
@@ -445,7 +445,7 @@
 /* ── Flow detection / agitation ───────────────────────────────────── */
 
 #ifndef SPAWN_FLOW_NOFLOW_UG
-#define SPAWN_FLOW_NOFLOW_UG 500000u /* min µg/window to count as flowing */
+#define SPAWN_FLOW_NOFLOW_UG 5000u /* min µg/window to count as flowing */
 #endif
 #ifndef SPAWN_FLOW_MIN_UG
 #define SPAWN_FLOW_MIN_UG 1000000u /* low-end flow target (µg/window) */
@@ -471,7 +471,7 @@
 
 #ifndef SPAWN_EMA_ALPHA_X1000
 #define SPAWN_EMA_ALPHA_X1000                                                  \
-  250u /* EMA smoothing factor ×1000; range 50–500 */
+  500u /* EMA smoothing factor ×1000; range 50–500 */
 #endif
 
 /* ── Flow spike clamp ──────────────────────────────────────────────── *
@@ -633,7 +633,7 @@
 #ifndef AGITATOR_HOME_SEARCH_STEPS
 #define AGITATOR_HOME_SEARCH_STEPS -500
 #endif
-/* Stall-torque threshold used during homing.  Lower = more sensitive. */
+/* Stall-torque threshold used during homing.  Lower = less sensitive. */
 #ifndef AGITATOR_HOME_TORQUE_LIMIT
 #define AGITATOR_HOME_TORQUE_LIMIT 200u
 #endif
