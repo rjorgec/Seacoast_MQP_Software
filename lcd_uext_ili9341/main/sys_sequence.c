@@ -342,7 +342,7 @@ static void seq_task(void *arg)
             (void)motor_hotwire_traverse(true);
             wait_motion_done(0xFFu, SEQ_MOTION_TIMEOUT_MS);
 
-            ESP_LOGI(TAG, "cut: retract hotwire");
+            ESP_LOGI(TAG, "cut: retract hotwire (position zeroes on successful retrace)");
             (void)motor_hotwire_traverse(false);
             wait_motion_done(0xFFu, SEQ_MOTION_TIMEOUT_MS);
 

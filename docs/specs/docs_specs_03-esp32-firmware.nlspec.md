@@ -160,15 +160,16 @@ Home Screen
 | ARM | "Arm Press" | `on_arm_press()` | `motor_arm_move(ARM_POS_PRESS)` |
 | ARM | "Arm Pos 1" | `on_arm_pos1()` | `motor_arm_move(ARM_POS_1)` |
 | ARM | "Arm Pos 2" | `on_arm_pos2()` | `motor_arm_move(ARM_POS_2)` |
-| RACK | "Rack Home" | `on_rack_home()` | `motor_rack_move(RACK_POS_HOME)` |
-| RACK | "Rack Extend" | `on_rack_extend()` | `motor_rack_move(RACK_POS_EXTEND)` |
-| RACK | "Rack Press" | `on_rack_press()` | `motor_rack_move(RACK_POS_PRESS)` |
-| TURNTABLE | "Pos A" – "Pos D" | `on_tt_a()` – `on_tt_d()` | `motor_turntable_goto(POS_A..D)` |
+| HOT WIRE | "Hotwire Home" | `on_hotwire_home()` | `motor_hotwire_move(HOTWIRE_POS_HOME)` |
+| HOT WIRE | "Hot Extend" | `on_hotwire_extend()` | `motor_hotwire_move(HOTWIRE_POS_EXTEND)` |
+| HOT WIRE | "Hot Press" | `on_hotwire_retrect()` | `motor_hotwire_move(HOTWIRE_POS_RETRACT)` |
 | HOT WIRE | "HotWire ON" | `on_hotwire_on()` | `motor_hotwire_set(true)` |
 | HOT WIRE | "HotWire OFF" | `on_hotwire_off()` | `motor_hotwire_set(false)` |
 | VACUUM | "Vacuum ON" | `on_vacuum_on()` | `motor_vacuum_set(true)` |
 | VACUUM | "Vacuum OFF" | `on_vacuum_off()` | `motor_vacuum_set(false)` |
-| CALIBRATE | "Turntable Home" | `on_tt_home()` | `motor_turntable_home()` |
+| VACUUM2 | "Vacuum2 ON" | `on_vacuum2_on()` | `motor_vacuum2_set(true)` |
+| VACUUM2 | "Vacuum2 OFF" | `on_vacuum2_off()` | `motor_vacuum2_set(false)` |
+| CALIBRATE | "Home All" | `on_home()` | `motor_home_ all()` |
 
 **Status feedback:** When `MSG_MOTION_DONE` is received, `ui_ops_on_motion_done()` updates the status label with subsystem name and result (e.g., "ARM: OK" or "FLAPS: TIMEOUT"). When `MSG_VACUUM_STATUS` is received, `ui_ops_on_vacuum_status()` updates the vacuum status label (e.g., "Vacuum: OK 1200 RPM" or "Vacuum: BLOCKED 350 RPM"). If the arm faults or stalls during a normal move, the operator must use the `"Arm Home"` button before later arm-position buttons will be accepted again.
 

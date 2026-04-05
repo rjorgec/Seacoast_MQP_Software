@@ -11,8 +11,11 @@ extern "C" {
 #define PROTO_DELIM 0x00u
 
 /* Shared default for DRV8434S soft torque-limit threshold.
- * Keep this aligned with the Pico-side protocol header. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 300u
+ * Both ESP and Pico firmware should source their fallback from this symbol
+ * so the UART payload default cannot drift between projects.
+ * 100u is calibrated to avoid false stall trips seen with the previous
+ * 300u default during routine moves. */
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u
 
 /*
  * Wire format endianness is little-endian for all multi-byte fields.
@@ -59,7 +62,7 @@ typedef enum {
   MSG_INDEXER_MOVE = 0x4C, /* ESP→Pico: move bag depth/eject rack (indexer) */
   MSG_ARM_HOME = 0x4D,     /* ESP→Pico: sensorless home for the rotary arm */
   MSG_AGITATE =
-  0x4E, /* ESP→Pico: trigger one agitation cycle (agitator eccentric arm) */
+      0x4E, /* ESP→Pico: agitation cycle (optional pl_agitate_t payload) */
   /* ---- Unsolicited status messages (0x60–0x6F) ---- */
   MSG_MOTION_DONE = 0x60,    /* Pico→ESP: motion/action complete notification */
   MSG_VACUUM_STATUS = 0x61,  /* Pico→ESP: vacuum pump RPM/blocked status */
@@ -68,23 +71,6 @@ typedef enum {
   MSG_ACK = 0x80,
   MSG_NACK = 0x81,
 } msg_type_t;
-
-/*
-typddef enum{
-    Open flaps
-    Close flaps
-    Cut innoculant
-    Dose
-    Abort
-
-    Tare
-    Get weight
-
-    Accept bag
-    Open bag
-    Close bag
-    Dispense bag
-}commands*/
 
 typedef enum {
   NACK_BAD_FRAME = 1,
@@ -142,12 +128,33 @@ typedef struct __attribute__((packed)) {
   uint8_t code;
 } pl_nack_t;
 
+/**
+ * Finish-mode selector for MSG_DISPENSE_SPAWN.
+ * Carried in pl_innoculate_bag_t::flags bit 0.
+ */
+typedef enum {
+  SPAWN_FINISH_MODE_A = 0, /* close-early + top-off (anti-overshoot) */
+  SPAWN_FINISH_MODE_B = 1, /* low-flow taper near target              */
+} spawn_finish_mode_t;
+
+/** Bit definitions for pl_innoculate_bag_t::flags */
+#define SPAWN_FLAG_FINISH_MODE_B                                               \
+  (1u << 0) /* set = Finish B, clear = Finish A */
+#define SPAWN_FLAG_DO_HOME                                                     \
+  (1u << 1) /* set = home flaps to closed before dosing */
+
 typedef struct __attribute__((packed)) {
   uint16_t bag_mass;      // mass of bag being innoculated
   uint16_t spawn_mass;    // mass of spawn remaining
   uint16_t innoc_percent; // spawn percentage of bag weight (x10)
   uint8_t bag_number; // how many bags have been innoculated from the same spawn
+  /* SPAWN_FLAG_* bitmask (finish mode, homing).
+   * Default when flags == 0: Finish A, no pre-home. */
+  uint8_t flags;
 } pl_innoculate_bag_t;
+
+/** Minimum payload length for pl_innoculate_bag_t without flags (legacy). */
+#define PL_INNOCULATE_BAG_MIN_LEN 7u
 
 typedef enum {
   SPAWN_STATUS_RUNNING = 0,
@@ -184,7 +191,8 @@ typedef enum {
   SUBSYS_TURNTABLE = 3,
   SUBSYS_HOTWIRE = 4,
   SUBSYS_VACUUM = 5,
-  SUBSYS_INDEXER = 6, /* Bag depth/eject rack (MSG_INDEXER_MOVE) */
+  SUBSYS_INDEXER = 6,  /* Bag depth/eject rack (MSG_INDEXER_MOVE) */
+  SUBSYS_AGITATOR = 7, /* Agitator eccentric arm (MSG_AGITATE) */
 } subsystem_id_t;
 
 /** Result code carried in MSG_MOTION_DONE */
@@ -201,8 +209,8 @@ typedef enum {
   ARM_POS_PRESS = 0, /* press against attachment point */
   ARM_POS_1 = 1,     /* absolute position 1 */
   ARM_POS_2 = 2,     /* absolute position 2 */
-  ARM_POS_HOME = 3,  /* return to released-home position (step 0, established by
-                        MSG_ARM_HOME) */
+  ARM_POS_HOME =
+      3, /* return to released-home position (step 0, set by MSG_ARM_HOME) */
 } arm_pos_t;
 
 /** Named positions for the rack stepper (DRV8434S device 1) */
@@ -293,7 +301,7 @@ typedef enum __attribute__((packed)) {
 
 /** MSG_HOTWIRE_TRAVERSE (0x4B) payload (1 byte) */
 typedef struct __attribute__((packed)) {
-  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return */
+  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return (retrace/home; Pico zeroes position on success) */
 } pl_hotwire_traverse_t;
 
 /** MSG_INDEXER_MOVE (0x4C) payload (1 byte) */
