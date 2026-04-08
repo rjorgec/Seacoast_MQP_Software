@@ -571,7 +571,7 @@
 #define SPAWN_PROP_UPPER 2u /* remaining > target/UPPER → max flow rate */
 #endif
 #ifndef SPAWN_PROP_LOWER
-#define SPAWN_PROP_LOWER 10u /* remaining < target/LOWER → min flow rate */
+#define SPAWN_PROP_LOWER 6u /* remaining < target/LOWER → min flow rate */
 #endif
 
 /* ── Homing (optional re-zero to closed endpoint before dose) ──────── */
@@ -645,7 +645,7 @@
 
 #ifndef SPAWN_LOWFLOW_THRESHOLD_UG
 #define SPAWN_LOWFLOW_THRESHOLD_UG                                             \
-  5000000u /* enter low-flow taper when ≤ 5 g remain */
+  10000000u /* enter low-flow taper when ≤ 10 g remain */
 #endif
 #ifndef SPAWN_LOWFLOW_NUDGE_MS
 #define SPAWN_LOWFLOW_NUDGE_MS                                                 \
@@ -671,7 +671,7 @@
  * Tune BURST_FACTOR on real hardware with MATLAB data; start at 4.     */
 
 #ifndef SPAWN_FLOW_BURST_FACTOR
-#define SPAWN_FLOW_BURST_FACTOR 6u /* burst = desired_tick × factor       */
+#define SPAWN_FLOW_BURST_FACTOR 3u /* burst = desired_tick × factor       */
 #endif
 #ifndef SPAWN_BURST_MIN_UG
 #define SPAWN_BURST_MIN_UG                                                     \
