@@ -448,7 +448,7 @@ void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
             }
         }
 
-        int32_t mass_ug = 0;
+        int64_t mass_ug = 0;
         uint8_t unit = 0u;
 
         if (len >= sizeof(pl_hx711_mass_t))
@@ -458,9 +458,9 @@ void ui_screens_pico_rx_handler(uint8_t msg_type, uint16_t seq,
             mass_ug = mass_data.mass_ug;
             unit = mass_data.unit;
         }
-        else if (len >= sizeof(int32_t))
+        else if (len >= sizeof(int64_t))
         {
-            /* Legacy Pico payload: mass only (int32_t micrograms). */
+            /* Legacy Pico payload: mass only (int64_t micrograms). */
             memcpy(&mass_ug, payload, sizeof(mass_ug));
             ESP_LOGW(TAG, "Received legacy HX711 payload len=%u (mass only)",
                      (unsigned)len);

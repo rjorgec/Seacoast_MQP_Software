@@ -3198,7 +3198,7 @@ static void handle_hx711_read(uint16_t seq, const uint8_t *payload, uint16_t len
 #endif
 
         pl_hx711_mass_t response = {
-            .mass_ug = (int32_t)mass.ug,
+            .mass_ug = (int64_t)mass.ug,
             .unit = (uint8_t)mass.unit,
             ._rsvd = {0, 0, 0},
         };

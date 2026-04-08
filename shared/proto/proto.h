@@ -64,8 +64,8 @@ typedef enum {
   MSG_AGITATE =
       0x4E, /* ESP→Pico: agitation cycle (optional pl_agitate_t payload) */
   /* ---- Unsolicited status messages (0x60–0x6F) ---- */
-  MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
-  MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
+  MSG_MOTION_DONE = 0x60,    /* Pico→ESP: motion/action complete notification */
+  MSG_VACUUM_STATUS = 0x61,  /* Pico→ESP: vacuum pump RPM/blocked status */
   MSG_ARM_SEAL_EVENT = 0x62, /* Pico→ESP: rotary arm seal transition event */
 
   MSG_ACK = 0x80,
@@ -108,7 +108,7 @@ typedef struct __attribute__((packed)) {
 } pl_hx711_measure_t;
 
 typedef struct __attribute__((packed)) {
-  int32_t mass_ug;  // Mass in micrograms (internal representation)
+  int64_t mass_ug;  // Mass in micrograms (internal representation)
   uint8_t unit;     // mass_unit_t enum value
   uint8_t _rsvd[3]; // Padding for alignment
 } pl_hx711_mass_t;
@@ -301,7 +301,8 @@ typedef enum __attribute__((packed)) {
 
 /** MSG_HOTWIRE_TRAVERSE (0x4B) payload (1 byte) */
 typedef struct __attribute__((packed)) {
-  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return (retrace/home; Pico zeroes position on success) */
+  uint8_t direction; /**< 0 = cut (forward traverse), 1 = return (retrace/home;
+                        Pico zeroes position on success) */
 } pl_hotwire_traverse_t;
 
 /** MSG_INDEXER_MOVE (0x4C) payload (1 byte) */
@@ -324,35 +325,34 @@ typedef struct __attribute__((packed)) {
   uint16_t rpm;   /**< measured RPM (0 if pump off) */
 } pl_vacuum_status_t;
 
-    typedef enum __attribute__((packed))
-    {
-        ARM_SEAL_EVENT_LOST = 0,
-        ARM_SEAL_EVENT_RESTORED = 1,
-    } arm_seal_event_t;
+typedef enum __attribute__((packed)) {
+  ARM_SEAL_EVENT_LOST = 0,
+  ARM_SEAL_EVENT_RESTORED = 1,
+} arm_seal_event_t;
 
-    typedef enum __attribute__((packed))
-    {
-        ARM_SEAL_REASON_TRANSIENT = 0,
-        ARM_SEAL_REASON_STEADY = 1,
-        ARM_SEAL_REASON_STALE_TACH = 2,
-        ARM_SEAL_REASON_UNKNOWN = 3,
-    } arm_seal_reason_t;
+typedef enum __attribute__((packed)) {
+  ARM_SEAL_REASON_TRANSIENT = 0,
+  ARM_SEAL_REASON_STEADY = 1,
+  ARM_SEAL_REASON_STALE_TACH = 2,
+  ARM_SEAL_REASON_UNKNOWN = 3,
+} arm_seal_reason_t;
 
-    /** MSG_ARM_SEAL_EVENT payload (10 bytes) -- unsolicited Pico->ESP */
-    typedef struct __attribute__((packed))
-    {
-        uint8_t event;        /**< arm_seal_event_t */
-        uint8_t reason;       /**< arm_seal_reason_t */
-        uint16_t rpm_baseline; /**< sealed baseline RPM */
-        uint16_t rpm_filt;    /**< filtered RPM at trigger */
-        int16_t delta_rpm;    /**< rpm_filt - rpm_baseline */
-        uint16_t age_ms;      /**< age of RPM sample used */
-    } pl_arm_seal_event_t;
+/** MSG_ARM_SEAL_EVENT payload (10 bytes) -- unsolicited Pico->ESP */
+typedef struct __attribute__((packed)) {
+  uint8_t event;         /**< arm_seal_event_t */
+  uint8_t reason;        /**< arm_seal_reason_t */
+  uint16_t rpm_baseline; /**< sealed baseline RPM */
+  uint16_t rpm_filt;     /**< filtered RPM at trigger */
+  int16_t delta_rpm;     /**< rpm_filt - rpm_baseline */
+  uint16_t age_ms;       /**< age of RPM sample used */
+} pl_arm_seal_event_t;
 
 #if defined(__cplusplus)
-    static_assert(sizeof(pl_arm_seal_event_t) == 10u, "pl_arm_seal_event_t size must be 10");
+static_assert(sizeof(pl_arm_seal_event_t) == 10u,
+              "pl_arm_seal_event_t size must be 10");
 #else
-_Static_assert(sizeof(pl_arm_seal_event_t) == 10u, "pl_arm_seal_event_t size must be 10");
+_Static_assert(sizeof(pl_arm_seal_event_t) == 10u,
+               "pl_arm_seal_event_t size must be 10");
 #endif
 
 #ifdef __cplusplus
