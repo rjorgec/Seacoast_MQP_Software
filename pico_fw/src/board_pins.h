@@ -734,13 +734,21 @@
 
 #ifndef HOTWIRE_TRAVERSE_STEPS
 #define HOTWIRE_TRAVERSE_STEPS                                                 \
-  -12500 /* full-step traversal distance (no microstep) */
+  -20000 /* full-step traversal distance (no microstep) */
 #endif
 #ifndef HOTWIRE_TRAVERSE_RETRACE_STEPS
-#define HOTWIRE_TRAVERSE_RETRACE_STEPS 12500 /* full-step return distance */
+#define HOTWIRE_TRAVERSE_RETRACE_STEPS 20000 /* full-step return distance */
 #endif
 #ifndef HOTWIRE_TRAVERSE_STEP_DELAY_US
 #define HOTWIRE_TRAVERSE_STEP_DELAY_US 1000u /* µs per step; */
+#endif
+#ifndef HOTWIRE_TRAVERSE_PROGRESS_STEPS
+#define HOTWIRE_TRAVERSE_PROGRESS_STEPS                                        \
+  6000 /* forward chunk size per traverse segment */
+#endif
+#ifndef HOTWIRE_TRAVERSE_BACKUP_STEPS
+#define HOTWIRE_TRAVERSE_BACKUP_STEPS                                          \
+  2000 /* reverse backoff between forward chunks */
 #endif
 #ifndef HOTWIRE_TIMEOUT_GUARD_MS
 #define HOTWIRE_TIMEOUT_GUARD_MS                                               \
@@ -748,7 +756,7 @@
 #endif
 #ifndef HOTWIRE_HOME_SEARCH_STEPS
 #define HOTWIRE_HOME_SEARCH_STEPS                                              \
-  14000 /* min search steps toward hard stop                                   \
+  50000 /* min search steps toward hard stop                                   \
          */
 #endif
 #ifndef HOTWIRE_HOME_BACKOFF_STEPS
@@ -756,7 +764,7 @@
 #endif
 #ifndef HOTWIRE_HOME_TIMEOUT_MS
 #define HOTWIRE_HOME_TIMEOUT_MS                                                \
-  15000u /* ms timeout for hotwire homing search/backoff */
+  30000u /* ms timeout for hotwire homing search/backoff */
 #endif
 
 /* ================================================================== */
