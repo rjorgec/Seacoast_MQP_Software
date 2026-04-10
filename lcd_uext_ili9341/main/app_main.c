@@ -17,7 +17,7 @@
 
 #include "motor_hal.h"
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "proto.h"
 
 // #include "recipes.h"
 // #include "wifi_ap.h"

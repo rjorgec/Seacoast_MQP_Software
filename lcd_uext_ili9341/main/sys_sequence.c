@@ -19,7 +19,7 @@
 #include "sys_sequence.h"
 #include "motor_hal.h"
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "proto.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"

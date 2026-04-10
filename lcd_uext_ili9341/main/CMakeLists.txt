@@ -11,7 +11,7 @@ idf_component_register(
         "loadcell.c"
         "flap.c"
         "sys_sequence.c"
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "../../shared/proto"
     PRIV_REQUIRES esp_timer
     PRIV_REQUIRES nvs_flash
     PRIV_REQUIRES motor_hal

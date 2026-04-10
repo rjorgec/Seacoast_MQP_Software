@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include "proto/proto.h"
+#include "proto.h"
 
 void ui_show_home(void);
 void ui_show_auto(void);

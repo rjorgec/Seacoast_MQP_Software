@@ -10,7 +10,7 @@
 #include "esp_lvgl_port.h"
 #include "motor_hal.h"
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "proto.h"
 
 static const char *TAG = "ui_screens";
 

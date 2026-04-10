@@ -1,7 +1,7 @@
 #include "motor_hal.h"
 
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "proto.h"
 #include "esp_log.h"
 
 static const char *TAG = "motor_hal_pico";

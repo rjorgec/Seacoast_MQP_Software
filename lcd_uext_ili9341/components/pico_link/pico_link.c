@@ -11,8 +11,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "proto/proto.h"
-#include "proto/cobs.h"
+#include "proto.h"
+#include "cobs.h"
 
 #define LINK_ENCODED_FRAME_MAX ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 8u)
 #define LINK_DECODED_FRAME_MAX ((size_t)sizeof(proto_hdr_t) + PROTO_MAX_PAYLOAD + 2u)
