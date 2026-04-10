@@ -29,8 +29,8 @@
 #define STEPPER_SOFT_TORQUE_LIMIT PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT
 #endif
 
-// #define SPAWN_VERBOSE_LOG
-// #define SPAWN_CSV_LOG
+#define SPAWN_VERBOSE_LOG
+#define SPAWN_CSV_LOG
 // #define ACTUATOR_DEBUG
 // #define STEP_DEBUG
 
@@ -136,6 +136,10 @@ static int32_t s_turntable_pos_steps = 0;
 static int32_t s_hotwire_pos_steps = 0; /* traverser relative position; zeroed on successful retrace */
 static bool s_hotwire_zero_on_complete = false;
 static hotwire_homing_phase_t s_hotwire_homing_phase = HOTWIRE_HOME_IDLE;
+static bool s_hotwire_traverse_segmented = false;
+static bool s_hotwire_traverse_backoff_phase = false;
+static int32_t s_hotwire_traverse_remaining = 0;
+static uint32_t s_hotwire_traverse_backoffs_remaining = 0u;
 static bool s_turntable_homed = false;
 static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
@@ -302,7 +306,7 @@ typedef struct
     uint8_t retry;
     uint8_t max_retries;
     uint16_t bag_number;
-    uint32_t start_mass_ug;
+    int64_t start_mass_ug;
     uint32_t target_ug;
     uint32_t dispensed_ug;
     uint32_t window_start_ug; /* dispensed_ug at start of current flow window */
@@ -368,7 +372,9 @@ static spawn_dose_ctx_t s_spawn;
  * Define it in board_pins.h or via -DSPAWN_VERBOSE_LOG to re-enable per-event  *
  * diagnostic prints without touching the CSV data stream.                       */
 #ifdef SPAWN_VERBOSE_LOG
-#  define SPAWN_VLOG(...) printf(__VA_ARGS__)
+// #  define SPAWN_VLOG(...) printf(__VA_ARGS__)
+#  define SPAWN_VLOG(...) ((void)0)
+
 #else
 #  define SPAWN_VLOG(...) ((void)0)
 #endif
@@ -872,39 +878,41 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
          * (e.g. untared scale) which would overflow int32_t.  Also clamp the
          * double before the int64 cast in case mass_g is astronomically large
          * (e.g. sensor fault) to stay within valid int64_t range. */
-        static const double K_MAX_UG = (double)INT32_MAX;
-        static const double K_MIN_UG = (double)INT32_MIN;
+        static const double K_MAX_UG = (double)INT64_MAX;
+        static const double K_MIN_UG = (double)INT64_MIN;
         double mass_ug_d = mass_g * 1000000.0;
         if (mass_ug_d > K_MAX_UG) mass_ug_d = K_MAX_UG;
         if (mass_ug_d < K_MIN_UG) mass_ug_d = K_MIN_UG;
-        mass.ug = (int32_t)(int64_t)mass_ug_d;
+        mass.ug = (int64_t)mass_ug_d;
         mass.unit = s_scale.unit;
     }
 
-    /* Use non-negative mass only: negative means below tare (nothing dispensed yet) */
-    uint32_t current_ug = (mass.ug >= 0) ? (uint32_t)mass.ug : 0u;
+    int64_t current_ug = mass.ug;
 
     {
-        uint32_t new_dispensed = (current_ug > s_spawn.start_mass_ug)
-                                     ? (current_ug - s_spawn.start_mass_ug)
-                                     : 0u;
+        int64_t new_dispensed_64 = current_ug - s_spawn.start_mass_ug;
+        if (new_dispensed_64 < 0)
+            new_dispensed_64 = 0;
+        uint64_t new_dispensed = (uint64_t)new_dispensed_64;
 
         /* Spike guard: if dispensed_ug jumps by more than the spike clamp
          * threshold in a single tick (in either direction), hold the previous
          * value.  This prevents a single HX711 glitch from triggering the
          * target-reached check or corrupting the EMA/HWM. */
-        uint32_t prev = s_spawn.dispensed_ug;
-        uint32_t abs_jump = (new_dispensed > prev) ? (new_dispensed - prev)
+        uint64_t prev = (uint64_t)s_spawn.dispensed_ug;
+        uint64_t abs_jump = (new_dispensed > prev) ? (new_dispensed - prev)
                                                    : (prev - new_dispensed);
         if (prev != 0u && abs_jump > (uint32_t)SPAWN_FLOW_SPIKE_CLAMP_UG)
         {
             /* Glitch detected — keep previous dispensed_ug */
-            SPAWN_VLOG("Spawn: dispensed_ug spike rejected (%lu → %lu)\n",
-                       (unsigned long)prev, (unsigned long)new_dispensed);
+            SPAWN_VLOG("Spawn: dispensed_ug spike rejected (%llu -> %llu)\n",
+                       (unsigned long long)prev, (unsigned long long)new_dispensed);
         }
         else
         {
-            s_spawn.dispensed_ug = new_dispensed;
+            s_spawn.dispensed_ug = (new_dispensed > (uint64_t)UINT32_MAX)
+                                       ? UINT32_MAX
+                                       : (uint32_t)new_dispensed;
         }
     }
 
@@ -2001,6 +2009,34 @@ static motion_result_t consume_stepper_motion_result(uint8_t dev_idx, bool timeo
     return motion_result_from_stop_reason(s_motion.jobs[dev_idx].reason);
 }
 
+static uint32_t hotwire_timeout_ms_for_steps(int32_t steps, uint32_t step_delay_us)
+{
+    const uint32_t abs_steps = (uint32_t)(steps < 0 ? -steps : steps);
+    const uint32_t hotwire_motion_us = abs_steps * step_delay_us;
+    const uint32_t hotwire_motion_ms = (hotwire_motion_us + (US_PER_MS - 1u)) / US_PER_MS;
+    return hotwire_motion_ms + HOTWIRE_TIMEOUT_GUARD_MS;
+}
+
+static bool hotwire_start_motion_segment(int32_t steps, uint32_t step_delay_us)
+{
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                           steps,
+                           0u,
+                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                           step_delay_us))
+    {
+        return false;
+    }
+
+    s_hotwire_pending.pending = true;
+    s_hotwire_pending.target_steps = s_hotwire_pos_steps + steps;
+    s_hotwire_pending.subsys = SUBSYS_HOTWIRE;
+    s_hotwire_pending.start_ms = to_ms_since_boot(get_absolute_time());
+    s_hotwire_pending.timeout_ms = hotwire_timeout_ms_for_steps(steps, step_delay_us);
+    s_hotwire_pending.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
+    return true;
+}
+
 /**
  * @brief Flap state-machine tick — detects current threshold crossings.
  *
@@ -2439,6 +2475,58 @@ static void stepper_completion_tick(void)
 
             /* Normal traverse completion */
             s_hotwire_pos_steps += steps_achieved;
+
+            if (result == MOTION_OK && s_hotwire_traverse_segmented)
+            {
+                const int32_t forward_sign = (HOTWIRE_TRAVERSE_STEPS < 0) ? -1 : 1;
+                const int32_t backward_sign = -forward_sign;
+
+                if (!s_hotwire_traverse_backoff_phase && s_hotwire_traverse_backoffs_remaining > 0u)
+                {
+                    const int32_t backoff_steps = backward_sign * (int32_t)HOTWIRE_TRAVERSE_BACKUP_STEPS;
+
+                    if (!hotwire_start_motion_segment(backoff_steps,
+                                                      (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US))
+                    {
+                        result = MOTION_FAULT;
+                    }
+                    else
+                    {
+                        s_hotwire_traverse_backoffs_remaining--;
+                        s_hotwire_traverse_backoff_phase = true;
+                        return;
+                    }
+                }
+
+                if ((s_hotwire_traverse_backoff_phase ||
+                     (s_hotwire_traverse_backoffs_remaining == 0u && s_hotwire_traverse_remaining > 0)) &&
+                    s_hotwire_traverse_remaining > 0)
+                {
+                    int32_t next_chunk = (int32_t)HOTWIRE_TRAVERSE_PROGRESS_STEPS;
+                    if (next_chunk > s_hotwire_traverse_remaining)
+                    {
+                        next_chunk = s_hotwire_traverse_remaining;
+                    }
+
+                    if (next_chunk > 0)
+                    {
+                        const int32_t forward_steps = forward_sign * next_chunk;
+
+                        if (!hotwire_start_motion_segment(forward_steps,
+                                                          (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US))
+                        {
+                            result = MOTION_FAULT;
+                        }
+                        else
+                        {
+                            s_hotwire_traverse_remaining -= next_chunk;
+                            s_hotwire_traverse_backoff_phase = false;
+                            return;
+                        }
+                    }
+                }
+            }
+
             if (result == MOTION_OK && s_hotwire_zero_on_complete)
             {
                 s_hotwire_pos_steps = 0;
@@ -2449,6 +2537,10 @@ static void stepper_completion_tick(void)
                    (unsigned)result, (long)s_hotwire_pos_steps,
                    (result == MOTION_OK && s_hotwire_zero_on_complete) ? " (retrace zeroed)" : "");
             s_hotwire_zero_on_complete = false;
+            s_hotwire_traverse_segmented = false;
+            s_hotwire_traverse_backoff_phase = false;
+            s_hotwire_traverse_remaining = 0;
+            s_hotwire_traverse_backoffs_remaining = 0u;
         }
     }
 #endif /* STEPPER_DEV_HW_CARRIAGE */
@@ -4085,7 +4177,6 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
 
     const pl_hotwire_traverse_t *p = (const pl_hotwire_traverse_t *)payload;
     const uint32_t step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
-    const uint32_t us_to_ms_ceiling_bias = US_PER_MS - 1u;
 
     if (p->direction == 1u)
     {
@@ -4126,11 +4217,39 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
 
     bool is_retrace = false;
     int32_t steps = (int32_t)HOTWIRE_TRAVERSE_STEPS;
-    uint32_t hotwire_motion_us = (uint32_t)(steps < 0 ? -steps : steps) * step_delay_us;
-    uint32_t hotwire_motion_ms = (hotwire_motion_us + us_to_ms_ceiling_bias) / US_PER_MS;
-    /* Add guard to absorb scheduler jitter, motion-engine startup latency,
-     * and minor tuning variance in step timing. */
-    uint32_t timeout_ms = hotwire_motion_ms + HOTWIRE_TIMEOUT_GUARD_MS;
+    int32_t total_abs_steps = (steps < 0) ? -steps : steps;
+    int32_t progress_steps = (int32_t)HOTWIRE_TRAVERSE_PROGRESS_STEPS;
+
+    if (progress_steps <= 0)
+    {
+        printf("Hotwire Traverse: invalid HOTWIRE_TRAVERSE_PROGRESS_STEPS=%li\n",
+               (long)HOTWIRE_TRAVERSE_PROGRESS_STEPS);
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if ((int32_t)HOTWIRE_TRAVERSE_BACKUP_STEPS <= 0)
+    {
+        printf("Hotwire Traverse: invalid HOTWIRE_TRAVERSE_BACKUP_STEPS=%li\n",
+               (long)HOTWIRE_TRAVERSE_BACKUP_STEPS);
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    uint32_t n_forward_segments =
+        (uint32_t)((total_abs_steps + progress_steps - 1) / progress_steps);
+    uint32_t n_backoffs = (n_forward_segments > 0u) ? (n_forward_segments - 1u) : 0u;
+    int32_t compensated_forward_total =
+        total_abs_steps + (int32_t)(n_backoffs * (uint32_t)HOTWIRE_TRAVERSE_BACKUP_STEPS);
+    int32_t first_chunk = progress_steps;
+    if (first_chunk > compensated_forward_total)
+    {
+        first_chunk = compensated_forward_total;
+    }
+
+    const int32_t forward_sign = (steps < 0) ? -1 : 1;
+    const int32_t first_steps = forward_sign * first_chunk;
+    const int32_t remaining_after_first = compensated_forward_total - first_chunk;
 
     if (s_motion.jobs[STEPPER_DEV_HW_CARRIAGE].active)
     {
@@ -4138,28 +4257,31 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
     }
     s_hotwire_pending.pending = false;
     s_hotwire_zero_on_complete = false;
+    s_hotwire_traverse_segmented = false;
+    s_hotwire_traverse_backoff_phase = false;
+    s_hotwire_traverse_remaining = 0;
+    s_hotwire_traverse_backoffs_remaining = 0u;
 
-    if (!start_stepper_job((uint8_t)STEPPER_DEV_HW_CARRIAGE,
-                           steps,
-                           0u,
-                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
-                           step_delay_us))
+    if (!hotwire_start_motion_segment(first_steps, step_delay_us))
     {
         printf("Hotwire Traverse: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    s_hotwire_pending.pending = true;
-    s_hotwire_pending.target_steps = s_hotwire_pos_steps + steps;
-    s_hotwire_pending.subsys = SUBSYS_HOTWIRE;
-    s_hotwire_pending.start_ms = to_ms_since_boot(get_absolute_time());
-    s_hotwire_pending.timeout_ms = timeout_ms;
-    s_hotwire_pending.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
     s_hotwire_zero_on_complete = is_retrace;
+    s_hotwire_traverse_segmented = true;
+    s_hotwire_traverse_backoff_phase = false;
+    s_hotwire_traverse_remaining = remaining_after_first;
+        s_hotwire_traverse_backoffs_remaining = n_backoffs;
 
-    printf("Hotwire Traverse: dir=%u steps=%li\n",
-           (unsigned)p->direction, (long)steps);
+        printf("Hotwire Traverse: dir=%u target=%li compensated_fwd=%li chunk=%u backup=%u backoffs=%u\n",
+           (unsigned)p->direction,
+           (long)steps,
+            (long)compensated_forward_total,
+           (unsigned)HOTWIRE_TRAVERSE_PROGRESS_STEPS,
+            (unsigned)HOTWIRE_TRAVERSE_BACKUP_STEPS,
+            (unsigned)n_backoffs);
     send_ack(seq);
 #endif
 }
@@ -4332,9 +4454,10 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
     s_spawn.bag_number  = pl->bag_number;
     s_spawn.finish_mode = finish_mode;
     s_spawn.do_home     = do_home;
-    s_spawn.start_mass_ug  = (uint32_t)mass.ug;
+    s_spawn.start_mass_ug  = mass.ug;
     /* innoc_percent is x10 percent (e.g., 250 = 25.0%) */
-    uint64_t target_ug = ((uint64_t)s_spawn.start_mass_ug * (uint64_t)pl->innoc_percent) / 1000ULL;
+    uint64_t baseline_ug = (s_spawn.start_mass_ug > 0) ? (uint64_t)s_spawn.start_mass_ug : 0u;
+    uint64_t target_ug = (baseline_ug * (uint64_t)pl->innoc_percent) / 1000ULL;
     s_spawn.target_ug          = (uint32_t)target_ug;
     s_spawn.dispensed_ug       = 0u;
     s_spawn.window_start_ug    = 0u;
@@ -5031,6 +5154,10 @@ void uart_server_init(void)
     s_turntable_pos_steps = 0;
     s_hotwire_pos_steps = 0;
     s_hotwire_zero_on_complete = false;
+    s_hotwire_traverse_segmented = false;
+    s_hotwire_traverse_backoff_phase = false;
+    s_hotwire_traverse_remaining = 0;
+    s_hotwire_traverse_backoffs_remaining = 0u;
     /* Turntable requires explicit homing before any GOTO command is valid.
      * MSG_TURNTABLE_HOME must be sent first; GOTO commands in UNCALIBRATED
      * state are NACKed to prevent uncontrolled turntable movement. */
