@@ -60,7 +60,7 @@ The following compile-time protocol defaults are defined in `shared/proto/proto.
 
 | Constant | Default | Purpose |
 |----------|---------|---------|
-| `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` | 300 | Default soft torque-limit threshold for DRV8434S motion commands (`0` disables torque-limit stop) |
+| `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` | 100 | Default soft torque-limit threshold for DRV8434S motion commands (`0` disables torque-limit stop) |
 
 ---
 
@@ -100,6 +100,7 @@ The following compile-time protocol defaults are defined in `shared/proto/proto.
 | 0x4B | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t` | 1 | Traverse hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE); direction 0=cut, 1=return |
 | 0x4C | `MSG_INDEXER_MOVE` | `pl_indexer_move_t` | 1 | Move bag depth/eject rack (STEPPER_DEV_INDEXER) to named position |
 | 0x4D | `MSG_ARM_HOME` | none (len=0) | 0 | Sensorlessly home the rotary arm against its positive hard stop, then back off |
+| 0x4E | `MSG_AGITATE` | `pl_agitate_t` | 1 | Trigger agitator knead cycle; optional home before kneading via `AGITATE_FLAG_DO_HOME` in flags byte |
 
 ### 3.3 Unsolicited Status Messages (0x60–0x6F, Pico → ESP32)
 
@@ -150,7 +151,8 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | 3 | `SUBSYS_TURNTABLE` | DRV8434S device 2 (platform) |
 | 4 | `SUBSYS_HOTWIRE` | DRV8263 hotwire instance (IN1 independent half-bridge) |
 | 5 | `SUBSYS_VACUUM` | Vacuum pump 1 GPIO + RPM ISR |
-| 6 | `SUBSYS_INDEXER` | DRV8434S device 5 (bag depth/eject rack) — not yet wired |
+| 6 | `SUBSYS_INDEXER` | DRV8434S (bag depth/eject rack) — not yet wired |
+| 7 | `SUBSYS_AGITATOR` | DRV8434S device 2 (agitator eccentric arm) |
 
 ### 4.3 Motion Result Codes (`motion_result_t`)
 
@@ -171,6 +173,7 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | 0 | `ARM_POS_PRESS` | Press against attachment point (stall = engagement confirmation) |
 | 1 | `ARM_POS_1` | Intermediate position 1 |
 | 2 | `ARM_POS_2` | Intermediate position 2 |
+| 3 | `ARM_POS_HOME` | Home position (after homing backoff) |
 
 **Rack (`rack_pos_t`):**
 
@@ -184,10 +187,9 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 
 | Value | Name | Meaning |
 |-------|------|---------|
-| 0 | `TURNTABLE_POS_A` | Position A (default home) |
-| 1 | `TURNTABLE_POS_B` | Position B |
-| 2 | `TURNTABLE_POS_C` | Position C |
-| 3 | `TURNTABLE_POS_D` | Position D |
+| 0 | `TURNTABLE_POS_INTAKE` | Intake position (default home / hard endstop) |
+| 1 | `TURNTABLE_POS_TRASH` | Trash / intermediate position |
+| 2 | `TURNTABLE_POS_EJECT` | Eject position — bag pushed out |
 
 **Indexer (`indexer_pos_t`):**
 
@@ -234,6 +236,15 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | 2 | `ARM_SEAL_REASON_STALE_TACH` | Tach pulses missing/stale while vacuum ON |
 | 3 | `ARM_SEAL_REASON_UNKNOWN` | Fallback reason when unavailable |
 
+### 4.9 Spawn Finish Mode (`spawn_finish_mode_t`)
+
+Selects the end-of-dose strategy used by the Pico spawn dosing algorithm.
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `SPAWN_FINISH_MODE_A` | Early close + top-off pulses to correct undershoot |
+| 1 | `SPAWN_FINISH_MODE_B` | Low-flow taper — switch to minimal-PWM nudges when near target |
+
 ---
 
 ## 5. Payload Struct Reference
@@ -261,6 +272,7 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 | `pl_arm_seal_event_t` | 10 | `event:u8, reason:u8, rpm_baseline:u16, rpm_filt:u16, delta_rpm:i16, age_ms:u16` |
 | `pl_hotwire_traverse_t` | 1 | `direction:u8` (0=cut/forward, 1=return) |
 | `pl_indexer_move_t` | 1 | `position:u8` (indexer_pos_t) |
+| `pl_agitate_t` | 1 | `flags:u8` (`AGITATE_FLAG_DO_HOME` = 0x01 to home agitator before kneading; 0 = knead only) |
 
 ---
 
@@ -273,5 +285,5 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 - [ ] `proto_crc16_ccitt()` computes CRC-16-CCITT (polynomial 0x1021, init 0xFFFF) correctly for at least 3 known test vectors
 - [ ] COBS encode/decode round-trips correctly for payloads of size 0, 1, 64, and 128 bytes
 - [ ] All `#define` constants use `#ifndef` guards
-- [ ] `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` is present in the shared protocol header and used as the fallback default on both Pico and ESP firmware
+- [ ] `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` (value: 100) is present in the shared protocol header and used as the fallback default on both Pico and ESP firmware
 - [ ] The header compiles cleanly under both GCC (ARM, Pico SDK) and GCC (RISC-V, ESP-IDF) with `-Wall -Werror`

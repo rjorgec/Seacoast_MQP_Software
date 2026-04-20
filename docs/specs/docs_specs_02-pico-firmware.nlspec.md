@@ -10,7 +10,7 @@
 
 ## 1. Overview
 
-The Pico firmware runs bare-metal C on the RP2040 (ARM core of the Pico 2). It is the sole controller of all physical actuators and sensors. It receives commands from the ESP32 over UART, executes them via hardware drivers, and reports results back.
+The Pico firmware runs bare-metal C on the RP2350 (ARM core of the Pico 2). It is the sole controller of all physical actuators and sensors. It receives commands from the ESP32 over UART, executes them via hardware drivers, and reports results back.
 
 ### 1.1 Source File Map
 
@@ -83,7 +83,7 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Second flap driver (`s_drv8263_flap2`):** If present and initialized (`s_drv8263_flap2_ready == true`), both flap DRV8263 instances are commanded in parallel for every flap state transition. Both must complete before MOTION_DONE is sent.
 
-### 2.2 Arm Stepper (DRV8434S Device 0)
+### 2.2 Arm Stepper (`STEPPER_DEV_ROT_ARM`, DRV8434S Device 0)
 
 **Hardware:** DRV8434S on SPI1 daisy-chain, device index 0.
 
@@ -93,7 +93,7 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
-| ARM_POS_PRESS | `ARM_STEPS_PRESS` | -3500 |
+| ARM_POS_PRESS | `ARM_STEPS_PRESS` | -3800 |
 | ARM_POS_1 | `ARM_STEPS_POS1` | -500 |
 | ARM_POS_2 | `ARM_STEPS_POS2` | -100 |
 
@@ -128,9 +128,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 | HOMING_BACKOFF | Step job complete | AT_HOME_RELEASED | Send MOTION_DONE(ARM, OK, `-ARM_HOME_BACKOFF_STEPS`) |
 | HOMING_SEEK / HOMING_BACKOFF | SPI / driver fault / timeout | REHOME_REQUIRED | Send matching MOTION_DONE; reject later `MSG_ARM_MOVE` |
 
-### 2.3 Rack Stepper (DRV8434S Device 1)
+### 2.3 Rack Stepper (DRV8434S — Not Currently Wired)
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 1.
+**Status: Not currently wired.** The rack stepper is defined in the protocol and firmware but is not assigned to any device index in the current `board_pins.h` daisy-chain configuration. When wired, it will occupy a SPI1 daisy-chain device slot.
 
 **Position tracking:** `s_rack_pos_steps` (int32_t). Zeroed on successful home.
 
@@ -139,16 +139,16 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
 | RACK_POS_HOME | — | Drive to stall; zero counter |
-| RACK_POS_EXTEND | `RACK_STEPS_EXTEND` | 6000 |
-| RACK_POS_PRESS | `RACK_STEPS_PRESS` | 7500 |
+| RACK_POS_EXTEND | `RACK_STEPS_EXTEND` | 800 |
+| RACK_POS_PRESS | `RACK_STEPS_PRESS` | 1200 |
 
-**Timeouts:** `RACK_HOME_TIMEOUT_MS` (default: 15000), `RACK_MOVE_TIMEOUT_MS` (default: 12000).
+**Timeouts:** `RACK_MOVE_TIMEOUT_MS` (default: 5000).
 
 **Rack State Machine States:** `IDLE`, `HOMING`, `MOVING`, `AT_HOME`, `AT_EXTEND`, `AT_PRESS`, `FAULT`
 
-### 2.4 Turntable Stepper (DRV8434S Device 2)
+### 2.4 Turntable Stepper (DRV8434S — Not Currently Wired)
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 2.
+**Status: Not currently wired.** The turntable stepper is defined in the protocol and firmware but is not assigned to any device index in the current `board_pins.h` daisy-chain configuration. When wired, it will occupy a SPI1 daisy-chain device slot.
 
 **Position tracking:** `s_turntable_pos_steps` (int32_t). Zeroed on home.
 
@@ -156,12 +156,11 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
-| TURNTABLE_POS_A | `TURNTABLE_STEPS_A` | 0 |
-| TURNTABLE_POS_B | `TURNTABLE_STEPS_B` | 1250 |
-| TURNTABLE_POS_C | `TURNTABLE_STEPS_C` | 2500 |
-| TURNTABLE_POS_D | `TURNTABLE_STEPS_D` | 3750 |
+| TURNTABLE_POS_INTAKE | `TURNTABLE_STEPS_INTAKE` | 0 (hard stop) |
+| TURNTABLE_POS_TRASH | `TURNTABLE_STEPS_TRASH` | 500 |
+| TURNTABLE_POS_EJECT | `TURNTABLE_STEPS_EJECT` | 1000 |
 
-**Timeouts:** `TURNTABLE_HOME_TIMEOUT_MS` (default: 20000), `TURNTABLE_MOVE_TIMEOUT_MS` (default: 15000).
+**Timeouts:** `TURNTABLE_MOVE_TIMEOUT_MS` (default: 8000).
 
 **Turntable State Machine States:** `UNCALIBRATED`, `HOMING`, `MOVING`, `AT_A`, `AT_B`, `AT_C`, `AT_D`, `FAULT`
 
@@ -205,23 +204,21 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Vacuum States:** `OFF`, `ON_OK`, `ON_BLOCKED`
 
-### 2.8 Hot Wire Traverse Stepper (DRV8434S Device 4 — `STEPPER_DEV_HW_CARRIAGE`)
+### 2.8 Hot Wire Traverse Stepper (`STEPPER_DEV_HW_CARRIAGE`, DRV8434S Device 1)
 
-**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_HW_CARRIAGE` in `uart_server.c`.
+**Status: Active — wired as device 1 on the SPI1 daisy-chain.**
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 4 (when wired). Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 1. Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
 
-**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward `HOTWIRE_TRAVERSE_STEPS` (default: -4000, full-step no subdivision) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 2 µs/step). This cuts the tip quickly. 0=full-step mode, no microstep subdivision (DRV8434S_CTRL3_MICROSTEP_MODE=0).
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward in segments. Each segment steps `HOTWIRE_TRAVERSE_PROGRESS_STEPS` (default: 6000) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 1000 µs/step), then backs up `HOTWIRE_TRAVERSE_BACKUP_STEPS` (default: 2000) between segments, until `HOTWIRE_TRAVERSE_STEPS` total (default: -20000) is reached. Full-step mode, no microstep subdivision.
 
-**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse `HOTWIRE_TRAVERSE_RETRACE_STEPS` (default: 4000) and zero position on successful return. Timeout is bounded by traversal time + `HOTWIRE_TIMEOUT_GUARD_MS` (default: 8000 ms).
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse `HOTWIRE_TRAVERSE_RETRACE_STEPS` (default: 20000) and zero position on successful return. Timeout is bounded by traversal time + `HOTWIRE_TIMEOUT_GUARD_MS` (default: 8000 ms).
 
-**Activation:** To uncomment `STEPPER_DEV_HW_CARRIAGE` in `board_pins.h` and increment `DRV8434S_N_DEVICES` to include this device.
+### 2.9 Indexer / Bag Depth Rack (`STEPPER_DEV_INDEXER` — Not Yet Wired)
 
-### 2.9 Indexer / Bag Depth Rack (DRV8434S Device 5 — `STEPPER_DEV_INDEXER`)
+**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_INDEXER` in `uart_server.c`. Device index not yet assigned.
 
-**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_INDEXER` in `uart_server.c`.
-
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 5 (when wired). Drives the bag depth/eject rack that centers the incoming substrate bag and pushes out the inoculated bag.
+**Hardware (when wired):** DRV8434S on SPI1 daisy-chain. Drives the bag depth/eject rack that centers the incoming substrate bag and pushes out the inoculated bag.
 
 **Position tracking:** `s_indexer_pos_steps` (int32_t). Updated on each move.
 
@@ -231,7 +228,21 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 | `INDEXER_POS_CENTER` | `INDEXER_STEPS_CENTER` | 3000 | Holds bag centered for weighing/opening |
 | `INDEXER_POS_EJECT` | `INDEXER_STEPS_EJECT` | 8000 | Fully extended; pushes inoculated bag out |
 
-**Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h` and increment `DRV8434S_N_DEVICES`.
+**Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h`, assign a device index, and increment `DRV8434S_N_DEVICES`.
+
+### 2.10 Agitator (`STEPPER_DEV_AGITATOR`, DRV8434S Device 2)
+
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 2. Drives an eccentric arm that kneads the hopper bag to break material bridges.
+
+**Triggered by:** `MSG_AGITATE` with `pl_agitate_t` payload, or automatically by the spawn dosing algorithm on no-flow detection.
+
+**Sensorless homing:** If `AGITATE_FLAG_DO_HOME` is set in the flags byte, the agitator seeks in the negative direction for up to `AGITATOR_HOME_SEARCH_STEPS` (default: -500) using `AGITATOR_HOME_TORQUE_LIMIT` (default: 200). A torque-stop is treated as home; the firmware backs off `AGITATOR_HOME_BACKOFF_STEPS` (default: 20) and zeros position. Timeout: `AGITATOR_HOME_TIMEOUT_MS` (default: 10000 ms).
+
+**Knead cycle:** `AGITATOR_N_CYCLES` (default: 3) forward + reverse cycles of `AGITATOR_KNEAD_STEPS` (default: 400) each at `AGITATOR_STEP_DELAY_US` (default: 2000 µs/step).
+
+**Completion:** `MSG_MOTION_DONE(SUBSYS_AGITATOR, result, steps_done)` sent on completion or fault.
+
+**Agitator States:** `IDLE`, `HOMING`, `KNEADING`, `FAULT`
 
 ### 2.7 Load Cell (HX711)
 
@@ -291,6 +302,9 @@ The dosing algorithm runs on a `repeating_timer` at `SPAWN_TIMER_PERIOD_MS` (def
 | DOSE_MAIN | Flow confirmed | Proportional closed-loop nudge control. Per-tick desired rate interpolated linearly between `SPAWN_TICK_MIN_UG` and `SPAWN_TICK_MAX_UG` based on remaining mass vs target. Burst-flow emergency close if delta exceeds desired × `SPAWN_FLOW_BURST_FACTOR`. | `dispensed_ug >= target_ug - SPAWN_CLOSE_PREEMPT_UG` → CLOSE_CONFIRM. No-flow detected (see 3.5) → open retries, then AGIT_CLOSING. |
 | AGIT_CLOSING | No-flow after open retries | Fast-close flaps before agitation. | FLAP_SM_CLOSED or timeout → AGITATING. |
 | AGITATING | Flaps closed | Agitator runs N×(forward+reverse) knead cycles. | Cycles complete: retries < max → re-PRIME. Retries exhausted → BAG_EMPTY. |
+| FINISH_A_CLOSE | Early close triggered | Issue close at `SPAWN_CLOSE_EARLY_MARGIN_UG` before target. | Flap SM closed or timeout → FINISH_A_TOPOFF. |
+| FINISH_A_TOPOFF | Flaps closed | Issue small open pulses (`SPAWN_TOPOFF_PULSE_MS`, up to `SPAWN_TOPOFF_MAX_PULSES`) to correct undershoot. Re-read after each pulse + settle. | Within tolerance → DONE. Max pulses → DONE. |
+| FINISH_B_LOWFLOW | Remaining < `SPAWN_LOWFLOW_THRESHOLD_UG` | Switch to minimal-PWM nudges (`SPAWN_LOWFLOW_NUDGE_MS`). | `dispensed_ug >= target_ug - SPAWN_CLOSE_THRESHOLD_UG` → CLOSE_CONFIRM. |
 | CLOSE_CONFIRM | Fast-close issued | Wait for flap state machine to confirm closed or timeout. | Confirmed → DONE. |
 | DONE | Target mass reached | Close flaps. Stop timer. Print summary. | Send SPAWN_STATUS(DONE). Terminal. |
 | BAG_EMPTY | Retries exhausted | Close flaps. Stop timer. | Send SPAWN_STATUS(BAG_EMPTY). Terminal. |
@@ -313,9 +327,9 @@ During DOSE_MAIN, the target per-tick flow rate is interpolated:
 
 | Remaining mass | Desired flow rate |
 |---|---|
-| `> target / SPAWN_PROP_UPPER` (default /2) | `SPAWN_TICK_MAX_UG` (500,000 µg/tick) |
+| `> target / SPAWN_PROP_UPPER` (default /2) | `SPAWN_TICK_MAX_UG` (12,000,000 µg/tick) |
 | Between upper and lower thresholds | Linear interpolation (uint64 safe) |
-| `< target / SPAWN_PROP_LOWER` (default /10) | `SPAWN_TICK_MIN_UG` (100,000 µg/tick) |
+| `< target / SPAWN_PROP_LOWER` (default /6) | `SPAWN_TICK_MIN_UG` (5,000,000 µg/tick) |
 
 Nudge decisions compare EMA flow vs desired rate ± `SPAWN_TICK_DEADBAND`. Direction-reversal holdoff (`SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS`) prevents hunting.
 
@@ -351,13 +365,16 @@ This always prints regardless of `SPAWN_VERBOSE_LOG`. The detailed per-tick CSV 
 | `SPAWN_FLOW_NOFLOW_UG` | 5,000 | µg | Min µg/window to count as flowing |
 | `SPAWN_NOFLOW_EMA_THRESHOLD_UG` | 5,000 | µg/tick | EMA below this = potential no-flow |
 | `SPAWN_NOFLOW_OPEN_RETRIES` | 3 | — | Open nudge attempts before agitation |
-| `SPAWN_CLOSE_PREEMPT_UG` | 500,000 | µg | Close margin for squeeze overshoot |
+| `SPAWN_CLOSE_PREEMPT_UG` | 6,086,400 | µg | Close margin for squeeze overshoot (calibrated) |
+| `SPAWN_CLOSE_EARLY_MARGIN_UG` | 500,000 | µg | Additional early-close margin for Finish Mode A |
 | `SPAWN_FLOW_SPIKE_CLAMP_UG` | 100,000,000 | µg | Max believable per-tick jump |
 | `SPAWN_STARTUP_FLOW_DETECT_UG` | 1,000,000 | µg | Min change to confirm prime flow |
 | `SPAWN_MAX_RETRIES` | 100 | — | Agitation retries before bag-empty |
 | `SPAWN_TICK_DEADBAND` | 50,000 | µg/tick | ±deadband — no nudge within band |
 | `SPAWN_NUDGE_OPEN_MS` | 300 | ms | Open nudge pulse duration |
 | `SPAWN_NUDGE_CLOSE_MS` | 200 | ms | Close nudge pulse duration |
+| `SPAWN_MAX_OPEN_NUDGES` | 8 | — | Max open nudges per no-flow recovery attempt |
+| `SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS` | 350 | ms | Minimum time between direction reversals |
 
 ---
 
@@ -366,10 +383,11 @@ This always prints regardless of `SPAWN_VERBOSE_LOG`. The detailed per-tick CSV 
 The main polling loop must call the following on every iteration:
 
 ```c
-flap_sm_tick();                // polls DRV8263 monitoring_enabled flag, timeout
 vacuum_sm_tick();              // reads RPM counter every VACUUM_RPM_SAMPLE_INTERVAL_MS
 arm_seal_monitor_tick();       // rotary-arm seal monitor (EMA, baseline, LOST/RESTORED edges)
+flap_sm_tick();                // polls DRV8263 monitoring_enabled flag, timeout
 stepper_completion_tick();     // polls drv8434s_motion active flag for arm/rack/turntable, timeout
+arm_press_retry_tick();        // RPM-delta verification and retry logic for ARM_POS_PRESS
 stepper_spi_watchdog_tick();   // reads FAULT register ~2s while idle; logs/clears faults
 ```
 

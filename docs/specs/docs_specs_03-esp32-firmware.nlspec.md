@@ -101,6 +101,8 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_vacuum2_set(bool enable)` | `MSG_VACUUM2_SET` | `pl_vacuum2_set_t{enable}` |
 | `motor_hotwire_traverse(bool cut)` | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t{direction}` |
 | `motor_indexer_move(uint8_t position)` | `MSG_INDEXER_MOVE` | `pl_indexer_move_t{position}` |
+| `motor_agitate(void)` | `MSG_AGITATE` | `pl_agitate_t{flags=0}` (knead only, no home) |
+| `motor_agitate_home(void)` | `MSG_AGITATE` | `pl_agitate_t{flags=AGITATE_FLAG_DO_HOME}` (home then knead) |
 | `motor_linact_start_monitor_dir(dir, speed, low, high, interval)` | `MSG_MOTOR_DRV8263_START_MON` | `pl_drv8263_start_mon_t` (legacy) |
 | `motor_linact_stop_monitor()` | `MSG_MOTOR_DRV8263_STOP_MON` | none (legacy) |
 | `motor_stepper_enable(bool en)` | `MSG_MOTOR_STEPPER_ENABLE` | `pl_stepper_enable_t{enable}` (legacy/raw stepper API) |
@@ -186,6 +188,27 @@ Home Screen
 | Button | "Abort" | `on_seq_abort()` | `sys_sequence_send_cmd(SYS_CMD_ABORT)` → sequence transitions to `SYS_IDLE`; all actuators safe-stopped |
 
 > **Abort routing note:** `on_seq_abort()` sends `SYS_CMD_ABORT` to the sequence task queue via `sys_sequence_send_cmd()`. The sequence task's main loop checks for this command at the top of every iteration and calls `safe_stop_all()` before transitioning back to `SYS_IDLE`, immediately re-enabling manual controls. (An earlier implementation incorrectly sent `CTRL_CMD_STOP` to the legacy control task queue, which had no effect on the sequence state machine.)
+
+#### 4.5.1 `sys_sequence` State Table (`sys_state_t`)
+
+| Value | State | Description |
+|-------|-------|-------------|
+| 0 | `SYS_IDLE` | Inactive; manual controls enabled |
+| 1 | `SYS_SETUP_LOAD` | Load spawn bag, home/position subsystems |
+| 2 | `SYS_CUTTING_TIP` | Heat hot wire and traverse carriage to cut bag tip |
+| 3 | `SYS_ROTATING_TO_ACCEPT` | Move turntable to `TURNTABLE_POS_INTAKE` |
+| 4 | `SYS_INTAKE_WAITING` | Wait for substrate bag weight signal |
+| 5 | `SYS_INTAKE_WEIGHING` | Measure bag mass via `MSG_HX711_MEASURE` |
+| 6 | `SYS_OPENING_BAG` | Multi-step bag opening: arm press, vacuum on, rack extend |
+| 7 | `SYS_OPEN_RECOVERING` | Seal-loss recovery: backoff / re-press / re-open retry |
+| 8 | `SYS_INOCULATING` | Closed-loop spawn dosing via `MSG_DISPENSE_SPAWN` |
+| 9 | `SYS_POST_DOSE` | Close flaps, return arm and rack to neutral |
+| 10 | `SYS_EJECTING` | Move turntable to `TURNTABLE_POS_EJECT`, push bag out |
+| 11 | `SYS_ROTATING_TO_INTAKE` | Return turntable to intake position for next bag |
+| 12 | `SYS_SPAWN_EMPTY` | Prompt operator to replace spawn bag |
+| 13 | `SYS_CONTINUE_RESTART` | Rotate to `TURNTABLE_POS_TRASH`, open flaps, restart cycle |
+| 14 | `SYS_ERROR` | Safe-stop all actuators; operator intervention required |
+| 15 | `SYS_ESTOP` | Emergency stop |
 
 ### 4.6 Dosing Screen (`ui_show_dosing()`)
 
