@@ -24,6 +24,10 @@
 #include "shared/proto/proto.h"
 #include "shared/proto/cobs.h"
 
+#ifndef STEPPER_SOFT_TORQUE_LIMIT
+#define STEPPER_SOFT_TORQUE_LIMIT PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT
+#endif
+
 /* ── Frame-level constants ─────────────────────────────────────────────────── */
 
 #define UART_RX_RING_SIZE 512u
@@ -140,6 +144,42 @@ static vacuum_status_code_t s_vacuum_status = VACUUM_OFF;
 
 /* ── Dosing callback ─────────────────────────────────────────────────────── */
 
+/**
+ * @brief Pico-side spawn dosing state machine states.
+ *
+ * States flow left-to-right.  Any state can transition to FAULT or ABORTED.
+ *
+ *  IDLE → [HOMING →] PRIME → DOSE_MAIN
+ *                               ├─(Finish A)→ FINISH_A_CLOSE → CLOSE_CONFIRM
+ *                               │                                    ├─ undershoot → FINISH_A_TOPOFF → [re-close] → DONE
+ *                               │                                    └─ OK → DONE
+ *                               └─(Finish B)→ FINISH_B_LOWFLOW → FAST_CLOSE → CLOSE_CONFIRM → DONE
+ *
+ *  DOSE_MAIN also transitions to FAST_CLOSE when dispensed_ug >= target_ug.
+ */
+typedef enum
+{
+    SPAWN_SM_IDLE = 0,
+    SPAWN_SM_HOMING,          /* drive flaps to closed endpoint (re-zero virtual position) */
+    SPAWN_SM_PRIME,           /* slowly open until flow detected                            */
+    SPAWN_SM_DOSE_MAIN,       /* closed-loop proportional nudge dosing                      */
+    SPAWN_SM_FINISH_A_CLOSE,  /* Finish A: issue early close; wait one tick for setup        */
+    SPAWN_SM_CLOSE_CONFIRM,   /* wait for FLAP_SM_CLOSED or timeout                          */
+    SPAWN_SM_FINISH_A_TOPOFF, /* Finish A: small open pulses to correct undershoot           */
+    SPAWN_SM_FINISH_B_LOWFLOW,/* Finish B: minimal-pwm nudge near target                     */
+    SPAWN_SM_FAST_CLOSE,      /* issue close at SPAWN_FAST_CLOSE_PWM                         */
+    SPAWN_SM_DONE,
+    SPAWN_SM_FAULT,
+    SPAWN_SM_ABORTED,
+} spawn_sm_state_t;
+
+/** What to do after CLOSE_CONFIRM completes. */
+typedef enum
+{
+    CLOSE_NEXT_DONE = 0,        /* go straight to DONE */
+    CLOSE_NEXT_CHECK_TOPOFF,    /* check for undershoot → maybe TOPOFF, else DONE */
+} close_next_t;
+
 typedef struct
 {
     bool active;
@@ -151,19 +191,43 @@ typedef struct
     uint32_t start_mass_ug;
     uint32_t target_ug;
     uint32_t dispensed_ug;
-    uint32_t window_start_ug; /* dispensed_ug at start of current 500 ms flow window */
+    uint32_t window_start_ug; /* dispensed_ug at start of current flow window */
     uint32_t last_tick_ug;    /* dispensed_ug at the previous tick for nudge delta */
     uint32_t spawn_remaining_ug;
     absolute_time_t last_flow_check; /* timestamp of current window start */
     repeating_timer_t timer;
     bool nudging;                /* true while a position-nudge pulse is active */
     absolute_time_t nudge_until; /* absolute time when the current nudge should end */
+
+    /* ── New state machine fields ────────────────────────────────────── */
+    spawn_sm_state_t state;      /* current dosing SM state                   */
+    spawn_sm_state_t prev_state; /* previous state (for transition logging)   */
+    uint8_t finish_mode;         /* SPAWN_FINISH_MODE_A / SPAWN_FINISH_MODE_B */
+    bool do_home;                /* home flaps to closed before priming        */
+
+    /* EMA-filtered per-tick flow (µg/tick) */
+    uint32_t ema_flow_ug;
+    bool ema_seeded;
+
+    /* Rate limiting */
+    uint8_t consecutive_open_nudges; /* reset on close nudge or flow improvement */
+    uint32_t prev_ema_flow_ug;       /* prior EMA value to detect improvement     */
+    int8_t last_nudge_dir;           /* +1 open, -1 close, 0 unset                */
+    absolute_time_t reverse_holdoff_until; /* block immediate opposite nudge     */
+
+    /* Close confirmation */
+    absolute_time_t close_start_time;
+    close_next_t close_next; /* action after close confirm                      */
+
+    /* Finish A top-off */
+    uint8_t topoff_pulses;         /* count of top-off open pulses issued       */
+    bool topoff_settling;          /* true during post-pulse settle wait        */
+    absolute_time_t topoff_settle_until; /* end of settle window                */
 } spawn_dose_ctx_t;
 
 static spawn_dose_ctx_t s_spawn;
 
-/* Spawn dosing constants are defined in board_pins.h with #ifndef guards
- * (SPAWN_TIMER_PERIOD_MS, SPAWN_FLOW_WINDOW_MS, SPAWN_FLOW_NOFLOW_UG, etc.).
+/* Spawn dosing constants are defined in board_pins.h with #ifndef guards.
  * Override them via -D flags or by editing board_pins.h before calibration. */
 
 /* Derived spawn constants (computed from board_pins.h primaries) */
@@ -344,6 +408,56 @@ static void spawn_close_flaps(void)
 }
 
 /**
+ * @brief Issue a fast close for end-of-dose by engaging torque-monitored close
+ *        at SPAWN_FAST_CLOSE_PWM (higher PWM than normal close).
+ *        Records close_start_time in s_spawn for the CLOSE_CONFIRM state.
+ */
+static void spawn_fast_close(void)
+{
+    spawn_stop_flaps();
+
+    if (!s_drv8263_ready)
+    {
+        return;
+    }
+
+    if (s_drv8263.monitoring_enabled)
+    {
+        drv8263_stop_current_monitoring(&s_drv8263);
+    }
+    s_drv8263.config.current_low_threshold  = FLAP_OPEN_CURRENT_DROP_TH;
+    s_drv8263.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
+    s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+    (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_REVERSE,
+                                    (uint16_t)SPAWN_FAST_CLOSE_PWM);
+    if (!drv8263_start_current_monitoring(&s_drv8263))
+    {
+        (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+    }
+
+    if (s_drv8263_flap2_ready)
+    {
+        if (s_drv8263_flap2.monitoring_enabled)
+        {
+            drv8263_stop_current_monitoring(&s_drv8263_flap2);
+        }
+        s_drv8263_flap2.config.current_low_threshold  = FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8263_flap2.config.current_high_threshold = (uint16_t)FLAP_CLOSE_TORQUE_TH;
+        s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_REVERSE,
+                                        (uint16_t)SPAWN_FAST_CLOSE_PWM);
+        (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+    }
+
+    s_flap_state  = FLAP_SM_CLOSING;
+    s_flap_start_ms = to_ms_since_boot(get_absolute_time());
+    s_flap1_stopped = false;
+    s_flap2_stopped = (!s_drv8263_flap2_ready);
+
+    s_spawn.close_start_time = get_absolute_time();
+}
+
+/**
  * @brief Set the flap motor(s) to a continuous PWM without engaging the
  *        torque/undercurrent state machine.  Used for proportional dosing control.
  *
@@ -360,6 +474,18 @@ static void spawn_set_flap_pwm(bool forward, uint16_t pwm)
     }
 }
 
+static bool spawn_direction_reversal_blocked(int8_t desired_dir, absolute_time_t now)
+{
+    bool opposite = ((desired_dir > 0 && s_spawn.last_nudge_dir < 0) ||
+                     (desired_dir < 0 && s_spawn.last_nudge_dir > 0));
+    if (!opposite)
+    {
+        return false;
+    }
+
+    return absolute_time_diff_us(s_spawn.reverse_holdoff_until, now) < 0;
+}
+
 static void send_spawn_status(spawn_status_code_t status)
 {
     pl_spawn_status_t pl = {
@@ -374,11 +500,28 @@ static void send_spawn_status(spawn_status_code_t status)
     (void)uart_send_frame(MSG_SPAWN_STATUS, 0u, &pl, (uint16_t)sizeof(pl));
 }
 
+/**
+ * @brief Transition the spawn dosing SM to a new state and log the transition.
+ */
+static void spawn_set_state(spawn_sm_state_t next)
+{
+    if (s_spawn.state != next)
+    {
+        s_spawn.prev_state = s_spawn.state;
+        s_spawn.state = next;
+        printf("Spawn SM: %u → %u\n", (unsigned)s_spawn.prev_state, (unsigned)next);
+    }
+}
+
 static void spawn_stop_timer(void)
 {
     (void)cancel_repeating_timer(&s_spawn.timer);
     s_spawn.timer.delay_us = 0;
 }
+
+/* Forward declaration — ensure_step_timer_running is defined after the
+ * DRV8434S callback section but called from dispense_spawn_callback. */
+static bool ensure_step_timer_running(void);
 
 static bool dispense_spawn_callback(struct repeating_timer *t)
 {
@@ -394,11 +537,21 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
     if (s_spawn.nudging &&
         absolute_time_diff_us(s_spawn.nudge_until, now) >= 0)
     {
-        /* Stop motor; hold current flap position until next nudge decision */
-        spawn_set_flap_pwm(true, 0u); /* coast = no drive in either direction */
+        /* Stop motor; hold current flap position until next nudge decision.
+         * Must disable current monitoring to prevent false undercurrent flags
+         * when the motor is intentionally stopped (zero current is normal). */
+        if (s_drv8263.monitoring_enabled)
+        {
+            drv8263_stop_current_monitoring(&s_drv8263);
+        }
         (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+        
         if (s_drv8263_flap2_ready)
         {
+            if (s_drv8263_flap2.monitoring_enabled)
+            {
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
+            }
             (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
         }
         s_spawn.nudging = false;
@@ -435,248 +588,677 @@ static bool dispense_spawn_callback(struct repeating_timer *t)
         double raw_avg = (double)raw_sum / (double)fifo_count;
         /* mass_g = (raw − offset) / ref_unit  →  mass_ug = mass_g × 1 000 000 */
         double mass_g = (raw_avg - (double)s_scale.offset) / (double)s_scale.ref_unit;
-        mass.ug = (int32_t)(mass_g * 1000000.0);
+        /* Clamp via int64_t to avoid undefined behaviour if mass_g > 2147 g
+         * (e.g. untared scale) which would overflow int32_t.  Also clamp the
+         * double before the int64 cast in case mass_g is astronomically large
+         * (e.g. sensor fault) to stay within valid int64_t range. */
+        static const double K_MAX_UG = (double)INT32_MAX;
+        static const double K_MIN_UG = (double)INT32_MIN;
+        double mass_ug_d = mass_g * 1000000.0;
+        if (mass_ug_d > K_MAX_UG) mass_ug_d = K_MAX_UG;
+        if (mass_ug_d < K_MIN_UG) mass_ug_d = K_MIN_UG;
+        mass.ug = (int32_t)(int64_t)mass_ug_d;
         mass.unit = s_scale.unit;
     }
 
-    uint32_t current_ug = (uint32_t)mass.ug;
+    /* Use non-negative mass only: negative means below tare (nothing dispensed yet) */
+    uint32_t current_ug = (mass.ug >= 0) ? (uint32_t)mass.ug : 0u;
     double m = 0;
     mass_get_value(&mass, &m);
-    printf("Mass (g) %f\n", m);
+
     s_spawn.dispensed_ug = (current_ug > s_spawn.start_mass_ug)
                                ? (current_ug - s_spawn.start_mass_ug)
                                : 0u;
 
-    /* ── Per-tick delta — computed before undercurrent check ────────────────── */
+    /* ── Per-tick delta — spike-clamped then EMA-filtered ──────────────────── */
     uint32_t tick_delta_ug = (s_spawn.dispensed_ug > s_spawn.last_tick_ug)
                                  ? (s_spawn.dispensed_ug - s_spawn.last_tick_ug)
                                  : 0u;
     s_spawn.last_tick_ug = s_spawn.dispensed_ug;
 
-    /* ── Flaps fully-open detection ────────────────────────────────────────── *
-     * Undercurrent = no mechanical load = flap at open-circuit endpoint.       *
-     * During startup_opening: only a failure if no weight change yet —         *
-     *   if material is already flowing the flap position is acceptable.        *
-     * During nudging: undercurrent at any time signals end-of-travel.          *
-     * Guard: when motor is stopped between nudges current is zero regardless   *
-     *   of position, so only evaluate when actively driving forward.           */
-    bool startup_undercurrent = s_spawn.startup_opening &&
-                                s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT &&
-                                tick_delta_ug < SPAWN_STARTUP_FLOW_DETECT_UG;
-    bool nudge_undercurrent = s_spawn.nudging &&
-                              s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT;
-    if (startup_undercurrent || nudge_undercurrent)
+    /* Spike clamp: ignore implausibly large jumps (sensor glitch / reset) */
+    if (tick_delta_ug > (uint32_t)SPAWN_FLOW_SPIKE_CLAMP_UG)
     {
-        printf("Spawn: flaps fully open (undercurrent) — flow failure\n");
-        spawn_close_flaps();
-        s_spawn.active = false;
-        send_spawn_status(SPAWN_STATUS_FLOW_FAILURE);
-        return false;
+        printf("Spawn: spike clamped tick_delta=%lu → 0\n", (unsigned long)tick_delta_ug);
+        tick_delta_ug = 0u;
     }
 
-    /* ── Target reached ─────────────────────────────────────────────────────── */
-    if (s_spawn.dispensed_ug >= s_spawn.target_ug)
+    /* EMA update: ema = alpha*delta + (1-alpha)*ema, using integer maths */
+    if (!s_spawn.ema_seeded)
     {
-        spawn_close_flaps();
-        s_spawn.active = false;
-        send_spawn_status(SPAWN_STATUS_DONE);
-        return false;
+        s_spawn.ema_flow_ug = tick_delta_ug;
+        s_spawn.ema_seeded  = true;
+    }
+    else
+    {
+        /* ema = (alpha_x1000 * tick_delta + (1000-alpha_x1000) * ema) / 1000 */
+        s_spawn.ema_flow_ug =
+            ((uint32_t)SPAWN_EMA_ALPHA_X1000 * tick_delta_ug +
+             (1000u - (uint32_t)SPAWN_EMA_ALPHA_X1000) * s_spawn.ema_flow_ug) / 1000u;
     }
 
-    /* ── Startup opening phase ───────────────────────────────────────────────── *
-     * The flap is driven open at full PWM while waiting for the first           *
-     * SPAWN_STARTUP_FLOW_DETECT_UG weight increase that confirms material is    *
-     * flowing.  Undercurrent detection (checked above) fires first if the flap  *
-     * reaches end-of-travel before any weight change, signalling a blocked or   *
-     * empty outlet.  Once flow is confirmed, monitoring is stopped (no longer   *
-     * needed), the motor is parked, and control hands off to the nudge loop.    */
-    if (s_spawn.startup_opening)
+    uint32_t remaining_ug = (s_spawn.dispensed_ug < s_spawn.target_ug)
+                                ? (s_spawn.target_ug - s_spawn.dispensed_ug)
+                                : 0u;
+
+    printf("Spawn[%u]: mass=%.3fg disp=%luug remain=%luug ema_flow=%luug/tick\n",
+           (unsigned)s_spawn.state, m,
+           (unsigned long)s_spawn.dispensed_ug,
+           (unsigned long)remaining_ug,
+           (unsigned long)s_spawn.ema_flow_ug);
+
+    /* ══════════════════════════════════════════════════════════════════════════ *
+     *  State machine                                                             *
+     * ══════════════════════════════════════════════════════════════════════════ */
+
+    switch (s_spawn.state)
     {
+
+    /* ── HOMING: drive to fully-closed endpoint, wait for confirmation ──────── */
+    case SPAWN_SM_HOMING:
+    {
+        uint32_t elapsed_ms = (uint32_t)(absolute_time_diff_us(s_spawn.close_start_time, now) / 1000);
+        if (s_flap_state == FLAP_SM_CLOSED)
+        {
+            printf("Spawn HOMING: closed endpoint confirmed in %lums\n", (unsigned long)elapsed_ms);
+            /* Transition to PRIME — re-arm undercurrent monitoring for startup open */
+            s_spawn.startup_opening = true;
+            s_spawn.last_flow_check = get_absolute_time();
+            s_spawn.window_start_ug = s_spawn.dispensed_ug;
+            s_spawn.last_tick_ug    = s_spawn.dispensed_ug;
+            s_spawn.ema_seeded      = false;
+            s_spawn.ema_flow_ug     = 0u;
+
+            s_drv8263.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+            s_drv8263.config.current_high_threshold    = 4095u;
+            s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+            spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+            (void)drv8263_start_current_monitoring(&s_drv8263);
+            if (s_drv8263_flap2_ready)
+            {
+                s_drv8263_flap2.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+                s_drv8263_flap2.config.current_high_threshold    = 4095u;
+                s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+                (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+            }
+            spawn_set_state(SPAWN_SM_PRIME);
+            send_spawn_status(SPAWN_STATUS_RUNNING);
+        }
+        else if (elapsed_ms >= (uint32_t)SPAWN_HOME_TIMEOUT_MS)
+        {
+            printf("Spawn HOMING: timeout after %lums — proceeding to PRIME\n",
+                   (unsigned long)elapsed_ms);
+            /* Fail-safe: assume we are closed enough and proceed */
+            s_spawn.startup_opening = true;
+            s_spawn.last_flow_check = get_absolute_time();
+            s_spawn.window_start_ug = s_spawn.dispensed_ug;
+            s_spawn.last_tick_ug    = s_spawn.dispensed_ug;
+            s_spawn.ema_seeded      = false;
+            s_spawn.ema_flow_ug     = 0u;
+
+            s_drv8263.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+            s_drv8263.config.current_high_threshold    = 4095u;
+            s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+            spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+            (void)drv8263_start_current_monitoring(&s_drv8263);
+            if (s_drv8263_flap2_ready)
+            {
+                s_drv8263_flap2.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+                s_drv8263_flap2.config.current_high_threshold    = 4095u;
+                s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+                (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+            }
+            spawn_set_state(SPAWN_SM_PRIME);
+            send_spawn_status(SPAWN_STATUS_RUNNING);
+        }
+        /* else: still homing — motor is running, just wait */
+        return true;
+    }
+
+    /* ── PRIME: drive open slowly until SPAWN_STARTUP_FLOW_DETECT_UG detected ─ */
+    case SPAWN_SM_PRIME:
+    {
+        /* Undercurrent = reached end-of-travel before any flow: flow failure */
+        bool startup_undercurrent = s_spawn.startup_opening &&
+                                    s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT &&
+                                    tick_delta_ug < SPAWN_STARTUP_FLOW_DETECT_UG;
+        if (startup_undercurrent)
+        {
+            printf("Spawn PRIME: end-of-travel, no flow — FLOW_FAILURE\n");
+            spawn_close_flaps();
+            s_spawn.active = false;
+            spawn_set_state(SPAWN_SM_FAULT);
+            send_spawn_status(SPAWN_STATUS_FLOW_FAILURE);
+            return false;
+        }
+
         if (tick_delta_ug >= SPAWN_STARTUP_FLOW_DETECT_UG)
         {
-            /* Flow confirmed — stop undercurrent monitoring, park motor,
-             * reset the flow window, and fall through to the nudge controller. */
+            /* Flow confirmed — stop undercurrent monitoring, park motor */
             drv8263_stop_current_monitoring(&s_drv8263);
             if (s_drv8263_flap2_ready && s_drv8263_flap2.monitoring_enabled)
             {
                 drv8263_stop_current_monitoring(&s_drv8263_flap2);
             }
             s_spawn.startup_opening = false;
-            s_spawn.nudging = false;
+            s_spawn.nudging         = false;
             (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
             if (s_drv8263_flap2_ready)
             {
                 (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
             }
-            /* Reset flow window so the 500 ms budget begins from first flow. */
+            /* Reset flow window so budget begins from first confirmed flow */
             s_spawn.last_flow_check = get_absolute_time();
             s_spawn.window_start_ug = s_spawn.dispensed_ug;
-            printf("Spawn: startup opening complete — flow detected (%lu ug), entering closed loop\n",
+            s_spawn.ema_seeded      = false;
+            s_spawn.ema_flow_ug     = 0u;
+            s_spawn.consecutive_open_nudges = 0u;
+            s_spawn.prev_ema_flow_ug        = 0u;
+            printf("Spawn PRIME→DOSE_MAIN: flow detected tick_delta=%luug\n",
                    (unsigned long)tick_delta_ug);
-            /* Fall through to nudge logic below */
+            spawn_set_state(SPAWN_SM_DOSE_MAIN);
+            send_spawn_status(SPAWN_STATUS_RUNNING);
+            /* Fall through to DOSE_MAIN on this same tick */
         }
         else
         {
-            /* No weight change yet — keep driving open continuously */
+            /* No weight change yet — keep driving open */
             spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
             return true;
         }
+        /* FALL THROUGH to DOSE_MAIN */
     }
+    /* fall through */
 
-    /* ── 500 ms flow-rate window (agitation / retry logic) ──────────────────── */
-    now = get_absolute_time();
-    if (absolute_time_diff_us(s_spawn.last_flow_check, now) >= (int64_t)(SPAWN_FLOW_WINDOW_MS * 1000))
+    /* ── DOSE_MAIN: closed-loop proportional nudge with finish detection ─────── */
+    case SPAWN_SM_DOSE_MAIN:
     {
-        uint32_t window_delta = (s_spawn.dispensed_ug > s_spawn.window_start_ug)
-                                    ? (s_spawn.dispensed_ug - s_spawn.window_start_ug)
-                                    : 0u;
-
-        if (!s_spawn.agitating && window_delta < SPAWN_FLOW_NOFLOW_UG)
+        /* ── Flow window: agitation / no-flow retry ─────────────────────────── */
+        now = get_absolute_time();
+        if (absolute_time_diff_us(s_spawn.last_flow_check, now) >=
+            (int64_t)((uint32_t)SPAWN_FLOW_WINDOW_MS * 1000u))
         {
-            /* Insufficient flow — always agitate before checking abort so that
-             * the agitation actually runs.  Abort is evaluated after the
-             * agitation window elapses (see post-agitation block below). */
-            spawn_stop_flaps();
-            s_spawn.agitating = true;
-            s_spawn.retry++;
-            send_spawn_status(SPAWN_STATUS_AGITATING);
+            uint32_t window_delta = (s_spawn.dispensed_ug > s_spawn.window_start_ug)
+                                        ? (s_spawn.dispensed_ug - s_spawn.window_start_ug)
+                                        : 0u;
 
-            /* Command the agitator eccentric arm stepper if it is wired.
-             * STEPPER_DEV_AGITATOR is defined in board_pins.h once device 3
-             * is added to the DRV8434S chain and DRV8434S_N_DEVICES is bumped. */
-#ifdef STEPPER_DEV_AGITATOR
-            if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
+            if (!s_spawn.agitating && window_delta < (uint32_t)SPAWN_FLOW_NOFLOW_UG)
             {
-                drv8434s_motion_job_t agit_job = {0};
-                agit_job.dev_idx = (uint8_t)STEPPER_DEV_AGITATOR;
-                agit_job.steps = (uint32_t)AGITATOR_KNEAD_STEPS;
-                agit_job.reverse = false;
-                agit_job.step_delay_us = (uint32_t)AGITATOR_STEP_DELAY_US;
-                (void)drv8434s_motion_start(&s_motion, &agit_job);
-                printf("Agitator: started knead motion (%u steps)\n",
-                       (unsigned)AGITATOR_KNEAD_STEPS);
+                spawn_stop_flaps();
+                s_spawn.agitating = true;
+                s_spawn.retry++;
+                printf("Spawn DOSE_MAIN: no-flow window (delta=%luug) — agitating (retry %u/%u)\n",
+                       (unsigned long)window_delta, (unsigned)s_spawn.retry,
+                       (unsigned)s_spawn.max_retries);
+                send_spawn_status(SPAWN_STATUS_AGITATING);
+
+#ifdef STEPPER_DEV_AGITATOR
+                if (s_stepper_ready && DRV8434S_N_DEVICES > STEPPER_DEV_AGITATOR)
+                {
+                    int32_t agit_steps = (int32_t)AGITATOR_KNEAD_STEPS;
+                    if (!drv8434s_motion_start(&s_motion,
+                                               (uint8_t)STEPPER_DEV_AGITATOR,
+                                               agit_steps,
+                                               (uint16_t)STEPPER_SOFT_TORQUE_LIMIT))
+                    {
+                        printf("Agitator: motion start failed\n");
+                    }
+                    else
+                    {
+                        if (!ensure_step_timer_running())
+                        {
+                            drv8434s_motion_cancel(&s_motion,
+                                                   (uint8_t)STEPPER_DEV_AGITATOR,
+                                                   NULL);
+                            printf("Agitator: failed to start step timer\n");
+                        }
+                        else
+                        {
+                            printf("Agitator: started knead motion (%u steps)\n",
+                                   (unsigned)AGITATOR_KNEAD_STEPS);
+                        }
+                    }
+                }
+                else
+                {
+                    printf("Agitator: STEPPER_DEV_AGITATOR not in chain (not wired)\n");
+                }
+#else
+                printf("Agitator: STEPPER_DEV_AGITATOR not defined (see board_pins.h)\n");
+#endif
+                s_spawn.last_flow_check = delayed_by_ms(now, (uint32_t)SPAWN_AGITATE_MS);
+                s_spawn.window_start_ug = s_spawn.dispensed_ug;
+                return true;
+            }
+
+            /* Window completed normally — reset window tracking */
+            s_spawn.window_start_ug = s_spawn.dispensed_ug;
+            s_spawn.last_flow_check = now;
+
+            if (s_spawn.agitating)
+            {
+                s_spawn.agitating = false;
+                if (s_spawn.retry >= s_spawn.max_retries)
+                {
+                    s_spawn.active = false;
+                    printf("Spawn DOSE_MAIN: max retries reached — BAG_EMPTY\n");
+                    spawn_set_state(SPAWN_SM_FAULT);
+                    send_spawn_status(SPAWN_STATUS_BAG_EMPTY);
+                    return false;
+                }
+                /* Re-engage prime sequence */
+                s_spawn.startup_opening = true;
+                s_spawn.last_flow_check = get_absolute_time();
+                s_spawn.window_start_ug = s_spawn.dispensed_ug;
+                s_spawn.last_tick_ug    = s_spawn.dispensed_ug;
+                s_spawn.ema_seeded      = false;
+                s_spawn.ema_flow_ug     = 0u;
+                s_spawn.consecutive_open_nudges = 0u;
+
+                s_drv8263.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+                s_drv8263.config.current_high_threshold    = 4095u;
+                s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+                spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+                (void)drv8263_start_current_monitoring(&s_drv8263);
+                if (s_drv8263_flap2_ready)
+                {
+                    s_drv8263_flap2.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+                    s_drv8263_flap2.config.current_high_threshold    = 4095u;
+                    s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+                    (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+                }
+                spawn_set_state(SPAWN_SM_PRIME);
+                send_spawn_status(SPAWN_STATUS_RUNNING);
+                return true;
+            }
+        }
+
+        /* During agitation hold-off keep flaps stopped */
+        if (s_spawn.agitating)
+        {
+            return true;
+        }
+
+        /* ── Nudge undercurrent: flap reached fully-open endpoint ───────────── */
+        bool nudge_undercurrent = s_spawn.nudging &&
+                                  s_drv8263.current_status == DRV8263_CURRENT_UNDERCURRENT;
+        if (nudge_undercurrent)
+        {
+            printf("Spawn DOSE_MAIN: flap fully open (undercurrent during nudge) — FLOW_FAILURE\n");
+            spawn_close_flaps();
+            s_spawn.active = false;
+            spawn_set_state(SPAWN_SM_FAULT);
+            send_spawn_status(SPAWN_STATUS_FLOW_FAILURE);
+            return false;
+        }
+
+        /* ── Target reached — fast close ────────────────────────────────────── */
+        if (s_spawn.dispensed_ug >= s_spawn.target_ug)
+        {
+            printf("Spawn DOSE_MAIN: target reached (%luug) — FAST_CLOSE\n",
+                   (unsigned long)s_spawn.dispensed_ug);
+            s_spawn.close_next = CLOSE_NEXT_DONE;
+            spawn_fast_close();
+            printf("Spawn FAST_CLOSE: fast close issued (PWM=%u)\n",
+                   (unsigned)SPAWN_FAST_CLOSE_PWM);
+            spawn_set_state(SPAWN_SM_CLOSE_CONFIRM);
+            return true;
+        }
+
+        /* ── Finish mode transition check ───────────────────────────────────── */
+        if (s_spawn.finish_mode == (uint8_t)SPAWN_FINISH_MODE_A)
+        {
+            /* Finish A: predict in-flight overshoot and close early.
+             * predicted_in_flight_ug = ema_flow_ug * latency_ticks
+             * latency_ticks = SPAWN_CLOSE_LATENCY_MS / SPAWN_TIMER_PERIOD_MS   */
+            uint32_t latency_ticks = (uint32_t)SPAWN_CLOSE_LATENCY_MS /
+                                     (uint32_t)SPAWN_TIMER_PERIOD_MS;
+            uint32_t predicted_ug = s_spawn.ema_flow_ug * latency_ticks;
+            uint32_t trigger_ug   = predicted_ug + (uint32_t)SPAWN_CLOSE_EARLY_MARGIN_UG;
+
+            if (remaining_ug <= trigger_ug && s_spawn.ema_seeded)
+            {
+                printf("Spawn DOSE_MAIN→FINISH_A_CLOSE: remain=%luug predicted=%luug trigger=%luug\n",
+                       (unsigned long)remaining_ug, (unsigned long)predicted_ug,
+                       (unsigned long)trigger_ug);
+                s_spawn.close_next = CLOSE_NEXT_CHECK_TOPOFF;
+                spawn_fast_close();
+                printf("Spawn FINISH_A_CLOSE: fast close issued (PWM=%u)\n",
+                       (unsigned)SPAWN_FAST_CLOSE_PWM);
+                spawn_set_state(SPAWN_SM_CLOSE_CONFIRM);
+                return true;
+            }
+        }
+        else /* SPAWN_FINISH_MODE_B */
+        {
+            /* Finish B: transition to low-flow taper when near target */
+            if (remaining_ug <= (uint32_t)SPAWN_LOWFLOW_THRESHOLD_UG)
+            {
+                printf("Spawn DOSE_MAIN→FINISH_B_LOWFLOW: remain=%luug\n",
+                       (unsigned long)remaining_ug);
+                spawn_set_state(SPAWN_SM_FINISH_B_LOWFLOW);
+                return true; /* low-flow runs on next tick */
+            }
+        }
+
+        /* ── Proportional per-tick target rate ──────────────────────────────── *
+         *                                                                        *
+         *   remaining > target/UPPER → desired = SPAWN_TICK_MAX_UG              *
+         *   remaining < target/LOWER → desired = SPAWN_TICK_MIN_UG              *
+         *   in between               → linear interpolation                      */
+        {
+            uint32_t upper_ug = s_spawn.target_ug / (uint32_t)SPAWN_PROP_UPPER;
+            uint32_t lower_ug = s_spawn.target_ug / (uint32_t)SPAWN_PROP_LOWER;
+            uint32_t desired_tick_ug;
+
+            if (remaining_ug >= upper_ug)
+            {
+                desired_tick_ug = SPAWN_TICK_MAX_UG;
+            }
+            else if (remaining_ug > lower_ug)
+            {
+                uint32_t range   = upper_ug - lower_ug;
+                uint32_t frac    = remaining_ug - lower_ug;
+                desired_tick_ug  = SPAWN_TICK_MIN_UG +
+                                   ((uint32_t)(SPAWN_TICK_MAX_UG - SPAWN_TICK_MIN_UG) * frac) / range;
             }
             else
             {
-                printf("Agitator: STEPPER_DEV_AGITATOR not in chain (not wired)\n");
+                desired_tick_ug = SPAWN_TICK_MIN_UG;
             }
-#else
-            printf("Agitator: STEPPER_DEV_AGITATOR not defined (see board_pins.h)\n");
-#endif
-            /* Hold off the next window check by SPAWN_AGITATE_MS */
-            s_spawn.last_flow_check = delayed_by_ms(now, SPAWN_AGITATE_MS);
-            s_spawn.window_start_ug = s_spawn.dispensed_ug;
-            return true;
-        }
 
-        /* Window completed normally — reset window tracking */
-        s_spawn.window_start_ug = s_spawn.dispensed_ug;
-        s_spawn.last_flow_check = now;
-
-        if (s_spawn.agitating)
-        {
-            /* Agitation period has elapsed — check retry limit, then re-open. */
-            s_spawn.agitating = false;
-            if (s_spawn.retry >= s_spawn.max_retries)
+            /* ── Incremental position nudge (rate-limited) ─────────────────── */
+            if (!s_spawn.nudging)
             {
-                s_spawn.active = false;
-                send_spawn_status(SPAWN_STATUS_BAG_EMPTY);
-                return false;
+                int32_t error_ug = (int32_t)desired_tick_ug - (int32_t)s_spawn.ema_flow_ug;
+
+                if (error_ug > (int32_t)SPAWN_TICK_DEADBAND)
+                {
+                    /* Flow below target — open a little, with rate limit */
+                    s_spawn.consecutive_open_nudges++;
+                    if (s_spawn.consecutive_open_nudges > (uint8_t)SPAWN_MAX_OPEN_NUDGES)
+                    {
+                        printf("Spawn DOSE_MAIN: max open nudges (%u) hit, holding position\n",
+                               (unsigned)SPAWN_MAX_OPEN_NUDGES);
+                        s_spawn.consecutive_open_nudges = 0u; /* reset after hold */
+                    }
+                    else if (spawn_direction_reversal_blocked(+1, now))
+                    {
+                        printf("Spawn DOSE_MAIN: holdoff blocks OPEN reversal (ema=%luug)\n",
+                               (unsigned long)s_spawn.ema_flow_ug);
+                    }
+                    else
+                    {
+                        spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+                        s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                            (uint32_t)SPAWN_NUDGE_OPEN_MS);
+                        s_spawn.nudging = true;
+                        s_spawn.last_nudge_dir = +1;
+                        s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                       (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                        printf("Spawn DOSE_MAIN: open nudge %ums (error=%ldug, ema=%luug, consec=%u)\n",
+                               (unsigned)SPAWN_NUDGE_OPEN_MS,
+                               (long)error_ug,
+                               (unsigned long)s_spawn.ema_flow_ug,
+                               (unsigned)s_spawn.consecutive_open_nudges);
+                    }
+                }
+                else if (error_ug < -(int32_t)SPAWN_TICK_DEADBAND)
+                {
+                    /* Flow above target — close a little; reset open nudge counter */
+                    s_spawn.consecutive_open_nudges = 0u;
+                    if (spawn_direction_reversal_blocked(-1, now))
+                    {
+                        printf("Spawn DOSE_MAIN: holdoff blocks CLOSE reversal (ema=%luug)\n",
+                               (unsigned long)s_spawn.ema_flow_ug);
+                    }
+                    else
+                    {
+                        spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
+                        s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                            (uint32_t)SPAWN_NUDGE_CLOSE_MS);
+                        s_spawn.nudging = true;
+                        s_spawn.last_nudge_dir = -1;
+                        s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                       (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                        printf("Spawn DOSE_MAIN: close nudge %ums (error=%ldug, ema=%luug)\n",
+                               (unsigned)SPAWN_NUDGE_CLOSE_MS,
+                               (long)error_ug,
+                               (unsigned long)s_spawn.ema_flow_ug);
+                    }
+                }
+                /* else: within deadband — hold position */
+
+                /* Reset open nudge counter if EMA flow has improved */
+                if (s_spawn.ema_flow_ug > s_spawn.prev_ema_flow_ug)
+                {
+                    s_spawn.consecutive_open_nudges = 0u;
+                }
+                s_spawn.prev_ema_flow_ug = s_spawn.ema_flow_ug;
             }
-            /* Re-engage the startup opening sequence so the flap drives open
-             * again and waits for the first weight change before handing off
-             * to the closed-loop nudge controller — same as initial start. */
-            s_spawn.startup_opening = true;
-            s_spawn.last_flow_check = get_absolute_time();
-            s_spawn.window_start_ug = s_spawn.dispensed_ug;
-            s_spawn.last_tick_ug = s_spawn.dispensed_ug;
-
-            s_drv8263.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-            s_drv8263.config.current_high_threshold = 4095u;
-            s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-            spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-            (void)drv8263_start_current_monitoring(&s_drv8263);
-
-            if (s_drv8263_flap2_ready)
-            {
-                s_drv8263_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-                s_drv8263_flap2.config.current_high_threshold = 4095u;
-                s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-                (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
-            }
-
-            send_spawn_status(SPAWN_STATUS_RUNNING);
         }
-    }
-
-    /* During agitation hold-off keep the flaps stopped */
-    if (s_spawn.agitating)
-    {
         return true;
     }
 
-    /* ── Proportional per-tick target rate ───────────────────────────────────── *
-     *                                                                            *
-     * Scale the desired flow rate by how much is left to dispense.  When far    *
-     * from the target a higher rate is acceptable; as we near the target the     *
-     * rate tapers to SPAWN_TICK_MIN_UG to avoid overshoot.                       *
-     *                                                                            *
-     *   remaining > target / SPAWN_PROP_UPPER → desired = SPAWN_TICK_MAX_UG     *
-     *   remaining < target / SPAWN_PROP_LOWER → desired = SPAWN_TICK_MIN_UG     *
-     *   in between                            → linear interpolation             *
-     * ──────────────────────────────────────────────────────────────────────────── */
-    uint32_t remaining_ug = s_spawn.target_ug - s_spawn.dispensed_ug;
-    uint32_t upper_ug = s_spawn.target_ug / SPAWN_PROP_UPPER;
-    uint32_t lower_ug = s_spawn.target_ug / SPAWN_PROP_LOWER;
-    uint32_t desired_tick_ug;
-
-    if (remaining_ug >= upper_ug)
+    /* ── FINISH_A_CLOSE: issue fast close, then wait for confirm ─────────────── */
+    case SPAWN_SM_FINISH_A_CLOSE:
     {
-        desired_tick_ug = SPAWN_TICK_MAX_UG;
-    }
-    else if (remaining_ug > lower_ug)
-    {
-        uint32_t range = upper_ug - lower_ug;
-        uint32_t frac = remaining_ug - lower_ug;
-        desired_tick_ug = SPAWN_TICK_MIN_UG +
-                          ((uint32_t)(SPAWN_TICK_MAX_UG - SPAWN_TICK_MIN_UG) * frac) / range;
-    }
-    else
-    {
-        desired_tick_ug = SPAWN_TICK_MIN_UG;
+        s_spawn.close_next = CLOSE_NEXT_CHECK_TOPOFF;
+        spawn_fast_close();
+        printf("Spawn FINISH_A_CLOSE: fast close issued (PWM=%u)\n",
+               (unsigned)SPAWN_FAST_CLOSE_PWM);
+        spawn_set_state(SPAWN_SM_CLOSE_CONFIRM);
+        return true;
     }
 
-    /* ── Incremental position nudge ─────────────────────────────────────────── *
-     *                                                                            *
-     * The flap position (not speed) is what controls flow rate.  Rather than    *
-     * driving the motor continuously — which would keep opening the flap more   *
-     * and more — we issue short timed nudges to increment position up or down   *
-     * based on whether actual per-tick flow is below or above the target.        *
-     * Between nudges the motor is stopped, holding flap position.               *
-     * ──────────────────────────────────────────────────────────────────────────── */
-    if (!s_spawn.nudging) /* only issue a new nudge when the previous one has expired */
+    /* ── FINISH_B_LOWFLOW: minimal nudges near target, then fast-close ───────── */
+    case SPAWN_SM_FINISH_B_LOWFLOW:
     {
-        /* Cast to int32 to handle the signed error correctly */
-        int32_t error_ug = (int32_t)desired_tick_ug - (int32_t)tick_delta_ug;
-
-        if (error_ug > (int32_t)SPAWN_TICK_DEADBAND)
+        /* Close fully once remaining drops to SPAWN_CLOSE_THRESHOLD_UG */
+        if (remaining_ug <= (uint32_t)SPAWN_CLOSE_THRESHOLD_UG || s_spawn.dispensed_ug >= s_spawn.target_ug)
         {
-            /* Flow below target — open flap a little */
+            printf("Spawn FINISH_B_LOWFLOW: close threshold reached (remain=%luug) — FAST_CLOSE\n",
+                   (unsigned long)remaining_ug);
+            s_spawn.close_next = CLOSE_NEXT_DONE;
+            spawn_fast_close();
+            printf("Spawn FAST_CLOSE: fast close issued (PWM=%u)\n",
+                   (unsigned)SPAWN_FAST_CLOSE_PWM);
+            spawn_set_state(SPAWN_SM_CLOSE_CONFIRM);
+            return true;
+        }
+
+        /* Low-flow nudge: open for SPAWN_LOWFLOW_NUDGE_MS if below desired */
+        if (!s_spawn.nudging)
+        {
+            /* In low-flow mode desired rate = SPAWN_TICK_MIN_UG */
+            int32_t error_ug = (int32_t)SPAWN_TICK_MIN_UG - (int32_t)s_spawn.ema_flow_ug;
+            if (error_ug > (int32_t)SPAWN_TICK_DEADBAND)
+            {
+                if (spawn_direction_reversal_blocked(+1, now))
+                {
+                    printf("Spawn FINISH_B_LOWFLOW: holdoff blocks OPEN reversal (ema=%luug)\n",
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
+                else
+                {
+                    spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+                    s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                        (uint32_t)SPAWN_LOWFLOW_NUDGE_MS);
+                    s_spawn.nudging = true;
+                    s_spawn.last_nudge_dir = +1;
+                    s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                   (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                    printf("Spawn FINISH_B_LOWFLOW: open nudge %ums (ema=%luug)\n",
+                           (unsigned)SPAWN_LOWFLOW_NUDGE_MS,
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
+            }
+            else if (error_ug < -(int32_t)SPAWN_TICK_DEADBAND)
+            {
+                if (spawn_direction_reversal_blocked(-1, now))
+                {
+                    printf("Spawn FINISH_B_LOWFLOW: holdoff blocks CLOSE reversal (ema=%luug)\n",
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
+                else
+                {
+                    spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
+                    s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                        (uint32_t)SPAWN_NUDGE_CLOSE_MS);
+                    s_spawn.nudging = true;
+                    s_spawn.last_nudge_dir = -1;
+                    s_spawn.reverse_holdoff_until = delayed_by_ms(now,
+                                                                   (uint32_t)SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS);
+                    printf("Spawn FINISH_B_LOWFLOW: close nudge (ema=%luug)\n",
+                           (unsigned long)s_spawn.ema_flow_ug);
+                }
+            }
+        }
+        return true;
+    }
+
+    /* ── FAST_CLOSE: issue fast close at high PWM ─────────────────────────────── */
+    case SPAWN_SM_FAST_CLOSE:
+    {
+        s_spawn.close_next = CLOSE_NEXT_DONE;
+        spawn_fast_close();
+        printf("Spawn FAST_CLOSE: fast close issued (PWM=%u)\n",
+               (unsigned)SPAWN_FAST_CLOSE_PWM);
+        spawn_set_state(SPAWN_SM_CLOSE_CONFIRM);
+        return true;
+    }
+
+    /* ── CLOSE_CONFIRM: wait for FLAP_SM_CLOSED or timeout ──────────────────── */
+    case SPAWN_SM_CLOSE_CONFIRM:
+    {
+        uint32_t elapsed_ms = (uint32_t)(absolute_time_diff_us(s_spawn.close_start_time, now) / 1000);
+        bool close_done = (s_flap_state == FLAP_SM_CLOSED || s_flap_state == FLAP_SM_FAULT);
+        bool timed_out  = (elapsed_ms >= (uint32_t)SPAWN_CLOSE_CONFIRM_TIMEOUT_MS);
+
+        if (!close_done && !timed_out)
+        {
+            return true; /* still waiting */
+        }
+
+        if (timed_out && !close_done)
+        {
+            printf("Spawn CLOSE_CONFIRM: timeout after %lums (flap_state=%u)\n",
+                   (unsigned long)elapsed_ms, (unsigned)s_flap_state);
+        }
+        else
+        {
+            printf("Spawn CLOSE_CONFIRM: closed in %lums (flap_state=%u)\n",
+                   (unsigned long)elapsed_ms, (unsigned)s_flap_state);
+        }
+
+        if (s_spawn.close_next == CLOSE_NEXT_CHECK_TOPOFF)
+        {
+            /* Finish A: check if we undershot by more than SPAWN_TOPOFF_TOLERANCE_UG */
+            if (s_spawn.dispensed_ug < s_spawn.target_ug &&
+                (s_spawn.target_ug - s_spawn.dispensed_ug) > (uint32_t)SPAWN_TOPOFF_TOLERANCE_UG)
+            {
+                printf("Spawn CLOSE_CONFIRM: undershoot %luug > tolerance %u — TOPOFF\n",
+                       (unsigned long)(s_spawn.target_ug - s_spawn.dispensed_ug),
+                       (unsigned)SPAWN_TOPOFF_TOLERANCE_UG);
+                s_spawn.topoff_pulses   = 0u;
+                s_spawn.topoff_settling = false;
+                spawn_set_state(SPAWN_SM_FINISH_A_TOPOFF);
+                return true;
+            }
+        }
+
+        /* Done */
+        s_spawn.active = false;
+        printf("Spawn: DONE — dispensed=%luug target=%luug\n",
+               (unsigned long)s_spawn.dispensed_ug, (unsigned long)s_spawn.target_ug);
+        spawn_set_state(SPAWN_SM_DONE);
+        send_spawn_status(SPAWN_STATUS_DONE);
+        return false;
+    }
+
+    /* ── FINISH_A_TOPOFF: small open pulses to correct undershoot ────────────── */
+    case SPAWN_SM_FINISH_A_TOPOFF:
+    {
+        /* Check if tolerance met or max pulses reached */
+        bool within_tol = (s_spawn.dispensed_ug >= s_spawn.target_ug) ||
+                          (s_spawn.target_ug > s_spawn.dispensed_ug &&
+                           (s_spawn.target_ug - s_spawn.dispensed_ug) <=
+                               (uint32_t)SPAWN_TOPOFF_TOLERANCE_UG);
+
+        if (within_tol || s_spawn.topoff_pulses >= (uint8_t)SPAWN_TOPOFF_MAX_PULSES)
+        {
+            printf("Spawn TOPOFF: done (%s) pulses=%u dispensed=%luug target=%luug\n",
+                   within_tol ? "within tol" : "max pulses",
+                   (unsigned)s_spawn.topoff_pulses,
+                   (unsigned long)s_spawn.dispensed_ug,
+                   (unsigned long)s_spawn.target_ug);
+            s_spawn.active = false;
+            spawn_set_state(SPAWN_SM_DONE);
+            send_spawn_status(SPAWN_STATUS_DONE);
+            return false;
+        }
+
+        /* During settle wait — keep flaps stopped */
+        if (s_spawn.topoff_settling)
+        {
+            if (absolute_time_diff_us(s_spawn.topoff_settle_until, now) >= 0)
+            {
+                s_spawn.topoff_settling = false;
+                printf("Spawn TOPOFF: settle done, pulse %u/%u dispensed=%luug remain=%luug\n",
+                       (unsigned)s_spawn.topoff_pulses, (unsigned)SPAWN_TOPOFF_MAX_PULSES,
+                       (unsigned long)s_spawn.dispensed_ug, (unsigned long)remaining_ug);
+            }
+            return true;
+        }
+
+        /* Issue an open nudge if not already nudging */
+        if (!s_spawn.nudging)
+        {
+            s_spawn.topoff_pulses++;
             spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-            s_spawn.nudge_until = delayed_by_ms(get_absolute_time(), SPAWN_NUDGE_OPEN_MS);
+            s_spawn.nudge_until = delayed_by_ms(get_absolute_time(),
+                                                (uint32_t)SPAWN_TOPOFF_PULSE_MS);
             s_spawn.nudging = true;
+            printf("Spawn TOPOFF: open pulse %u/%u (%ums)\n",
+                   (unsigned)s_spawn.topoff_pulses, (unsigned)SPAWN_TOPOFF_MAX_PULSES,
+                   (unsigned)SPAWN_TOPOFF_PULSE_MS);
         }
-        else if (error_ug < -(int32_t)SPAWN_TICK_DEADBAND)
+        else
         {
-            /* Flow above target — close flap a little */
-            spawn_set_flap_pwm(false, (uint16_t)SPAWN_REVERSE_PWM);
-            s_spawn.nudge_until = delayed_by_ms(get_absolute_time(), SPAWN_NUDGE_CLOSE_MS);
-            s_spawn.nudging = true;
+            /* Nudge expired on this tick — stop motor and start settle.
+             * Must disable current monitoring to prevent false undercurrent flags
+             * when the motor is intentionally stopped (zero current is normal). */
+            if (s_drv8263.monitoring_enabled)
+            {
+                drv8263_stop_current_monitoring(&s_drv8263);
+            }
+            (void)drv8263_set_motor_control(&s_drv8263, DRV8263_MOTOR_STOP, 0u);
+            
+            if (s_drv8263_flap2_ready)
+            {
+                if (s_drv8263_flap2.monitoring_enabled)
+                {
+                    drv8263_stop_current_monitoring(&s_drv8263_flap2);
+                }
+                (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_STOP, 0u);
+            }
+            s_spawn.nudging         = false;
+            s_spawn.topoff_settling = true;
+            s_spawn.topoff_settle_until = delayed_by_ms(get_absolute_time(),
+                                                         (uint32_t)SPAWN_TOPOFF_SETTLE_MS);
         }
-        /* else: within deadband — hold position (motor already stopped) */
+        return true;
     }
 
-    return true;
+    default:
+        /* Should not reach here — abort safely */
+        printf("Spawn: unexpected state %u — aborting\n", (unsigned)s_spawn.state);
+        spawn_close_flaps();
+        s_spawn.active = false;
+        spawn_set_state(SPAWN_SM_FAULT);
+        send_spawn_status(SPAWN_STATUS_ERROR);
+        return false;
+    }
 }
 
 /* ── DRV8434S SPI callbacks ─────────────────────────────────────────────────── */
@@ -994,29 +1576,35 @@ static void stepper_completion_tick(void)
 {
     uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-    /* ── ARM — device 0 ─────────────────────────────────────── */
+    /* ── ARM — device STEPPER_DEV_ROT_ARM ───────────────────── */
     if (s_arm_pending.pending)
     {
-        bool job_done = !s_motion.jobs[0].active;
+        bool job_done = !s_motion.jobs[STEPPER_DEV_ROT_ARM].active;
         bool timeout = (now_ms - s_arm_pending.start_ms) >= s_arm_pending.timeout_ms;
 
         if (job_done || timeout)
         {
             motion_result_t result;
+            int32_t steps_achieved = 0;
 
             if (timeout && !job_done)
             {
                 /* Still running but deadline exceeded — cancel it. */
-                drv8434s_motion_cancel(&s_motion, 0u, NULL);
+                drv8434s_motion_result_t cancelled;
+                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_ROT_ARM,
+                                           &cancelled))
+                {
+                    steps_achieved = cancelled.steps_achieved;
+                }
                 result = MOTION_TIMEOUT;
             }
             else
             {
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[0].reason;
+                steps_achieved = s_motion.jobs[STEPPER_DEV_ROT_ARM].steps_achieved;
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_ROT_ARM].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
-                    s_arm_pos_steps = s_arm_pending.target_steps;
                 }
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
@@ -1033,6 +1621,8 @@ static void stepper_completion_tick(void)
                     result = MOTION_FAULT;
                 }
             }
+
+            s_arm_pos_steps += steps_achieved;
 
             send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
             s_arm_pending.pending = false;
@@ -1041,28 +1631,35 @@ static void stepper_completion_tick(void)
         }
     }
 
-    /* ── RACK — device 1 ─────────────────────────────────────── */
+#ifdef STEPPER_DEV_LIN_ARM
+    /* ── RACK (linear arm) — device STEPPER_DEV_LIN_ARM ────────── */
     if (s_rack_pending.pending)
     {
-        bool job_done = !s_motion.jobs[1].active;
+        bool job_done = !s_motion.jobs[STEPPER_DEV_LIN_ARM].active;
         bool timeout = (now_ms - s_rack_pending.start_ms) >= s_rack_pending.timeout_ms;
 
         if (job_done || timeout)
         {
             motion_result_t result;
+            int32_t steps_achieved = 0;
 
             if (timeout && !job_done)
             {
-                drv8434s_motion_cancel(&s_motion, 1u, NULL);
+                drv8434s_motion_result_t cancelled;
+                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_LIN_ARM,
+                                           &cancelled))
+                {
+                    steps_achieved = cancelled.steps_achieved;
+                }
                 result = MOTION_TIMEOUT;
             }
             else
             {
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[1].reason;
+                steps_achieved = s_motion.jobs[STEPPER_DEV_LIN_ARM].steps_achieved;
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_LIN_ARM].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
-                    s_rack_pos_steps = s_rack_pending.target_steps;
                 }
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
@@ -1079,6 +1676,8 @@ static void stepper_completion_tick(void)
                     result = MOTION_FAULT;
                 }
             }
+
+            s_rack_pos_steps += steps_achieved;
 
             send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
             s_rack_pending.pending = false;
@@ -1086,29 +1685,36 @@ static void stepper_completion_tick(void)
                    (unsigned)result, (long)s_rack_pos_steps);
         }
     }
+#endif /* STEPPER_DEV_LIN_ARM */
 
-    /* ── TURNTABLE — device 2 ────────────────────────────────── */
+    /* ── TURNTABLE — device STEPPER_DEV_TURNTABLE ───────────── */
     if (s_turntable_pending.pending)
     {
-        bool job_done = !s_motion.jobs[2].active;
+        bool job_done = !s_motion.jobs[STEPPER_DEV_TURNTABLE].active;
         bool timeout = (now_ms - s_turntable_pending.start_ms) >= s_turntable_pending.timeout_ms;
 
         if (job_done || timeout)
         {
             motion_result_t result;
+            int32_t steps_achieved = 0;
 
             if (timeout && !job_done)
             {
-                drv8434s_motion_cancel(&s_motion, 2u, NULL);
+                drv8434s_motion_result_t cancelled;
+                if (drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE,
+                                           &cancelled))
+                {
+                    steps_achieved = cancelled.steps_achieved;
+                }
                 result = MOTION_TIMEOUT;
             }
             else
             {
-                drv8434s_motion_stop_reason_t reason = s_motion.jobs[2].reason;
+                steps_achieved = s_motion.jobs[STEPPER_DEV_TURNTABLE].steps_achieved;
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[STEPPER_DEV_TURNTABLE].reason;
                 if (reason == DRV8434S_MOTION_OK)
                 {
                     result = MOTION_OK;
-                    s_turntable_pos_steps = s_turntable_pending.target_steps;
                 }
                 else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
                 {
@@ -1125,6 +1731,8 @@ static void stepper_completion_tick(void)
                     result = MOTION_FAULT;
                 }
             }
+
+            s_turntable_pos_steps += steps_achieved;
 
             send_motion_done(SUBSYS_TURNTABLE, result, s_turntable_pos_steps);
             s_turntable_pending.pending = false;
@@ -1219,7 +1827,10 @@ static void handle_stepper_enable(uint16_t seq, const uint8_t *payload, uint16_t
 
 static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
-    if (len != (uint16_t)sizeof(pl_stepper_stepjob_t))
+    const uint16_t expected_new = (uint16_t)sizeof(pl_stepper_stepjob_t);
+    const uint16_t expected_old = (uint16_t)(sizeof(pl_stepper_stepjob_t) - sizeof(uint16_t));
+
+    if (len != expected_new && len != expected_old)
     {
         send_nack(seq, NACK_BAD_LEN);
         return;
@@ -1232,15 +1843,22 @@ static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_
     }
 
     const pl_stepper_stepjob_t *p = (const pl_stepper_stepjob_t *)payload;
+    uint16_t torque_limit = 0u;
+    if (len == expected_new)
+    {
+        torque_limit = p->torque_limit;
+    }
+
     int32_t target = (p->dir == 0) ? (int32_t)p->steps : -(int32_t)p->steps;
 
-    printf("Stepper: %lu steps dir=%u delay=%lu us\n",
+        printf("Stepper: %lu steps dir=%u delay=%lu us torque_limit=%u\n",
            (unsigned long)p->steps,
            (unsigned)p->dir,
-           (unsigned long)p->step_delay_us);
+           (unsigned long)p->step_delay_us,
+           (unsigned)torque_limit);
 
     /* Start motion on device 0 (non-blocking) */
-    if (!drv8434s_motion_start(&s_motion, 0u, target, 0u))
+    if (!drv8434s_motion_start(&s_motion, 0u, target, torque_limit))
     {
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -1518,18 +2136,16 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
                                  uint16_t seq)
 {
     int32_t current_steps;
-    switch (dev_idx)
+    if (dev_idx == (uint8_t)STEPPER_DEV_ROT_ARM)
     {
-    case 0u:
         current_steps = s_arm_pos_steps;
-        break;
-    case 1u:
-        current_steps = s_rack_pos_steps;
-        break;
-    case 2u:
+    }
+    else if (dev_idx == (uint8_t)STEPPER_DEV_TURNTABLE)
+    {
         current_steps = s_turntable_pos_steps;
-        break;
-    default:
+    }
+    else
+    {
         send_nack(seq, NACK_UNKNOWN);
         return false;
     }
@@ -1551,7 +2167,7 @@ static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
         return true;
     }
 
-    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, 0u))
+    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, STEPPER_SOFT_TORQUE_LIMIT))
     {
         send_nack(seq, NACK_UNKNOWN);
         return false;
@@ -1612,7 +2228,7 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     printf("Arm move → %li steps\n", (long)target);
-    (void)start_stepper_motion(0u, target, &s_arm_pending,
+    (void)start_stepper_motion((uint8_t)STEPPER_DEV_ROT_ARM, target, &s_arm_pending,
                                SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq);
 }
 
@@ -1653,9 +2269,18 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
         return;
     }
 
+#ifdef STEPPER_DEV_LIN_ARM
     printf("Rack move → %li steps\n", (long)target);
-    (void)start_stepper_motion(1u, target, &s_rack_pending,
+    (void)start_stepper_motion((uint8_t)STEPPER_DEV_LIN_ARM, target, &s_rack_pending,
                                SUBSYS_RACK, (uint32_t)RACK_MOTION_TIMEOUT_MS, seq);
+#else
+    /* No linear arm / rack device in the current chain configuration.
+     * Define STEPPER_DEV_LIN_ARM in board_pins.h and bump DRV8434S_N_DEVICES
+     * when the linear arm stepper is wired. */
+    printf("Rack Move: STEPPER_DEV_LIN_ARM not defined (device not wired)\n");
+    send_nack(seq, NACK_UNKNOWN);
+    (void)target;
+#endif
 }
 
 /**
@@ -1707,7 +2332,7 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     printf("Turntable GOTO → %li steps\n", (long)target);
-    (void)start_stepper_motion(2u, target, &s_turntable_pending,
+    (void)start_stepper_motion((uint8_t)STEPPER_DEV_TURNTABLE, target, &s_turntable_pending,
                                SUBSYS_TURNTABLE,
                                (uint32_t)TURNTABLE_MOTION_TIMEOUT_MS, seq);
 }
@@ -1720,9 +2345,9 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
 static void handle_turntable_home(uint16_t seq)
 {
     /* Cancel any in-progress turntable motion. */
-    if (s_motion.jobs[2].active)
+    if (s_motion.jobs[STEPPER_DEV_TURNTABLE].active)
     {
-        drv8434s_motion_cancel(&s_motion, 2u, NULL);
+        drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_TURNTABLE, NULL);
         s_turntable_pending.pending = false;
     }
 
@@ -1884,21 +2509,17 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
                         ? (int32_t)HOTWIRE_TRAVERSE_STEPS
                         : -(int32_t)HOTWIRE_TRAVERSE_STEPS;
 
-    drv8434s_motion_job_t job = {0};
-    job.dev_idx = (uint8_t)STEPPER_DEV_HW_CARRIAGE;
-    job.steps = (uint32_t)((steps < 0) ? -steps : steps);
-    job.reverse = (steps < 0);
-    job.step_delay_us = (uint32_t)HOTWIRE_TRAVERSE_STEP_DELAY_US;
-
-    if (!drv8434s_motion_start(&s_motion, &job))
+    if (!drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_HW_CARRIAGE,
+                               steps, 0u))
     {
         printf("Hotwire Traverse: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    printf("Hotwire Traverse: dir=%u steps=%u\n",
-           (unsigned)p->direction, (unsigned)job.steps);
+    (void)ensure_step_timer_running();
+    printf("Hotwire Traverse: dir=%u steps=%li\n",
+           (unsigned)p->direction, (long)steps);
     send_ack(seq);
     /* Note: MOTION_DONE for STEPPER_DEV_HW_CARRIAGE is not yet wired to
      * stepper_completion_tick — add a pending tracker when the device is
@@ -1957,47 +2578,45 @@ static void handle_indexer_move(uint16_t seq, const uint8_t *payload, uint16_t l
 
     int32_t delta = target_steps - s_indexer_pos_steps;
 
-    drv8434s_motion_job_t job = {0};
-    job.dev_idx = (uint8_t)STEPPER_DEV_INDEXER;
-    job.steps = (uint32_t)((delta < 0) ? -delta : delta);
-    job.reverse = (delta < 0);
-    job.step_delay_us = (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US;
-
-    if (job.steps == 0u)
+    if (delta == 0)
     {
         /* Already at target — send immediate MOTION_DONE. */
         printf("Indexer Move: already at position %u (no-op)\n", (unsigned)p->position);
         send_ack(seq);
-        send_motion_done(SUBSYS_INDEXER, MOTION_OK, 0);
+        send_motion_done(SUBSYS_INDEXER, MOTION_OK, s_indexer_pos_steps);
         return;
     }
 
-    if (!drv8434s_motion_start(&s_motion, &job))
+    if (!drv8434s_motion_start(&s_motion, (uint8_t)STEPPER_DEV_INDEXER,
+                               delta, 0u))
     {
         printf("Indexer Move: failed to start motion\n");
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
+    (void)ensure_step_timer_running();
     s_indexer_pos_steps = target_steps;
-    printf("Indexer Move: pos=%u steps=%u %s\n",
-           (unsigned)p->position, (unsigned)job.steps,
-           job.reverse ? "REV" : "FWD");
+    printf("Indexer Move: pos=%u delta=%li %s\n",
+           (unsigned)p->position, (long)delta,
+           (delta < 0) ? "REV" : "FWD");
     send_ack(seq);
-    send_motion_done(SUBSYS_INDEXER, MOTION_OK, (int32_t)job.steps);
+    send_motion_done(SUBSYS_INDEXER, MOTION_OK, s_indexer_pos_steps);
 #endif
 }
 
 /**
- * @brief MSG_DISPENSE_SPAWN (0x49) - run closed loop dispensing procedure.
+ * @brief MSG_DISPENSE_SPAWN (0x49) - run the improved closed-loop dosing procedure.
  *
- * The flaps should start closed, while the bag should be weighed and opned
- * The flaps will begin to open and a innoculation rate is targeted on the way
- * to a target weight, calculated by percentage of bag weight.
+ * Supports two finish strategies (Finish A: close-early + top-off; Finish B: low-flow
+ * taper) selectable via the flags byte in pl_innoculate_bag_t.  Also supports
+ * optional homing to the closed endpoint before priming.
+ *
+ * Payload: pl_innoculate_bag_t (8 bytes; accepts 7-byte legacy payloads with flags=0).
  */
 static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
-    if (len < (uint16_t)sizeof(pl_innoculate_bag_t))
+    if (len < (uint16_t)PL_INNOCULATE_BAG_MIN_LEN)
     {
         send_nack(seq, NACK_BAD_LEN);
         return;
@@ -2017,6 +2636,15 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     const pl_innoculate_bag_t *pl = (const pl_innoculate_bag_t *)payload;
+
+    /* Read optional flags byte (backward-compat: absent = 0) */
+    uint8_t flags = (len >= (uint16_t)sizeof(pl_innoculate_bag_t)) ? pl->flags : 0u;
+    uint8_t finish_mode = (flags & SPAWN_FLAG_FINISH_MODE_B) ? (uint8_t)SPAWN_FINISH_MODE_B
+                                                              : (uint8_t)SPAWN_FINISH_MODE_A;
+    bool do_home = (bool)(flags & SPAWN_FLAG_DO_HOME);
+
+    printf("Spawn: finish_mode=%u do_home=%u flags=0x%02x\n",
+           (unsigned)finish_mode, (unsigned)do_home, (unsigned)flags);
 
     /* Drain stale HX711 FIFO samples before taking the baseline.
      * The HX711 runs at 80 SPS continuously; between doses the FIFO/queue
@@ -2052,55 +2680,85 @@ static void handle_dispense_spawn(uint16_t seq, const uint8_t *payload, uint16_t
     }
 
     memset(&s_spawn, 0, sizeof(s_spawn));
-    s_spawn.active = true;
-    s_spawn.agitating = false;
-    s_spawn.retry = 0u;
+    s_spawn.active      = true;
+    s_spawn.agitating   = false;
+    s_spawn.retry       = 0u;
     s_spawn.max_retries = SPAWN_MAX_RETRIES;
-    s_spawn.bag_number = pl->bag_number;
-    s_spawn.start_mass_ug = (uint32_t)mass.ug;
-    double m;
-    mass_get_value(&mass, &m);
-    printf("Initial mass %f\n", m);
+    s_spawn.bag_number  = pl->bag_number;
+    s_spawn.finish_mode = finish_mode;
+    s_spawn.do_home     = do_home;
+    s_spawn.start_mass_ug  = (uint32_t)mass.ug;
     /* innoc_percent is x10 percent (e.g., 250 = 25.0%) */
     uint64_t target_ug = ((uint64_t)s_spawn.start_mass_ug * (uint64_t)pl->innoc_percent) / 1000ULL;
-    s_spawn.target_ug = (uint32_t)target_ug;
-    s_spawn.dispensed_ug = 0u;
-    s_spawn.window_start_ug = 0u; /* start of first 500 ms flow window */
-    s_spawn.last_tick_ug = 0u;    /* previous-tick baseline for nudge delta */
+    s_spawn.target_ug          = (uint32_t)target_ug;
+    s_spawn.dispensed_ug       = 0u;
+    s_spawn.window_start_ug    = 0u;
+    s_spawn.last_tick_ug       = 0u;
     s_spawn.spawn_remaining_ug = ((uint32_t)pl->spawn_mass) * 1000000UL;
-    s_spawn.last_flow_check = get_absolute_time();
-    s_spawn.nudging = false;
-    s_spawn.startup_opening = true; /* drive open until first weight change before closed loop */
+    s_spawn.last_flow_check    = get_absolute_time();
+    s_spawn.nudging            = false;
+    s_spawn.ema_seeded         = false;
+    s_spawn.ema_flow_ug        = 0u;
+    s_spawn.consecutive_open_nudges = 0u;
+    s_spawn.last_nudge_dir     = 0;
+    s_spawn.reverse_holdoff_until = get_absolute_time();
+    s_spawn.topoff_pulses      = 0u;
+    s_spawn.topoff_settling    = false;
 
-    /* Drive flap open at full PWM and arm undercurrent monitoring.
-     * If the flap reaches end-of-travel (no load = undercurrent) before any
-     * weight change is registered, the startup_opening check treats that as a
-     * flow failure.  Monitoring is stopped once flow is confirmed. */
-    if (s_drv8263.monitoring_enabled)
-    {
-        drv8263_stop_current_monitoring(&s_drv8263);
-    }
-    s_drv8263.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-    s_drv8263.config.current_high_threshold = 4095u;
-    s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-    spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
-    (void)drv8263_start_current_monitoring(&s_drv8263);
+    double m;
+    mass_get_value(&mass, &m);
+    printf("Spawn: initial mass %.3fg  target=%luug  finish=%u  home=%u\n",
+           m, (unsigned long)s_spawn.target_ug, (unsigned)finish_mode, (unsigned)do_home);
 
-    if (s_drv8263_flap2_ready)
+    if (do_home)
     {
-        if (s_drv8263_flap2.monitoring_enabled)
+        /* Home: drive flaps to closed endpoint, then wait in SPAWN_SM_HOMING. */
+        if (s_drv8263.monitoring_enabled)
         {
-            drv8263_stop_current_monitoring(&s_drv8263_flap2);
+            drv8263_stop_current_monitoring(&s_drv8263);
         }
-        s_drv8263_flap2.config.current_low_threshold = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
-        s_drv8263_flap2.config.current_high_threshold = 4095u;
-        s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
-        (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_FORWARD,
-                                        (uint16_t)SPAWN_OPEN_PWM);
-        (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+        /* flap_close_internal() sets up the DRV8263, starts the flap SM, and  *
+         * sets s_flap_state = FLAP_SM_CLOSING so flap_sm_tick() can detect    *
+         * the endpoint.  spawn callback polls s_flap_state for completion.    */
+        (void)flap_close_internal();
+        s_spawn.close_start_time = get_absolute_time();
+        s_spawn.startup_opening  = false;
+        spawn_set_state(SPAWN_SM_HOMING);
+    }
+    else
+    {
+        /* No homing — drive open immediately and go to PRIME */
+        s_spawn.startup_opening = true;
+
+        if (s_drv8263.monitoring_enabled)
+        {
+            drv8263_stop_current_monitoring(&s_drv8263);
+        }
+        s_drv8263.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+        s_drv8263.config.current_high_threshold    = 4095u;
+        s_drv8263.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+        spawn_set_flap_pwm(true, (uint16_t)SPAWN_OPEN_PWM);
+        (void)drv8263_start_current_monitoring(&s_drv8263);
+
+        if (s_drv8263_flap2_ready)
+        {
+            if (s_drv8263_flap2.monitoring_enabled)
+            {
+                drv8263_stop_current_monitoring(&s_drv8263_flap2);
+            }
+            s_drv8263_flap2.config.current_low_threshold     = (uint16_t)FLAP_OPEN_CURRENT_DROP_TH;
+            s_drv8263_flap2.config.current_high_threshold    = 4095u;
+            s_drv8263_flap2.config.current_check_interval_ms = (uint32_t)FLAP_MONITOR_INTERVAL_MS;
+            (void)drv8263_set_motor_control(&s_drv8263_flap2, DRV8263_MOTOR_FORWARD,
+                                            (uint16_t)SPAWN_OPEN_PWM);
+            (void)drv8263_start_current_monitoring(&s_drv8263_flap2);
+        }
+
+        spawn_set_state(SPAWN_SM_PRIME);
     }
 
-    if (!add_repeating_timer_ms(SPAWN_TIMER_PERIOD_MS, dispense_spawn_callback, NULL, &s_spawn.timer))
+    if (!add_repeating_timer_ms((int32_t)SPAWN_TIMER_PERIOD_MS, dispense_spawn_callback,
+                                NULL, &s_spawn.timer))
     {
         spawn_close_flaps();
         s_spawn.active = false;
@@ -2262,9 +2920,15 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
         if (s_spawn.active)
         {
             spawn_stop_timer();
-            spawn_close_flaps();
+            spawn_stop_flaps();
+            spawn_fast_close();  /* fast close even on abort for safety */
             s_spawn.active = false;
             s_spawn.agitating = false;
+            spawn_set_state(SPAWN_SM_ABORTED);
+            printf("Spawn ABORT: stopped at state=%u disp=%luug target=%luug\n",
+                   (unsigned)s_spawn.prev_state,
+                   (unsigned long)s_spawn.dispensed_ug,
+                   (unsigned long)s_spawn.target_ug);
             send_spawn_status(SPAWN_STATUS_ABORTED);
         }
         send_ack(hdr.seq);
@@ -2486,6 +3150,52 @@ static void init_drv8434s_chain(void)
 
     printf("uart_server: DRV8434S all %u device(s) enabled (EN_OUT=1)\n",
            (unsigned)s_stepper_chain.cfg.n_devices);
+
+    /* Ensure the chain is not in a faulted state at startup. */
+    (void)drv8434s_chain_global_clear_faults(&s_stepper_chain);
+
+    /* Configure each device for Smart-Tune Ripple mode + stall detection. */
+    for (uint8_t k = 0; k < s_stepper_chain.cfg.n_devices; ++k)
+    {
+        /* Configure fault reporting (so stall detection is allowed by default). */
+        (void)drv8434s_chain_set_fault_config(&s_stepper_chain, k,
+                                             DRV8434S_FAULT_CFG_STL_REP,
+                                             NULL);
+
+        /* Smart-tune ripple decay is required for TRQ_COUNT to update. */
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL2,
+                                        DRV8434S_CTRL2_DECAY_MASK,
+                                        (uint8_t)DRV8434S_DECAY_SMART_TUNE_RIPPLE,
+                                        NULL);
+
+        /* Enable stall detection (EN_STL). */
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL5,
+                                        DRV8434S_CTRL5_EN_STL,
+                                        DRV8434S_CTRL5_EN_STL,
+                                        NULL);
+
+        /* Set stall threshold to minimum (1) so TRQ_COUNT updates.
+         * When set to 0 the device may not update torque count at all.
+         * A real stall will still produce TRQ_COUNT=0 and can be detected
+         * by our soft limit logic. */
+        (void)drv8434s_chain_write_reg(&s_stepper_chain, k,
+                                      DRV8434S_REG_CTRL6, 1u, NULL);
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL7,
+                                        DRV8434S_CTRL7_STALL_TH_HI_MASK,
+                                        0u,
+                                        NULL);
+
+        /* Enable torque-count scaling (optional but matches datasheet note).
+         * This improves resolution for low-torque behavior. */
+        (void)drv8434s_chain_modify_reg(&s_stepper_chain, k,
+                                        DRV8434S_REG_CTRL7,
+                                        DRV8434S_CTRL7_TRQ_SCALE,
+                                        DRV8434S_CTRL7_TRQ_SCALE,
+                                        NULL);
+    }
 
     /* Initialise the non-blocking motion engine.
      * torque_sample_div=10 → sample torque every 10th tick. */

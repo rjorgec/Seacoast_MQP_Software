@@ -1,7 +1,7 @@
 # NLSpec: Raspberry Pi Pico 2 Firmware
 
 ## Version
-0.1.0
+0.1.1
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -25,6 +25,8 @@ The Pico firmware runs bare-metal C on the RP2040 (ARM core of the Pico 2). It i
 | `shared/proto/proto.h` | Protocol definitions (shared with ESP32) |
 | `shared/proto/cobs.c` | COBS encode/decode |
 | `shared/proto/proto_crc.c` | CRC-16-CCITT |
+
+**Stepper torque default source:** The fallback soft torque-limit threshold is defined once in `shared/proto/proto.h` as `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` and consumed by Pico (`STEPPER_SOFT_TORQUE_LIMIT` fallback in `uart_server.c`).
 
 ### 1.2 Execution Model
 
@@ -98,6 +100,8 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 **Special behavior for ARM_POS_PRESS:** Stall detection is enabled. If stall fires within `ARM_PRESS_STALL_WINDOW_STEPS` (default: 200) of the target, treat as `MOTION_OK` (successful engagement). Otherwise, treat as `MOTION_STALLED`.
 
 **Timeout:** `ARM_MOVE_TIMEOUT_MS` (default: 10000 ms).
+
+**Soft torque-limit default:** For state-based stepper moves (`MSG_ARM_MOVE`, `MSG_RACK_MOVE`, `MSG_TURNTABLE_GOTO`, etc.), Pico uses `STEPPER_SOFT_TORQUE_LIMIT`; if not overridden, this resolves to `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` from the shared protocol header.
 
 **Arm State Machine States:** `IDLE`, `MOVING`, `AT_PRESS`, `AT_POS1`, `AT_POS2`, `FAULT`
 

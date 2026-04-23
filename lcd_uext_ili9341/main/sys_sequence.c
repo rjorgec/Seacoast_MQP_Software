@@ -99,11 +99,19 @@ static void safe_stop_all(void)
  */
 static bool wait_motion_done(uint8_t expected_subsys, uint32_t timeout_ms)
 {
+    /* DIAG: confirm task is about to block — abort queued before this will be
+     * silently ignored until the wait returns or times out. */
+    ESP_LOGD(TAG, "wait_motion_done: BLOCKING up to %u ms for subsys=%u (state=%s)",
+             (unsigned)timeout_ms, (unsigned)expected_subsys,
+             sys_sequence_state_name(s_state));
+
     EventBits_t bits = xEventGroupWaitBits(s_events,
                                            EVT_MOTION_DONE,
                                            pdTRUE, /* clear on exit */
                                            pdFALSE,
                                            pdMS_TO_TICKS(timeout_ms));
+
+    ESP_LOGD(TAG, "wait_motion_done: unblocked, bits=0x%lx", (unsigned long)bits);
 
     if (!(bits & EVT_MOTION_DONE))
     {
@@ -274,13 +282,21 @@ static void seq_task(void *arg)
                 ESP_LOGI(TAG, "setup: tare scale via pico_link");
                 /* Note: HX711 tare sent via existing MSG_HX711_TARE RPC */
 
+                /* DIAG: state is SYS_SETUP_LOAD here — sequence_manual_actions_blocked()
+                 * returns true, so ALL manual UI buttons are blocked until this
+                 * second wait_cmd returns. Abort pressed now goes to queue but
+                 * this wait_cmd will return it as s2; no safe_stop_all() is called. */
+                ESP_LOGI(TAG, "DIAG setup: state=%s — UI BLOCKED, entering 2nd wait_cmd",
+                         sys_sequence_state_name(s_state));
                 /* Wait for Start press after operator loads spawn bag */
                 ESP_LOGI(TAG, "setup: waiting for START command");
                 sys_cmd_t s2 = wait_cmd(portMAX_DELAY);
+                ESP_LOGI(TAG, "DIAG setup: wait_cmd returned s2=%d (SYS_CMD_START=%d SYS_CMD_ABORT=%d)",
+                         (int)s2, (int)SYS_CMD_START, (int)SYS_CMD_ABORT);
                 if (s2 == SYS_CMD_START)
                     set_state(SYS_CUTTING_TIP);
                 else
-                    set_state(SYS_IDLE);
+                    set_state(SYS_IDLE); /* DIAG: NO safe_stop_all() called here! */
             }
             break;
         }
