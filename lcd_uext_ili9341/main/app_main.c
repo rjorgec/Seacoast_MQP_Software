@@ -1,6 +1,5 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <stdbool.h>
 #include "esp_err.h"
 #include "nvs_flash.h"
 
@@ -17,11 +16,6 @@
 #include "motor_hal.h"
 #include "pico_link.h"
 #include "proto/proto.h"
-#include "esp_log.h"
-
-static const char *TAG = "app_main";
-static volatile bool s_pico_ready = false;
-static volatile bool s_ui_ready = false;
 
 // #include "recipes.h"
 // #include "wifi_ap.h"
@@ -48,14 +42,6 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
         {
             ui_dosing_on_spawn_status((const pl_spawn_status_t *)pl);
         }
-        break;
-    case MSG_PICO_READY:
-        s_pico_ready = true;
-        if (s_ui_ready)
-        {
-            ui_status_set("Pico ready");
-        }
-        ESP_LOGI(TAG, "Received MSG_PICO_READY from Pico");
         break;
     default:
         /* Forward to UI screens handler for weight display */
@@ -87,11 +73,6 @@ void app_main(void)
     // display/ui
     display_handles_t disp = display_init();
     ui_init(&disp);
-    s_ui_ready = true;
-    if (s_pico_ready)
-    {
-        ui_status_set("Pico ready");
-    }
 
     ESP_ERROR_CHECK(control_start()); // ONLY ONCE
 

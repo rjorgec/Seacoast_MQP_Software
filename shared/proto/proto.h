@@ -55,7 +55,6 @@ extern "C"
         /* ---- Unsolicited status messages (0x60–0x6F) ---- */
         MSG_MOTION_DONE = 0x60,   /* Pico→ESP: motion/action complete notification */
         MSG_VACUUM_STATUS = 0x61, /* Pico→ESP: vacuum pump RPM/blocked status */
-        MSG_PICO_READY = 0x62,    /* Pico→ESP: Pico boot state 2 complete; command path is ready */
 
         MSG_ACK = 0x80,
         MSG_NACK = 0x81,

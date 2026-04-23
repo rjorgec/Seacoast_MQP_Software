@@ -110,34 +110,25 @@ static bool s_flap2_stopped = false; /* flap2 reached its endpoint and was stopp
 
 static int32_t s_arm_pos_steps = 0;
 static int32_t s_rack_pos_steps = 0;
+static int32_t s_turntable_pos_steps = 0;
+static bool s_turntable_homed = false;
 static int32_t s_indexer_pos_steps = 0; /* bag depth/eject rack (STEPPER_DEV_INDEXER) */
 
 /* ── Per-device pending motion tracking ────────────────────────────────────── */
 
-typedef enum
-{
-    STEPPER_STOP_AT_TARGET = 0,
-    STEPPER_STOP_PRESS_TORQUE_OK,
-    STEPPER_STOP_HOME_TORQUE_OK,
-} stepper_stop_mode_t;
-
 typedef struct
 {
     bool pending;
-    int32_t start_steps;
     int32_t target_steps;
-    int32_t commanded_target_steps;
     subsystem_id_t subsys;
     uint32_t start_ms;
     uint32_t timeout_ms;
     uint8_t dev_idx;
-    uint16_t torque_limit;
-    uint16_t torque_ok_window_steps;
-    stepper_stop_mode_t stop_mode;
 } stepper_pending_t;
 
 static stepper_pending_t s_arm_pending;
 static stepper_pending_t s_rack_pending;
+static stepper_pending_t s_turntable_pending;
 
 /* ── Vacuum pump state ─────────────────────────────────────────────────────── */
 
@@ -265,15 +256,6 @@ static void send_vacuum_status(vacuum_status_code_t status, uint16_t rpm)
         .rpm = rpm,
     };
     (void)uart_send_frame(MSG_VACUUM_STATUS, 0u, &pl, (uint16_t)sizeof(pl));
-}
-
-/**
- * @brief Send MSG_PICO_READY (unsolicited, seq=0) to the ESP32 once the Pico
- *        has finished boot state 2 and the UART command path is available.
- */
-static void send_pico_ready(void)
-{
-    (void)uart_send_frame(MSG_PICO_READY, 0u, NULL, 0u);
 }
 
 /* ── Spawn dosing helpers ─────────────────────────────────────────────────── */
@@ -838,7 +820,7 @@ static void stepper_spi_watchdog_tick(void)
         return;
 
     /* Skip watchdog if any motion is currently in progress */
-    if (s_arm_pending.pending || s_rack_pending.pending)
+    if (s_arm_pending.pending || s_rack_pending.pending || s_turntable_pending.pending)
     {
         /* Reset timer so the watchdog runs after motion completes */
         s_spi_watchdog_last_ms = to_ms_since_boot(get_absolute_time());
@@ -1021,7 +1003,6 @@ static void stepper_completion_tick(void)
         if (job_done || timeout)
         {
             motion_result_t result;
-            int32_t report_pos_steps = s_arm_pos_steps;
 
             if (timeout && !job_done)
             {
@@ -1031,20 +1012,32 @@ static void stepper_completion_tick(void)
             }
             else
             {
-                result = stepper_result_from_job(&s_arm_pending, &s_motion.jobs[0],
-                                                 &report_pos_steps);
-                if (result == MOTION_OK)
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[0].reason;
+                if (reason == DRV8434S_MOTION_OK)
                 {
-                    s_arm_pos_steps = report_pos_steps;
+                    result = MOTION_OK;
+                    s_arm_pos_steps = s_arm_pending.target_steps;
+                }
+                else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
+                {
+                    result = MOTION_STALLED;
+                }
+                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+                {
+                    /* SPI bus error — distinct from a physical driver fault.
+                     * ESP32 can display "SPI FAULT" vs "STALLED". */
+                    result = MOTION_SPI_FAULT;
+                }
+                else
+                {
+                    result = MOTION_FAULT;
                 }
             }
 
-            send_motion_done(SUBSYS_ARM, result, report_pos_steps);
+            send_motion_done(SUBSYS_ARM, result, s_arm_pos_steps);
             s_arm_pending.pending = false;
-            printf("Arm motion done: result=%u pos=%li torque=%u mode=%u\n",
-                   (unsigned)result, (long)report_pos_steps,
-                   (unsigned)s_motion.jobs[0].last_torque_count,
-                   (unsigned)s_arm_pending.stop_mode);
+            printf("Arm motion done: result=%u pos=%li\n",
+                   (unsigned)result, (long)s_arm_pos_steps);
         }
     }
 
@@ -1057,7 +1050,6 @@ static void stepper_completion_tick(void)
         if (job_done || timeout)
         {
             motion_result_t result;
-            int32_t report_pos_steps = s_rack_pos_steps;
 
             if (timeout && !job_done)
             {
@@ -1066,23 +1058,80 @@ static void stepper_completion_tick(void)
             }
             else
             {
-                result = stepper_result_from_job(&s_rack_pending, &s_motion.jobs[1],
-                                                 &report_pos_steps);
-                if (result == MOTION_OK)
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[1].reason;
+                if (reason == DRV8434S_MOTION_OK)
                 {
-                    s_rack_pos_steps = report_pos_steps;
+                    result = MOTION_OK;
+                    s_rack_pos_steps = s_rack_pending.target_steps;
+                }
+                else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
+                {
+                    result = MOTION_STALLED;
+                }
+                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+                {
+                    /* SPI bus error — distinct from a physical driver fault.
+                     * ESP32 can display "SPI FAULT" vs "STALLED". */
+                    result = MOTION_SPI_FAULT;
+                }
+                else
+                {
+                    result = MOTION_FAULT;
                 }
             }
 
-            send_motion_done(SUBSYS_RACK, result, report_pos_steps);
+            send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
             s_rack_pending.pending = false;
-            printf("Rack motion done: result=%u pos=%li torque=%u mode=%u\n",
-                   (unsigned)result, (long)report_pos_steps,
-                   (unsigned)s_motion.jobs[1].last_torque_count,
-                   (unsigned)s_rack_pending.stop_mode);
+            printf("Rack motion done: result=%u pos=%li\n",
+                   (unsigned)result, (long)s_rack_pos_steps);
         }
     }
 
+    /* ── TURNTABLE — device 2 ────────────────────────────────── */
+    if (s_turntable_pending.pending)
+    {
+        bool job_done = !s_motion.jobs[2].active;
+        bool timeout = (now_ms - s_turntable_pending.start_ms) >= s_turntable_pending.timeout_ms;
+
+        if (job_done || timeout)
+        {
+            motion_result_t result;
+
+            if (timeout && !job_done)
+            {
+                drv8434s_motion_cancel(&s_motion, 2u, NULL);
+                result = MOTION_TIMEOUT;
+            }
+            else
+            {
+                drv8434s_motion_stop_reason_t reason = s_motion.jobs[2].reason;
+                if (reason == DRV8434S_MOTION_OK)
+                {
+                    result = MOTION_OK;
+                    s_turntable_pos_steps = s_turntable_pending.target_steps;
+                }
+                else if (reason == DRV8434S_MOTION_TORQUE_LIMIT)
+                {
+                    result = MOTION_STALLED;
+                }
+                else if (reason == DRV8434S_MOTION_SPI_ERROR)
+                {
+                    /* SPI bus error — distinct from a physical driver fault.
+                     * ESP32 can display "SPI FAULT" vs "STALLED". */
+                    result = MOTION_SPI_FAULT;
+                }
+                else
+                {
+                    result = MOTION_FAULT;
+                }
+            }
+
+            send_motion_done(SUBSYS_TURNTABLE, result, s_turntable_pos_steps);
+            s_turntable_pending.pending = false;
+            printf("Turntable motion done: result=%u pos=%li\n",
+                   (unsigned)result, (long)s_turntable_pos_steps);
+        }
+    }
 }
 
 /**
@@ -1463,92 +1512,24 @@ static void handle_flap_close(uint16_t seq)
 
 /* ── Internal helper: start a stepper motion and arm the pending tracker ───── */
 
-static bool stepper_get_position_steps(uint8_t dev_idx, int32_t *steps_out)
+static bool start_stepper_motion(uint8_t dev_idx, int32_t target_steps,
+                                 stepper_pending_t *pending,
+                                 subsystem_id_t subsys, uint32_t timeout_ms,
+                                 uint16_t seq)
 {
-    if (steps_out == NULL)
-    {
-        return false;
-    }
-
+    int32_t current_steps;
     switch (dev_idx)
     {
     case 0u:
-        *steps_out = s_arm_pos_steps;
-        return true;
+        current_steps = s_arm_pos_steps;
+        break;
     case 1u:
-        *steps_out = s_rack_pos_steps;
-        return true;
+        current_steps = s_rack_pos_steps;
+        break;
+    case 2u:
+        current_steps = s_turntable_pos_steps;
+        break;
     default:
-        return false;
-    }
-}
-
-static motion_result_t stepper_result_from_job(const stepper_pending_t *pending,
-                                               const drv8434s_motion_job_t *job,
-                                               int32_t *new_pos_steps_out)
-{
-    int32_t actual_steps = pending->start_steps + job->steps_achieved;
-    if (new_pos_steps_out != NULL)
-    {
-        *new_pos_steps_out = actual_steps;
-    }
-
-    switch (job->reason)
-    {
-    case DRV8434S_MOTION_OK:
-        if (pending->stop_mode == STEPPER_STOP_HOME_TORQUE_OK)
-        {
-            return MOTION_FAULT;
-        }
-        if (new_pos_steps_out != NULL)
-        {
-            *new_pos_steps_out = pending->target_steps;
-        }
-        return MOTION_OK;
-
-    case DRV8434S_MOTION_TORQUE_LIMIT:
-        if (pending->stop_mode == STEPPER_STOP_PRESS_TORQUE_OK)
-        {
-            int32_t remaining = pending->target_steps - actual_steps;
-            if (remaining < 0)
-            {
-                remaining = -remaining;
-            }
-            if ((uint32_t)remaining <= pending->torque_ok_window_steps)
-            {
-                return MOTION_OK;
-            }
-        }
-        else if (pending->stop_mode == STEPPER_STOP_HOME_TORQUE_OK)
-        {
-            if (new_pos_steps_out != NULL)
-            {
-                *new_pos_steps_out = 0;
-            }
-            return MOTION_OK;
-        }
-        return MOTION_STALLED;
-
-    case DRV8434S_MOTION_SPI_ERROR:
-        return MOTION_SPI_FAULT;
-
-    default:
-        return MOTION_FAULT;
-    }
-}
-
-static bool start_stepper_motion(uint8_t dev_idx,
-                                 int32_t commanded_target_steps,
-                                 int32_t logical_target_steps,
-                                 stepper_pending_t *pending,
-                                 subsystem_id_t subsys, uint32_t timeout_ms,
-                                 uint16_t seq, uint16_t torque_limit,
-                                 uint16_t torque_ok_window_steps,
-                                 stepper_stop_mode_t stop_mode)
-{
-    int32_t current_steps;
-    if (!stepper_get_position_steps(dev_idx, &current_steps))
-    {
         send_nack(seq, NACK_UNKNOWN);
         return false;
     }
@@ -1560,17 +1541,17 @@ static bool start_stepper_motion(uint8_t dev_idx,
     }
     pending->pending = false;
 
-    int32_t delta = commanded_target_steps - current_steps;
+    int32_t delta = target_steps - current_steps;
 
     if (delta == 0)
     {
         /* Already at target — ACK and report done immediately. */
         send_ack(seq);
-        send_motion_done(subsys, MOTION_OK, logical_target_steps);
+        send_motion_done(subsys, MOTION_OK, current_steps);
         return true;
     }
 
-    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, torque_limit))
+    if (!drv8434s_motion_start(&s_motion, dev_idx, delta, 0u))
     {
         send_nack(seq, NACK_UNKNOWN);
         return false;
@@ -1584,16 +1565,11 @@ static bool start_stepper_motion(uint8_t dev_idx,
     }
 
     pending->pending = true;
-    pending->start_steps = current_steps;
-    pending->target_steps = logical_target_steps;
-    pending->commanded_target_steps = commanded_target_steps;
+    pending->target_steps = target_steps;
     pending->subsys = subsys;
     pending->start_ms = to_ms_since_boot(get_absolute_time());
     pending->timeout_ms = timeout_ms;
     pending->dev_idx = dev_idx;
-    pending->torque_limit = torque_limit;
-    pending->torque_ok_window_steps = torque_ok_window_steps;
-    pending->stop_mode = stop_mode;
 
     send_ack(seq);
     return true;
@@ -1635,27 +1611,14 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
         return;
     }
 
-    uint16_t torque_limit = 0u;
-    uint16_t torque_window_steps = 0u;
-    stepper_stop_mode_t stop_mode = STEPPER_STOP_AT_TARGET;
-
-    if ((arm_pos_t)p->position == ARM_POS_PRESS)
-    {
-        torque_limit = (uint16_t)ARM_PRESS_TORQUE_LIMIT;
-        torque_window_steps = (uint16_t)ARM_PRESS_STALL_WINDOW_STEPS;
-        stop_mode = STEPPER_STOP_PRESS_TORQUE_OK;
-    }
-
-    printf("Arm move → %li steps (torque_limit=%u mode=%u)\n",
-           (long)target, (unsigned)torque_limit, (unsigned)stop_mode);
-    (void)start_stepper_motion(0u, target, target, &s_arm_pending,
-                               SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS,
-                               seq, torque_limit, torque_window_steps, stop_mode);
+    printf("Arm move → %li steps\n", (long)target);
+    (void)start_stepper_motion(0u, target, &s_arm_pending,
+                               SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq);
 }
 
 /**
  * @brief MSG_RACK_MOVE (0x43) — move rack stepper (device 1) to named position.
- *        RACK_POS_HOME seeks reverse until the homing torque stop, then zeros.
+ *        RACK_POS_HOME drives the rack to absolute step 0.
  */
 static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
@@ -1673,49 +1636,100 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
 
     const pl_rack_move_t *p = (const pl_rack_move_t *)payload;
     int32_t target;
-    int32_t commanded_target;
-    uint32_t timeout_ms = (uint32_t)RACK_MOTION_TIMEOUT_MS;
-    uint16_t torque_limit = 0u;
-    uint16_t torque_window_steps = 0u;
-    stepper_stop_mode_t stop_mode = STEPPER_STOP_AT_TARGET;
-
-    if (!stepper_get_position_steps(1u, &commanded_target))
-    {
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
 
     switch ((rack_pos_t)p->position)
     {
     case RACK_POS_HOME:
         target = 0;
-        commanded_target -= (int32_t)RACK_HOME_SEEK_STEPS;
-        timeout_ms = (uint32_t)RACK_HOME_TIMEOUT_MS;
-        torque_limit = (uint16_t)RACK_HOME_TORQUE_LIMIT;
-        stop_mode = STEPPER_STOP_HOME_TORQUE_OK;
         break;
     case RACK_POS_EXTEND:
         target = (int32_t)RACK_STEPS_EXTEND;
-        commanded_target = target;
         break;
     case RACK_POS_PRESS:
         target = (int32_t)RACK_STEPS_PRESS;
-        commanded_target = target;
-        torque_limit = (uint16_t)RACK_PRESS_TORQUE_LIMIT;
-        torque_window_steps = (uint16_t)RACK_PRESS_STALL_WINDOW_STEPS;
-        stop_mode = STEPPER_STOP_PRESS_TORQUE_OK;
         break;
     default:
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
 
-    printf("Rack move → logical=%li commanded=%li torque_limit=%u mode=%u\n",
-           (long)target, (long)commanded_target,
-           (unsigned)torque_limit, (unsigned)stop_mode);
-    (void)start_stepper_motion(1u, commanded_target, target, &s_rack_pending,
-                               SUBSYS_RACK, timeout_ms, seq, torque_limit,
-                               torque_window_steps, stop_mode);
+    printf("Rack move → %li steps\n", (long)target);
+    (void)start_stepper_motion(1u, target, &s_rack_pending,
+                               SUBSYS_RACK, (uint32_t)RACK_MOTION_TIMEOUT_MS, seq);
+}
+
+/**
+ * @brief MSG_TURNTABLE_GOTO (0x44) — move turntable stepper (device 2) to
+ *        named angular position.  NACKs if turntable is not yet homed.
+ */
+static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t len)
+{
+    if (len < (uint16_t)sizeof(pl_turntable_goto_t))
+    {
+        send_nack(seq, NACK_BAD_LEN);
+        return;
+    }
+
+    if (!s_stepper_ready)
+    {
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    if (!s_turntable_homed)
+    {
+        /* Turntable must be homed before any GOTO command. */
+        printf("Turntable GOTO rejected: not homed\n");
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    const pl_turntable_goto_t *p = (const pl_turntable_goto_t *)payload;
+    int32_t target;
+
+    switch ((turntable_pos_t)p->position)
+    {
+    case TURNTABLE_POS_A:
+        target = (int32_t)TURNTABLE_STEPS_A;
+        break;
+    case TURNTABLE_POS_B:
+        target = (int32_t)TURNTABLE_STEPS_B;
+        break;
+    case TURNTABLE_POS_C:
+        target = (int32_t)TURNTABLE_STEPS_C;
+        break;
+    case TURNTABLE_POS_D:
+        target = (int32_t)TURNTABLE_STEPS_D;
+        break;
+    default:
+        send_nack(seq, NACK_UNKNOWN);
+        return;
+    }
+
+    printf("Turntable GOTO → %li steps\n", (long)target);
+    (void)start_stepper_motion(2u, target, &s_turntable_pending,
+                               SUBSYS_TURNTABLE,
+                               (uint32_t)TURNTABLE_MOTION_TIMEOUT_MS, seq);
+}
+
+/**
+ * @brief MSG_TURNTABLE_HOME (0x45) — zero the turntable position counter and
+ *        mark it as calibrated.  No physical motion is performed here; this
+ *        command is used to declare the current position as the reference zero.
+ */
+static void handle_turntable_home(uint16_t seq)
+{
+    /* Cancel any in-progress turntable motion. */
+    if (s_motion.jobs[2].active)
+    {
+        drv8434s_motion_cancel(&s_motion, 2u, NULL);
+        s_turntable_pending.pending = false;
+    }
+
+    s_turntable_pos_steps = 0;
+    s_turntable_homed = true;
+    printf("Turntable HOME: position zeroed, homed=true\n");
+    send_ack(seq);
 }
 
 /**
@@ -2204,18 +2218,13 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
         break;
 
     case MSG_TURNTABLE_GOTO:
-        if (hdr.len < (uint16_t)sizeof(pl_turntable_goto_t))
-        {
-            send_nack(hdr.seq, NACK_BAD_LEN);
-            break;
-        }
-        printf("MSG_TURNTABLE_GOTO rejected: out of scope / not implemented\n");
-        send_nack(hdr.seq, NACK_UNKNOWN);
+        printf("Turntable Goto\n");
+        handle_turntable_goto(hdr.seq, payload, hdr.len);
         break;
 
     case MSG_TURNTABLE_HOME:
-        printf("MSG_TURNTABLE_HOME rejected: out of scope / not implemented\n");
-        send_nack(hdr.seq, NACK_UNKNOWN);
+        printf("Turntable Home\n");
+        handle_turntable_home(hdr.seq);
         break;
 
     case MSG_HOTWIRE_SET:
@@ -2597,9 +2606,16 @@ void uart_server_init(void)
 
     memset(&s_arm_pending, 0, sizeof(s_arm_pending));
     memset(&s_rack_pending, 0, sizeof(s_rack_pending));
+    memset(&s_turntable_pending, 0, sizeof(s_turntable_pending));
+
     s_flap_state = FLAP_SM_IDLE;
     s_arm_pos_steps = 0;
     s_rack_pos_steps = 0;
+    s_turntable_pos_steps = 0;
+    /* Turntable requires explicit homing before any GOTO command is valid.
+     * MSG_TURNTABLE_HOME must be sent first; GOTO commands in UNCALIBRATED
+     * state are NACKed to prevent uncontrolled turntable movement. */
+    s_turntable_homed = false;
 
     s_uart = (PICO_UART_ID == 0) ? uart0 : uart1;
     s_uart_ready = false;
@@ -2631,12 +2647,6 @@ void uart_server_init(void)
     /* New subsystems */
     init_drv8263_hotwire();
     init_vacuum();
-
-    if (s_uart_ready)
-    {
-        send_pico_ready();
-        printf("uart_server: sent MSG_PICO_READY\n");
-    }
 }
 
 void uart_server_poll(void)
