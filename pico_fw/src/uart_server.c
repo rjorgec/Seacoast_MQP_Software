@@ -163,6 +163,13 @@ typedef enum
 
 typedef enum
 {
+    RACK_HOME_IDLE = 0,
+    RACK_HOME_SEEK,
+    RACK_HOME_BACKOFF,
+} rack_homing_phase_t;
+
+typedef enum
+{
     ARM_PRESS_RETRY_IDLE = 0,
     ARM_PRESS_RETRY_PRESSING,
     ARM_PRESS_RETRY_VERIFY,
@@ -173,6 +180,9 @@ typedef enum
 static arm_homing_phase_t s_arm_homing_phase = ARM_HOME_IDLE;
 static bool s_arm_rehome_required = false;
 static bool s_arm_homed = false;
+static rack_homing_phase_t s_rack_homing_phase = RACK_HOME_IDLE;
+static bool s_rack_rehome_required = false;
+static bool s_rack_homed = false;
 
 typedef struct
 {
@@ -776,6 +786,7 @@ static bool start_stepper_job(uint8_t dev_idx, int32_t relative_steps,
                               uint16_t torque_limit,
                               uint16_t torque_blank_steps,
                               uint32_t step_delay_us);
+static void set_motion_torque_sample_div(uint8_t sample_div);
 static bool agitator_start_homing(void); /* sensorless home then start cycles */
 static bool agitator_start_cycle(void);  /* N×(forward+reverse) knead; shared by spawn SM and MSG_AGITATE */
 static bool start_arm_internal_absolute_move(int32_t target_steps,
@@ -788,6 +799,20 @@ static bool start_arm_home_backoff(void);
 static void arm_press_retry_tick(void);
 static void arm_seal_monitor_tick(void);
 static void finish_arm_motion(motion_result_t result, bool require_rehome);
+#ifdef STEPPER_DEV_LIN_ARM
+static bool start_rack_internal_absolute_move(int32_t target_steps,
+                                              uint16_t torque_limit,
+                                              uint16_t torque_blank_steps,
+                                              uint32_t step_delay_us,
+                                              uint32_t timeout_ms);
+static bool start_rack_internal_relative_move(int32_t relative_steps,
+                                              uint16_t torque_limit,
+                                              uint16_t torque_blank_steps,
+                                              uint32_t step_delay_us,
+                                              uint32_t timeout_ms);
+static bool start_rack_home_backoff(void);
+static void finish_rack_motion(motion_result_t result, bool require_rehome);
+#endif
 
 static bool dispense_spawn_callback(struct repeating_timer *t)
 {
@@ -1837,6 +1862,98 @@ static bool arm_homing_active(void)
     return s_arm_homing_phase != ARM_HOME_IDLE;
 }
 
+#ifdef STEPPER_DEV_LIN_ARM
+static bool rack_homing_active(void)
+{
+    return s_rack_homing_phase != RACK_HOME_IDLE;
+}
+
+static bool rack_motion_requires_rehome(motion_result_t result)
+{
+    return result == MOTION_STALLED ||
+           result == MOTION_TIMEOUT ||
+           result == MOTION_FAULT ||
+           result == MOTION_SPI_FAULT;
+}
+
+static void finish_rack_motion(motion_result_t result, bool require_rehome)
+{
+    if (require_rehome)
+    {
+        s_rack_rehome_required = true;
+        s_rack_homed = false;
+    }
+
+    send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
+    printf("Rack motion done: result=%u rehome=%u pos=%li\n",
+           (unsigned)result, (unsigned)s_rack_rehome_required,
+           (long)s_rack_pos_steps);
+}
+
+static void finish_rack_home(motion_result_t result)
+{
+    set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+    s_rack_homing_phase = RACK_HOME_IDLE;
+    s_rack_pending.pending = false;
+    s_rack_homed = (result == MOTION_OK);
+    s_rack_rehome_required = (result != MOTION_OK);
+    send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
+    printf("Rack home done: result=%u homed=%u pos=%li\n",
+           (unsigned)result, (unsigned)s_rack_homed, (long)s_rack_pos_steps);
+}
+
+static void handle_rack_home_completion(motion_result_t result,
+                                        int32_t steps_achieved)
+{
+    if (s_rack_homing_phase == RACK_HOME_SEEK)
+    {
+        if (result == MOTION_STALLED)
+        {
+            s_rack_pos_steps = 0;
+#if RACK_HOME_BACKOFF_STEPS > 0
+            printf("Rack home: hard stop found, backing off %u steps\n",
+                   (unsigned)RACK_HOME_BACKOFF_STEPS);
+            if (start_rack_home_backoff())
+            {
+                return;
+            }
+            finish_rack_home(MOTION_FAULT);
+#else
+            finish_rack_home(MOTION_OK);
+#endif
+            return;
+        }
+
+        if (result == MOTION_OK)
+        {
+            result = MOTION_TIMEOUT;
+        }
+
+        (void)steps_achieved;
+        finish_rack_home(result);
+        return;
+    }
+
+    if (s_rack_homing_phase == RACK_HOME_BACKOFF)
+    {
+        s_rack_pos_steps += steps_achieved;
+        finish_rack_home(result);
+        return;
+    }
+
+    s_rack_pending.pending = false;
+    send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
+}
+
+static bool rack_press_stall_is_success(const stepper_pending_t *pending,
+                                        motion_result_t result)
+{
+    return pending != NULL &&
+           pending->target_steps == (int32_t)RACK_STEPS_PRESS &&
+           result == MOTION_STALLED;
+}
+#endif
+
 static void reset_arm_press_retry(void)
 {
     memset(&s_arm_press_retry, 0, sizeof(s_arm_press_retry));
@@ -2387,12 +2504,24 @@ static void stepper_completion_tick(void)
                                               timeout && !job_done,
                                               &steps_achieved);
 
-            s_rack_pos_steps += steps_achieved;
+            if (rack_homing_active())
+            {
+                handle_rack_home_completion(result, steps_achieved);
+            }
+            else
+            {
+                s_rack_pos_steps += steps_achieved;
+                s_rack_pending.pending = false;
 
-            send_motion_done(SUBSYS_RACK, result, s_rack_pos_steps);
-            s_rack_pending.pending = false;
-            printf("Rack motion done: result=%u pos=%li\n",
-                   (unsigned)result, (long)s_rack_pos_steps);
+                if (rack_press_stall_is_success(&s_rack_pending, result))
+                {
+                    printf("Rack press: torque stop treated as success at pos=%li\n",
+                           (long)s_rack_pos_steps);
+                    result = MOTION_OK;
+                }
+
+                finish_rack_motion(result, rack_motion_requires_rehome(result));
+            }
         }
     }
 #endif /* STEPPER_DEV_LIN_ARM */
@@ -2878,6 +3007,68 @@ static bool start_arm_internal_relative_move(int32_t relative_steps,
     s_arm_pending.dev_idx = (uint8_t)STEPPER_DEV_ROT_ARM;
     return true;
 }
+
+#ifdef STEPPER_DEV_LIN_ARM
+static bool start_rack_internal_absolute_move(int32_t target_steps,
+                                              uint16_t torque_limit,
+                                              uint16_t torque_blank_steps,
+                                              uint32_t step_delay_us,
+                                              uint32_t timeout_ms)
+{
+    int32_t delta = target_steps - s_rack_pos_steps;
+    if (delta == 0)
+    {
+        s_rack_pending.pending = false;
+        s_rack_pending.target_steps = target_steps;
+        return true;
+    }
+
+    return start_rack_internal_relative_move(delta, torque_limit,
+                                             torque_blank_steps,
+                                             step_delay_us, timeout_ms);
+}
+
+static bool start_rack_internal_relative_move(int32_t relative_steps,
+                                              uint16_t torque_limit,
+                                              uint16_t torque_blank_steps,
+                                              uint32_t step_delay_us,
+                                              uint32_t timeout_ms)
+{
+    int32_t target_steps = s_rack_pos_steps + relative_steps;
+
+    if (!start_stepper_job((uint8_t)STEPPER_DEV_LIN_ARM,
+                           relative_steps,
+                           torque_limit,
+                           torque_blank_steps,
+                           step_delay_us))
+    {
+        return false;
+    }
+
+    s_rack_pending.pending = true;
+    s_rack_pending.target_steps = target_steps;
+    s_rack_pending.subsys = SUBSYS_RACK;
+    s_rack_pending.start_ms = to_ms_since_boot(get_absolute_time());
+    s_rack_pending.timeout_ms = timeout_ms;
+    s_rack_pending.dev_idx = (uint8_t)STEPPER_DEV_LIN_ARM;
+    return true;
+}
+
+static bool start_rack_home_backoff(void)
+{
+    if (!start_rack_internal_relative_move(-(int32_t)RACK_HOME_BACKOFF_STEPS,
+                                           0u,
+                                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
+                                           (uint32_t)RACK_HOME_STEP_DELAY_US,
+                                           (uint32_t)RACK_HOME_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    s_rack_homing_phase = RACK_HOME_BACKOFF;
+    return true;
+}
+#endif
 
 static void arm_press_retry_tick(void)
 {
@@ -3801,35 +3992,104 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     }
 
     const pl_rack_move_t *p = (const pl_rack_move_t *)payload;
-    int32_t target;
 
+#ifdef STEPPER_DEV_LIN_ARM
     switch ((rack_pos_t)p->position)
     {
     case RACK_POS_HOME:
-        target = 0;
-        break;
+        if (rack_homing_active() || drv8434s_motion_is_busy(&s_motion))
+        {
+            send_nack(seq, NACK_UNKNOWN);
+            return;
+        }
+
+        set_motion_torque_sample_div((uint8_t)RACK_HOME_TORQUE_SAMPLE_DIV);
+        if (!start_stepper_job((uint8_t)STEPPER_DEV_LIN_ARM,
+                               (int32_t)RACK_HOME_SEARCH_STEPS,
+                               (uint16_t)RACK_HOME_TORQUE_LIMIT,
+                               (uint16_t)RACK_HOME_TORQUE_BLANK_STEPS,
+                               (uint32_t)RACK_HOME_STEP_DELAY_US))
+        {
+            set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+            send_nack(seq, NACK_UNKNOWN);
+            return;
+        }
+
+        s_rack_homing_phase = RACK_HOME_SEEK;
+        s_rack_homed = false;
+        s_rack_pending.pending = true;
+        s_rack_pending.target_steps = (int32_t)RACK_HOME_SEARCH_STEPS;
+        s_rack_pending.subsys = SUBSYS_RACK;
+        s_rack_pending.start_ms = to_ms_since_boot(get_absolute_time());
+        s_rack_pending.timeout_ms = (uint32_t)RACK_HOME_TIMEOUT_MS;
+        s_rack_pending.dev_idx = (uint8_t)STEPPER_DEV_LIN_ARM;
+
+        printf("Rack home started: search=%u backoff=%u\n",
+               (unsigned)RACK_HOME_SEARCH_STEPS,
+               (unsigned)RACK_HOME_BACKOFF_STEPS);
+        send_ack(seq);
+        return;
+
     case RACK_POS_EXTEND:
-        target = (int32_t)RACK_STEPS_EXTEND;
-        break;
+        if (rack_homing_active() || s_rack_rehome_required)
+        {
+            send_nack(seq, NACK_UNKNOWN);
+            return;
+        }
+
+        printf("Rack move -> %li steps\n", (long)RACK_STEPS_EXTEND);
+        (void)start_stepper_motion((uint8_t)STEPPER_DEV_LIN_ARM,
+                                   (int32_t)RACK_STEPS_EXTEND,
+                                   &s_rack_pending,
+                                   SUBSYS_RACK,
+                                   (uint32_t)RACK_MOTION_TIMEOUT_MS,
+                                   seq);
+        return;
+
     case RACK_POS_PRESS:
-        target = (int32_t)RACK_STEPS_PRESS;
-        break;
+        if (rack_homing_active() || s_rack_rehome_required)
+        {
+            send_nack(seq, NACK_UNKNOWN);
+            return;
+        }
+
+        printf("Rack move -> %li steps (press torque mode)\n",
+               (long)RACK_STEPS_PRESS);
+
+        if (s_motion.jobs[STEPPER_DEV_LIN_ARM].active)
+        {
+            drv8434s_motion_cancel(&s_motion, (uint8_t)STEPPER_DEV_LIN_ARM, NULL);
+        }
+        s_rack_pending.pending = false;
+
+        if (!start_rack_internal_absolute_move((int32_t)RACK_STEPS_PRESS,
+                                               (uint16_t)RACK_PRESS_TORQUE_LIMIT,
+                                               (uint16_t)RACK_PRESS_TORQUE_BLANK_STEPS,
+                                               (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US,
+                                               (uint32_t)RACK_MOTION_TIMEOUT_MS))
+        {
+            send_nack(seq, NACK_UNKNOWN);
+            return;
+        }
+
+        send_ack(seq);
+        if (!s_rack_pending.pending)
+        {
+            finish_rack_motion(MOTION_OK, false);
+        }
+        return;
+
     default:
         send_nack(seq, NACK_UNKNOWN);
         return;
     }
-
-#ifdef STEPPER_DEV_LIN_ARM
-    printf("Rack move → %li steps\n", (long)target);
-    (void)start_stepper_motion((uint8_t)STEPPER_DEV_LIN_ARM, target, &s_rack_pending,
-                               SUBSYS_RACK, (uint32_t)RACK_MOTION_TIMEOUT_MS, seq);
 #else
     /* No linear plenum device in the current chain configuration.
      * Define STEPPER_DEV_LIN_ARM in board_pins.h and bump DRV8434S_N_DEVICES
      * when the linear plenum stepper is wired. */
     printf("Rack Move: STEPPER_DEV_LIN_ARM not defined (device not wired)\n");
     send_nack(seq, NACK_UNKNOWN);
-    (void)target;
+    (void)p;
 #endif
 }
 
@@ -3870,15 +4130,15 @@ static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t
 
     switch ((turntable_pos_t)p->position)
     {
-    case TURNTABLE_POS_INTAKE:
-        target = (int32_t)TURNTABLE_STEPS_INTAKE;
-        break;
-    case TURNTABLE_POS_TRASH:
-        target = (int32_t)TURNTABLE_STEPS_TRASH;
-        break;
-    case TURNTABLE_POS_EJECT:
-        target = (int32_t)TURNTABLE_STEPS_EJECT;
-        break;
+    // case TURNTABLE_POS_INTAKE:
+    //     target = (int32_t)TURNTABLE_STEPS_INTAKE;
+    //     break;
+    // case TURNTABLE_POS_TRASH:
+    //     target = (int32_t)TURNTABLE_STEPS_TRASH;
+    //     break;
+    // case TURNTABLE_POS_EJECT:
+    //     target = (int32_t)TURNTABLE_STEPS_EJECT;
+    //     break;
     default:
         send_nack(seq, NACK_UNKNOWN);
         return;
@@ -5110,6 +5370,9 @@ void uart_server_init_early(void)
     s_arm_homed = false;
     reset_arm_press_retry();
     s_rack_pos_steps = 0;
+    s_rack_homing_phase = RACK_HOME_IDLE;
+    s_rack_rehome_required = false;
+    s_rack_homed = false;
     s_turntable_pos_steps = 0;
     s_hotwire_pos_steps = 0;
     s_hotwire_zero_on_complete = false;

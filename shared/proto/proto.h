@@ -15,7 +15,7 @@ extern "C" {
  * so the UART payload default cannot drift between projects.
  * 100u is calibrated to avoid false stall trips seen with the previous
  * 300u default during routine moves. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 180u
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 160u
 
 /*
  * Wire format endianness is little-endian for all multi-byte fields.
