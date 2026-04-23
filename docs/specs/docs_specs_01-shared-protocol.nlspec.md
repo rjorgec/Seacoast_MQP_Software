@@ -98,6 +98,7 @@ typedef struct __attribute__((packed)) {
 |----|----------|---------------|------|-------------|
 | 0x60 | `MSG_MOTION_DONE` | `pl_motion_done_t` | 8 | Motion complete/fault notification for any subsystem |
 | 0x61 | `MSG_VACUUM_STATUS` | `pl_vacuum_status_t` | 4 | Vacuum pump RPM and blocked/OK status |
+| 0x62 | `MSG_PICO_READY` | none (len=0) | 0 | Pico → ESP unsolicited: boot state 2 complete; Pico command path is ready |
 
 ### 3.4 Response Messages
 

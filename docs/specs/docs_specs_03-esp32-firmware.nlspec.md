@@ -78,6 +78,7 @@ ESP_ERROR_CHECK(pico_link_init(&link));
 | `MSG_MOTION_DONE` | `sys_sequence_notify_motion_done()` — notify sys_seq task; `ui_ops_on_motion_done()` — update Operations screen status |
 | `MSG_VACUUM_STATUS` | `ui_ops_on_vacuum_status()` — update vacuum status label |
 | `MSG_SPAWN_STATUS` | `sys_sequence_notify_spawn_status()` — notify sys_seq task (preferred path); `ui_dosing_on_spawn_status()` — update Dosing screen (legacy path) |
+| `MSG_PICO_READY` | `ui_status_set("Pico ready")` — latch boot-state readiness from the Pico |
 | All others | `ui_screens_pico_rx_handler()` — weight display, generic status |
 
 ---
@@ -92,17 +93,16 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_flap_close()` | `MSG_FLAPS_CLOSE` | none |
 | `motor_arm_move(arm_pos_t pos)` | `MSG_ARM_MOVE` | `pl_arm_move_t{position=pos}` |
 | `motor_rack_move(rack_pos_t pos)` | `MSG_RACK_MOVE` | `pl_rack_move_t{position=pos}` |
-| `motor_turntable_goto(turntable_pos_t pos)` | `MSG_TURNTABLE_GOTO` | `pl_turntable_goto_t{position=pos}` |
-| `motor_turntable_home()` | `MSG_TURNTABLE_HOME` | none |
 | `motor_hotwire_set(bool enable)` | `MSG_HOTWIRE_SET` | `pl_hotwire_set_t{enable}` |
 | `motor_vacuum_set(bool enable)` | `MSG_VACUUM_SET` | `pl_vacuum_set_t{enable}` |
 | `motor_vacuum2_set(bool enable)` | `MSG_VACUUM2_SET` | `pl_vacuum2_set_t{enable}` |
 | `motor_hotwire_traverse(bool cut)` | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t{direction}` |
-| `motor_indexer_move(uint8_t position)` | `MSG_INDEXER_MOVE` | `pl_indexer_move_t{position}` |
 | `motor_linact_start_monitor_dir(dir, speed, low, high, interval)` | `MSG_MOTOR_DRV8263_START_MON` | `pl_drv8263_start_mon_t` (legacy) |
 | `motor_linact_stop_monitor()` | `MSG_MOTOR_DRV8263_STOP_MON` | none (legacy) |
 
 All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_send`, not `_rpc`).
+
+Turntable and indexer helpers remain in the codebase for future exploration, but they are out of scope for the current accepted ESP32 implementation and are not exposed on the Operations screen.
 
 ---
 
@@ -146,7 +146,7 @@ Home Screen
 
 ### 4.4 Operations Screen (`ui_show_operations()`)
 
-**Layout:** 320 × 240, landscape, 10px padding. Title "Operations" top-left, "Home" nav button top-right. Rows of actuator buttons, status bar at bottom.
+**Layout:** 320 × 240, landscape, 10px padding. Title "Operations" top-left, "Home" nav button top-right. Rows of currently supported actuator buttons, status bar at bottom.
 
 | Section | Button Label | Callback | Message |
 |---------|-------------|----------|---------|
@@ -158,14 +158,14 @@ Home Screen
 | RACK | "Rack Home" | `on_rack_home()` | `motor_rack_move(RACK_POS_HOME)` |
 | RACK | "Rack Extend" | `on_rack_extend()` | `motor_rack_move(RACK_POS_EXTEND)` |
 | RACK | "Rack Press" | `on_rack_press()` | `motor_rack_move(RACK_POS_PRESS)` |
-| TURNTABLE | "Pos A" – "Pos D" | `on_tt_a()` – `on_tt_d()` | `motor_turntable_goto(POS_A..D)` |
 | HOT WIRE | "HotWire ON" | `on_hotwire_on()` | `motor_hotwire_set(true)` |
 | HOT WIRE | "HotWire OFF" | `on_hotwire_off()` | `motor_hotwire_set(false)` |
 | VACUUM | "Vacuum ON" | `on_vacuum_on()` | `motor_vacuum_set(true)` |
 | VACUUM | "Vacuum OFF" | `on_vacuum_off()` | `motor_vacuum_set(false)` |
-| CALIBRATE | "Turntable Home" | `on_tt_home()` | `motor_turntable_home()` |
 
 **Status feedback:** When `MSG_MOTION_DONE` is received, `ui_ops_on_motion_done()` updates the status label with subsystem name and result (e.g., "ARM: OK (4000 steps)" or "FLAPS: TIMEOUT"). When `MSG_VACUUM_STATUS` is received, `ui_ops_on_vacuum_status()` updates the vacuum status label (e.g., "Vacuum: OK 1200 RPM" or "Vacuum: BLOCKED 350 RPM").
+
+**Out of scope:** Turntable and indexer manual controls are intentionally omitted from the Operations screen. They are not part of the current supported operator workflow.
 
 ### 4.5 Dosing Screen (`ui_show_dosing()`)
 
@@ -265,7 +265,7 @@ The following are explicitly left to implementer choice:
 
 ### 8.2 UI Screens
 - [ ] Home screen displays all buttons listed in Section 4.3
-- [ ] Operations screen displays all actuator buttons listed in Section 4.4
+- [ ] Operations screen displays the supported actuator buttons listed in Section 4.4
 - [ ] Operations screen updates status label on MSG_MOTION_DONE receipt
 - [ ] Operations screen updates vacuum status on MSG_VACUUM_STATUS receipt
 - [ ] Dosing screen allows setting inoculation percentage and starting a dose

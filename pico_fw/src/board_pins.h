@@ -179,6 +179,10 @@
 #ifndef ARM_PRESS_STALL_WINDOW_STEPS
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
 #endif
+#ifndef ARM_PRESS_TORQUE_LIMIT
+#define ARM_PRESS_TORQUE_LIMIT                                                 \
+  5 /* TRQ_COUNT avg threshold for press engagement */
+#endif
 #ifndef ARM_MOTION_TIMEOUT_MS
 #define ARM_MOTION_TIMEOUT_MS 5000
 #endif
@@ -189,6 +193,23 @@
 #endif
 #ifndef RACK_STEPS_PRESS
 #define RACK_STEPS_PRESS 1200
+#endif
+#ifndef RACK_PRESS_STALL_WINDOW_STEPS
+#define RACK_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
+#endif
+#ifndef RACK_PRESS_TORQUE_LIMIT
+#define RACK_PRESS_TORQUE_LIMIT 5 /* TRQ_COUNT avg threshold for rack press */
+#endif
+#ifndef RACK_HOME_SEEK_STEPS
+#define RACK_HOME_SEEK_STEPS                                                   \
+  2000 /* reverse steps budget while seeking home stop */
+#endif
+#ifndef RACK_HOME_TORQUE_LIMIT
+#define RACK_HOME_TORQUE_LIMIT                                                 \
+  230 /* softer TRQ_COUNT avg threshold for homing */
+#endif
+#ifndef RACK_HOME_TIMEOUT_MS
+#define RACK_HOME_TIMEOUT_MS 8000
 #endif
 #ifndef RACK_MOTION_TIMEOUT_MS
 #define RACK_MOTION_TIMEOUT_MS 5000

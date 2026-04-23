@@ -264,46 +264,6 @@ static void on_rack_press(lv_event_t *e)
     ESP_LOGI(TAG, "Rack press (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_home(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_home();
-    set_status(err == ESP_OK ? "Tbl: homing..." : "Tbl home: FAILED");
-    ESP_LOGI(TAG, "Turntable home (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_a(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_A);
-    set_status(err == ESP_OK ? "Tbl: to A..." : "Tbl A: FAILED");
-    ESP_LOGI(TAG, "Turntable A (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_b(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_B);
-    set_status(err == ESP_OK ? "Tbl: to B..." : "Tbl B: FAILED");
-    ESP_LOGI(TAG, "Turntable B (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_c(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_C);
-    set_status(err == ESP_OK ? "Tbl: to C..." : "Tbl C: FAILED");
-    ESP_LOGI(TAG, "Turntable C (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_d(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_D);
-    set_status(err == ESP_OK ? "Tbl: to D..." : "Tbl D: FAILED");
-    ESP_LOGI(TAG, "Turntable D (%s)", esp_err_to_name(err));
-}
-
 static void on_hotwire_on(lv_event_t *e)
 {
     (void)e;
@@ -403,9 +363,6 @@ void ui_ops_on_motion_done(const pl_motion_done_t *pl)
         break;
     case SUBSYS_RACK:
         sub_name = "Rack";
-        break;
-    case SUBSYS_TURNTABLE:
-        sub_name = "Turntable";
         break;
     case SUBSYS_HOTWIRE:
         sub_name = "HotWire";
@@ -581,16 +538,14 @@ void ui_show_home(void)
  *  y= 22  [Flap Open  148×24]  4  [Flap Close  148×24]
  *  y= 50  [Arm Press  96×24]  4  [Arm Pos 1  96×24]  4  [Arm Pos 2  96×24]
  *  y= 78  [Rack Home  96×24]  4  [Rack Ext   96×24]  4  [Rack Press 96×24]
- *  y=106  [TblHome 56×24] 4 [TblA 56×24] 4 [TblB 56×24] 4 [TblC 56×24] 4 [TblD 56×24]
- *  y=134  [Wire ON  148×24]  4  [Wire OFF  148×24]
- *  y=162  [Vac ON   148×24]  4  [Vac OFF   148×24]
- *  y=188  s_ops_lbl_status  (motion-done text)
- *  y=204  s_ops_lbl_vacuum  (vacuum status text)
+ *  y=106  [Wire ON  148×24]  4  [Wire OFF  148×24]
+ *  y=134  [Vac ON   148×24]  4  [Vac OFF   148×24]
+ *  y=160  s_ops_lbl_status  (motion-done text)
+ *  y=186  s_ops_lbl_vacuum  (vacuum status text)
  *
  *  Button-row widths:
  *    2-btn: 148+4+148 = 300 px
  *    3-btn: 96+4+96+4+96 = 296 px
- *    5-btn: 56×5 + 4×4 = 296 px   (positions: x = 0, 60, 120, 180, 240)
  */
 void ui_show_operations(void)
 {
@@ -630,33 +585,26 @@ void ui_show_operations(void)
     make_btn(scr, "Rack Extend", 100, 78, 96, 24, on_rack_extend);
     make_btn(scr, "Rack Press", 200, 78, 96, 24, on_rack_press);
 
-    /* ── Row 4: Turntable  (y=106, h=24)  5 × 56 px + 4 × 4 px = 296 px ── */
-    make_btn(scr, "Tbl Home", 0, 106, 56, 24, on_turntable_home);
-    make_btn(scr, "Tbl A", 60, 106, 56, 24, on_turntable_a);
-    make_btn(scr, "Tbl B", 120, 106, 56, 24, on_turntable_b);
-    make_btn(scr, "Tbl C", 180, 106, 56, 24, on_turntable_c);
-    make_btn(scr, "Tbl D", 240, 106, 56, 24, on_turntable_d);
+    /* ── Row 4: Hot Wire  (y=106, h=24) ──────────────────────────────────── */
+    make_btn(scr, "Wire ON", 0, 106, 148, 24, on_hotwire_on);
+    make_btn(scr, "Wire OFF", 152, 106, 148, 24, on_hotwire_off);
 
-    /* ── Row 5: Hot Wire  (y=134, h=24) ──────────────────────────────────── */
-    make_btn(scr, "Wire ON", 0, 134, 148, 24, on_hotwire_on);
-    make_btn(scr, "Wire OFF", 152, 134, 148, 24, on_hotwire_off);
+    /* ── Row 5: Vacuum  (y=134, h=24)  4 × 72 px + 3 × 4 px = 300 px ────── */
+    make_btn(scr, "Vac ON", 0, 134, 72, 24, on_vacuum_on);
+    make_btn(scr, "Vac OFF", 76, 134, 72, 24, on_vacuum_off);
+    make_btn(scr, "Vac2 ON", 152, 134, 72, 24, on_vacuum2_on);
+    make_btn(scr, "Vac2 OFF", 228, 134, 72, 24, on_vacuum2_off);
 
-    /* ── Row 6: Vacuum  (y=162, h=24)  4 × 72 px + 3 × 4 px = 300 px ────── */
-    make_btn(scr, "Vac ON", 0, 162, 72, 24, on_vacuum_on);
-    make_btn(scr, "Vac OFF", 76, 162, 72, 24, on_vacuum_off);
-    make_btn(scr, "Vac2 ON", 152, 162, 72, 24, on_vacuum2_on);
-    make_btn(scr, "Vac2 OFF", 228, 162, 72, 24, on_vacuum2_off);
-
-    /* ── Status labels  (y=188, y=204) ───────────────────────────────────── */
+    /* ── Status labels  (y=160, y=186) ───────────────────────────────────── */
     s_ops_lbl_status = lv_label_create(scr);
     lv_label_set_text(s_ops_lbl_status, "Status: --");
     lv_obj_set_style_text_font(s_ops_lbl_status, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_ops_lbl_status, LV_ALIGN_TOP_LEFT, 0, 188);
+    lv_obj_align(s_ops_lbl_status, LV_ALIGN_TOP_LEFT, 0, 160);
 
     s_ops_lbl_vacuum = lv_label_create(scr);
     lv_label_set_text(s_ops_lbl_vacuum, "Vac: --");
     lv_obj_set_style_text_font(s_ops_lbl_vacuum, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_ops_lbl_vacuum, LV_ALIGN_TOP_LEFT, 0, 204);
+    lv_obj_align(s_ops_lbl_vacuum, LV_ALIGN_TOP_LEFT, 0, 186);
 
     /*
      * Point lbl_status at s_ops_lbl_status so that set_status() (called by

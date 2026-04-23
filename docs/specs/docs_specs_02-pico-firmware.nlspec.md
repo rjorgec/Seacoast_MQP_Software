@@ -43,7 +43,8 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 1. `stdio_init_all()` — enables USB CDC for debug printf
 2. `sleep_ms(10000)` — 10-second boot delay for USB enumeration
 3. `uart_server_init()` — initializes UART, GPIO, ADC, SPI, DRV8263 instances, DRV8434S daisy chain, HX711 load cell
-4. Enter polling loop
+4. Send unsolicited `MSG_PICO_READY` to the ESP32 to indicate the Pico is ready for boot-sequence state 2
+5. Enter polling loop
 
 ---
 
@@ -132,26 +133,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 ### 2.4 Turntable Stepper (DRV8434S Device 2)
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 2.
+**Status: Out of scope for the current firmware deliverable.** The codebase still contains basic turntable message handlers and position constants, but turntable motion is not part of the accepted implementation or operator workflow for this project phase.
 
-**Position tracking:** `s_turntable_pos_steps` (int32_t). Zeroed on home.
-
-**Boot requirement:** The turntable starts in `UNCALIBRATED` state. It **must** receive `MSG_TURNTABLE_HOME` before any `MSG_TURNTABLE_GOTO` is valid. Commands received in `UNCALIBRATED` state are NACKed.
-
-| Position | Constant | Default Steps |
-|----------|----------|--------------|
-| TURNTABLE_POS_A | `TURNTABLE_STEPS_A` | 0 |
-| TURNTABLE_POS_B | `TURNTABLE_STEPS_B` | 1250 |
-| TURNTABLE_POS_C | `TURNTABLE_STEPS_C` | 2500 |
-| TURNTABLE_POS_D | `TURNTABLE_STEPS_D` | 3750 |
-
-**Timeouts:** `TURNTABLE_HOME_TIMEOUT_MS` (default: 20000), `TURNTABLE_MOVE_TIMEOUT_MS` (default: 15000).
-
-**Turntable State Machine States:** `UNCALIBRATED`, `HOMING`, `MOVING`, `AT_A`, `AT_B`, `AT_C`, `AT_D`, `FAULT`
-
-**Critical rules:**
-- FAULT state requires re-home (`MSG_TURNTABLE_HOME`) before any GOTO is accepted
-- MOVING + MSG_TURNTABLE_HOME = cancel current job, begin re-home
+Do not rely on `MSG_TURNTABLE_HOME` or `MSG_TURNTABLE_GOTO` as implemented production behavior. If turntable control returns in a later phase, this section should be replaced with a validated state machine and calibration procedure.
 
 ### 2.5 Hot Wire (DRV8263 Hotwire Instance — Independent Half-Bridge Mode)
 
@@ -203,19 +187,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 ### 2.9 Indexer / Bag Depth Rack (DRV8434S Device 5 — `STEPPER_DEV_INDEXER`)
 
-**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_INDEXER` in `uart_server.c`.
+**Status: Out of scope and not implemented.** Indexer support is present only as placeholder protocol and guarded code paths. It is not wired, not validated, and not part of the current firmware scope.
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 5 (when wired). Drives the bag depth/eject rack that centers the incoming substrate bag and pushes out the inoculated bag.
-
-**Position tracking:** `s_indexer_pos_steps` (int32_t). Updated on each move.
-
-| Position | Constant | Default Steps | Purpose |
-|----------|----------|--------------|---------|
-| `INDEXER_POS_OPEN` | — | 0 | Retracted; bag can slide in |
-| `INDEXER_POS_CENTER` | `INDEXER_STEPS_CENTER` | 3000 | Holds bag centered for weighing/opening |
-| `INDEXER_POS_EJECT` | `INDEXER_STEPS_EJECT` | 8000 | Fully extended; pushes inoculated bag out |
-
-**Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h` and increment `DRV8434S_N_DEVICES`.
+`MSG_INDEXER_MOVE`, `indexer_pos_t`, and the associated constants should be treated as reserved for future work rather than active functionality.
 
 ### 2.7 Load Cell (HX711)
 
