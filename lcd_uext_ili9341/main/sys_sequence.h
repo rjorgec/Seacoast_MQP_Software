@@ -9,7 +9,7 @@
  * Operator commands are submitted via sys_sequence_send_cmd().
  * The current state is readable via sys_sequence_get_state().
  * UI updates are delivered through the pico_link RX callback registered
- * in ui_screens.c (MSG_MOTION_DONE, MSG_SPAWN_STATUS, MSG_VACUUM_STATUS).
+ * in ui_screens.c (MSG_MOTION_DONE, MSG_SPAWN_STATUS, MSG_VACUUM_STATUS, MSG_ARM_SEAL_EVENT).
  *
  * Preferred dosing path: sends MSG_DISPENSE_SPAWN to the Pico and waits
  * for MSG_SPAWN_STATUS asynchronously.  The ESP32-side dosing.c module is
@@ -38,14 +38,15 @@ extern "C"
         SYS_INTAKE_WAITING = 4,      /**< Indexer open, waiting for substrate bag (weight signal) */
         SYS_INTAKE_WEIGHING = 5,     /**< Bag detected, indexer closed, weighing bag */
         SYS_OPENING_BAG = 6,         /**< Multi-step bag opening sub-sequence */
-        SYS_INOCULATING = 7,         /**< Closed-loop spawn dispensing (Pico-side) */
-        SYS_POST_DOSE = 8,           /**< Flaps closed, arms returning to neutral */
-        SYS_EJECTING = 9,            /**< Platform to eject, pushing bag out */
-        SYS_ROTATING_TO_INTAKE = 10, /**< Platform returning to accept position */
-        SYS_SPAWN_EMPTY = 11,        /**< Spawn exhausted; prompt operator */
-        SYS_CONTINUE_RESTART = 12,   /**< Replacing spawn: rotate to trash, open flaps, restart */
-        SYS_ERROR = 13,              /**< Unrecoverable error; safe-stop all */
-        SYS_ESTOP = 14,              /**< Emergency stop */
+        SYS_OPEN_RECOVERING = 7,     /**< Bag-open seal-loss recovery (backoff/re-press/retry) */
+        SYS_INOCULATING = 8,         /**< Closed-loop spawn dispensing (Pico-side) */
+        SYS_POST_DOSE = 9,           /**< Flaps closed, arms returning to neutral */
+        SYS_EJECTING = 10,           /**< Platform to eject, pushing bag out */
+        SYS_ROTATING_TO_INTAKE = 11, /**< Platform returning to accept position */
+        SYS_SPAWN_EMPTY = 12,        /**< Spawn exhausted; prompt operator */
+        SYS_CONTINUE_RESTART = 13,   /**< Replacing spawn: rotate to trash, open flaps, restart */
+        SYS_ERROR = 14,              /**< Unrecoverable error; safe-stop all */
+        SYS_ESTOP = 15,              /**< Emergency stop */
     } sys_state_t;
 
     /* ── Operator commands submitted to the sequence task queue ────────────────── */
@@ -107,6 +108,15 @@ extern "C"
      * @param status  spawn_status_code_t value from the received message.
      */
     void sys_sequence_notify_spawn_status(uint8_t status);
+
+    /**
+     * @brief Notify the sequence task that a MSG_ARM_SEAL_EVENT was received.
+     *
+     * Called from the pico_link RX callback when MSG_ARM_SEAL_EVENT arrives.
+     * @param event   arm_seal_event_t value from the received message.
+     * @param reason  arm_seal_reason_t value from the received message.
+     */
+    void sys_sequence_notify_arm_seal_event(uint8_t event, uint8_t reason);
 
     /**
      * @brief Return a human-readable string for the given system state.

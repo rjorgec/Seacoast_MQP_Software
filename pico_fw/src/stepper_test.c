@@ -96,12 +96,14 @@ static void stepper_motion_done(void *ctx, uint8_t dev_idx,
                                 const drv8434s_motion_result_t *res)
 {
     (void)ctx;
+    #ifdef STEP_DEBUG
     printf("Stepper[%u]: done — %li of %li steps, torque=%u, reason=%u\n",
            dev_idx,
            (long)res->steps_achieved,
            (long)res->steps_requested,
            res->last_torque_count,
            (unsigned)res->reason);
+    #endif
     s_last_done_ms = to_ms_since_boot(get_absolute_time());
     s_need_new_motion = true;
     /* toggle direction for next job */

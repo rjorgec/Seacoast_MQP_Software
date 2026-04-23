@@ -1,8 +1,10 @@
 #pragma once
 #include <stdint.h>
-#include "proto/proto.h"
+#include "proto.h"
 
 void ui_show_home(void);
+void ui_show_auto(void);
+void ui_show_scale(void);
 void ui_show_dosing(void);
 void ui_show_operations(void);
 void ui_status_set(const char *s);
@@ -13,6 +15,9 @@ void ui_ops_on_motion_done(const pl_motion_done_t *pl);
 
 /** Call from pico_rx_cb when MSG_VACUUM_STATUS is received */
 void ui_ops_on_vacuum_status(const pl_vacuum_status_t *pl);
+
+/** Call from pico_rx_cb when MSG_ARM_SEAL_EVENT is received */
+void ui_ops_on_arm_seal_event(const pl_arm_seal_event_t *pl);
 
 /** Call from pico_rx_cb when MSG_SPAWN_STATUS is received */
 void ui_dosing_on_spawn_status(const pl_spawn_status_t *pl);

@@ -1,7 +1,7 @@
 # NLSpec: Raspberry Pi Pico 2 Firmware
 
 ## Version
-0.1.0
+0.2.1
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -10,7 +10,7 @@
 
 ## 1. Overview
 
-The Pico firmware runs bare-metal C on the RP2040 (ARM core of the Pico 2). It is the sole controller of all physical actuators and sensors. It receives commands from the ESP32 over UART, executes them via hardware drivers, and reports results back.
+The Pico firmware runs bare-metal C on the RP2350 (ARM core of the Pico 2). It is the sole controller of all physical actuators and sensors. It receives commands from the ESP32 over UART, executes them via hardware drivers, and reports results back.
 
 ### 1.1 Source File Map
 
@@ -26,6 +26,8 @@ The Pico firmware runs bare-metal C on the RP2040 (ARM core of the Pico 2). It i
 | `shared/proto/cobs.c` | COBS encode/decode |
 | `shared/proto/proto_crc.c` | CRC-16-CCITT |
 
+**Stepper torque default source:** The fallback soft torque-limit threshold is defined once in `shared/proto/proto.h` as `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` and consumed by Pico (`STEPPER_SOFT_TORQUE_LIMIT` fallback in `uart_server.c`).
+
 ### 1.2 Execution Model
 
 The Pico runs a **cooperative polling loop** in `main()`:
@@ -40,10 +42,23 @@ while (true) {
 There is no RTOS. All subsystem state machines are polled every loop iteration via tick functions. Stepper pulse generation uses the Pico SDK `repeating_timer` at per-axis `step_delay_us` intervals.
 
 **Boot sequence:**
-1. `stdio_init_all()` — enables USB CDC for debug printf
-2. `sleep_ms(10000)` — 10-second boot delay for USB enumeration
-3. `uart_server_init()` — initializes UART, GPIO, ADC, SPI, DRV8263 instances, DRV8434S daisy chain, HX711 load cell
-4. Enter polling loop
+1. Configure all output GPIO pin modes; drive `HOTWIRE_PIN_IN2` (vacuum pump 2 IN2) LOW — pump held off. **This must complete before the ESP asserts the 12 V relay (GPIO10) in Phase 2 of the system startup; see Section 1.3.**
+2. `stdio_init_all()` — enables USB CDC for debug printf
+3. `sleep_ms(10000)` — 10-second boot delay for USB enumeration
+4. `uart_server_init()` — initializes UART, ADC, SPI, DRV8263 instances, DRV8434S daisy chain, HX711 load cell
+5. Enter polling loop
+
+DRV8434S SPI chain initialisation (Phase 3 of system startup) runs inside `uart_server_init()` after the ESP has asserted the 12 V relay and the motor drivers are powered.
+
+### 1.3 System Startup Phases
+
+The three-phase power-on order is documented in the ESP32 spec (Section 2.2). From the Pico's perspective:
+
+| Phase | Pico Responsibility |
+|-------|-------------------|
+| 1 (Pico boot) | Configure all GPIO pin modes; drive `HOTWIRE_PIN_IN2` LOW immediately (Step 1 above) |
+| 2 (ESP init + relay) | Pico is in boot delay (Step 3); no action required — IN2 is already safe |
+| 3 (SPI chain init) | `uart_server_init()` initialises DRV8434S daisy chain and all subsystems (Step 4 above) |
 
 ---
 
@@ -81,40 +96,54 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Second flap driver (`s_drv8263_flap2`):** If present and initialized (`s_drv8263_flap2_ready == true`), both flap DRV8263 instances are commanded in parallel for every flap state transition. Both must complete before MOTION_DONE is sent.
 
-### 2.2 Arm Stepper (DRV8434S Device 0)
+### 2.2 Rotational Plenum Stepper (`STEPPER_DEV_ROT_ARM`, DRV8434S Device 1)
 
-**Hardware:** DRV8434S on SPI1 daisy-chain, device index 0.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 1. Drives the rotational plenum (rotary suction arm) addressed by `MSG_ARM_MOVE` / `MSG_ARM_HOME`.
 
-**Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Starts at 0 after boot (assumed home).
+**Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Boot still initializes it to `0` for backward compatibility, but the trusted physical reference is established only by `MSG_ARM_HOME`.
 
-**Behavior:** On `MSG_ARM_MOVE(position)`, compute delta from `s_arm_pos_steps` to target steps, call `drv8434s_motion_start()`. Named positions map to step counts:
+**Behavior:** On `MSG_ARM_MOVE(position)`, compute delta from `s_arm_pos_steps` to target steps and start a DRV8434S motion. If `s_arm_rehome_required == true`, the Pico NACKs `MSG_ARM_MOVE` until `MSG_ARM_HOME` succeeds. Named positions map to step counts from the arm's physical home hard-stop:
 
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
-| ARM_POS_PRESS | `ARM_STEPS_PRESS` | 4000 |
-| ARM_POS_1 | `ARM_STEPS_POS1` | 1000 |
-| ARM_POS_2 | `ARM_STEPS_POS2` | 2500 |
+| ARM_POS_PRESS | `ARM_STEPS_PRESS` | -3800 |
+| ARM_POS_1 | `ARM_STEPS_POS1` | -500 |
+| ARM_POS_2 | `ARM_STEPS_POS2` | -100 |
 
-**Special behavior for ARM_POS_PRESS:** Stall detection is enabled. If stall fires within `ARM_PRESS_STALL_WINDOW_STEPS` (default: 200) of the target, treat as `MOTION_OK` (successful engagement). Otherwise, treat as `MOTION_STALLED`.
+**Press semantics:** A torque-stop while moving to `ARM_POS_PRESS` is treated as a successful press instead of a fault. The Pico keeps the tracked arm position at the actual achieved steps and does not require re-home just because the press hit resistance as intended.
 
-**Timeout:** `ARM_MOVE_TIMEOUT_MS` (default: 10000 ms).
+**Vacuum-assisted retry:** If vacuum RPM telemetry is valid and the vacuum is ON when `ARM_POS_PRESS` starts, the Pico captures the pre-press RPM, waits `ARM_PRESS_RETRY_VERIFY_TIMEOUT_MS` after the press completes, and checks for an absolute RPM change of at least `ARM_PRESS_RETRY_RPM_DELTA` (default now 10 RPM to match observed scale). If no change is detected, the arm backs off by `ARM_PRESS_RETRY_BACKOFF_STEPS` and retries the press, up to `ARM_PRESS_RETRY_MAX_RETRIES`. If all retries are exhausted without an RPM response, the Pico reports `MOTION_TIMEOUT` but does not force re-home.
 
-**Arm State Machine States:** `IDLE`, `MOVING`, `AT_PRESS`, `AT_POS1`, `AT_POS2`, `FAULT`
+**Sensorless homing:** `MSG_ARM_HOME` is explicit/manual. The Pico requires the DRV8434S motion engine to be idle, then seeks in the positive direction by `ARM_HOME_SEARCH_STEPS` using `ARM_HOME_TORQUE_LIMIT`, `ARM_HOME_TORQUE_BLANK_STEPS`, `ARM_HOME_TORQUE_SAMPLE_DIV`, and `ARM_HOME_STEP_DELAY_US`. A torque-stop during the seek is treated as the home hard-stop (`s_arm_pos_steps = 0`), after which the firmware runs a fixed backoff of `ARM_HOME_BACKOFF_STEPS` and reports `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_OK, -ARM_HOME_BACKOFF_STEPS)`.
+
+**Homing failures:** If the seek consumes all `ARM_HOME_SEARCH_STEPS` without a torque-stop, the Pico reports `MOTION_TIMEOUT` and leaves `s_arm_rehome_required = true`. SPI faults, driver faults, and timeouts during seek or backoff also leave the arm requiring re-home.
+
+**Timeouts:** Normal arm moves use `ARM_MOTION_TIMEOUT_MS`; each homing phase uses `ARM_HOME_TIMEOUT_MS`.
+
+**Soft torque-limit default:** For state-based stepper moves (`MSG_ARM_MOVE`, `MSG_RACK_MOVE`, `MSG_TURNTABLE_GOTO`, etc.), Pico uses `STEPPER_SOFT_TORQUE_LIMIT`; if not overridden, this resolves to `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` from the shared protocol header.
+
+**Arm state flags:** `s_arm_homing_phase` (`IDLE`, `SEEK`, `BACKOFF`), `s_arm_homed`, and `s_arm_rehome_required`.
 
 **Transition Table:**
 
 | From | Event | To | Side Effect |
 |------|-------|-----|-------------|
 | IDLE / AT_* | MSG_ARM_MOVE(pos) | MOVING | Compute delta; start step job; ACK |
-| FAULT | MSG_ARM_MOVE(pos) | MOVING | Clear fault; start step job; ACK |
+| IDLE / AT_* / REHOME_REQUIRED | MSG_ARM_HOME | HOMING_SEEK | Require idle DRV8434S engine; start positive seek; ACK |
+| REHOME_REQUIRED | MSG_ARM_MOVE(pos) | REHOME_REQUIRED | NACK until `MSG_ARM_HOME` succeeds |
 | MOVING | Step job complete | AT_PRESS / AT_POS1 / AT_POS2 | Update s_arm_pos_steps; send MOTION_DONE(ARM, OK, steps) |
-| MOVING | Stall detected | FAULT | Send MOTION_DONE(ARM, STALLED, steps) |
-| MOVING | Timeout | FAULT | Cancel motion; send MOTION_DONE(ARM, TIMEOUT, steps) |
+| MOVING | Stall while target is `ARM_POS_PRESS` | AT_PRESS | Update tracked steps; report `MOTION_OK`; do not require re-home |
+| MOVING / AT_PRESS | No RPM change after press verify window | PRESS_RETRY_BACKOFF or AT_PRESS | Back off and retry until `ARM_PRESS_RETRY_MAX_RETRIES` is exhausted; then report `MOTION_TIMEOUT` without forcing re-home |
+| MOVING | Stall / timeout / driver fault / SPI fault on any other arm move | REHOME_REQUIRED | Update tracked steps, send terminal MOTION_DONE, require re-home |
 | MOVING | MSG_ARM_MOVE(new_pos) | MOVING | Cancel current; start new job; ACK |
+| HOMING_SEEK | Torque-stop detected | HOMING_BACKOFF | Set `s_arm_pos_steps = 0`; start fixed backoff |
+| HOMING_SEEK | Search distance exhausted | REHOME_REQUIRED | Send MOTION_DONE(ARM, TIMEOUT, steps) |
+| HOMING_BACKOFF | Step job complete | AT_HOME_RELEASED | Send MOTION_DONE(ARM, OK, `-ARM_HOME_BACKOFF_STEPS`) |
+| HOMING_SEEK / HOMING_BACKOFF | SPI / driver fault / timeout | REHOME_REQUIRED | Send matching MOTION_DONE; reject later `MSG_ARM_MOVE` |
 
-### 2.3 Rack Stepper (DRV8434S Device 1)
+### 2.3 Linear Plenum Stepper (`STEPPER_DEV_LIN_ARM`, DRV8434S Device 2)
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 1.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 2. Drives the linear plenum (linear vacuum arm / rack) addressed by `MSG_RACK_MOVE`.
 
 **Position tracking:** `s_rack_pos_steps` (int32_t). Zeroed on successful home.
 
@@ -123,16 +152,16 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
 | RACK_POS_HOME | — | Drive to stall; zero counter |
-| RACK_POS_EXTEND | `RACK_STEPS_EXTEND` | 6000 |
-| RACK_POS_PRESS | `RACK_STEPS_PRESS` | 7500 |
+| RACK_POS_EXTEND | `RACK_STEPS_EXTEND` | 800 |
+| RACK_POS_PRESS | `RACK_STEPS_PRESS` | 1200 |
 
-**Timeouts:** `RACK_HOME_TIMEOUT_MS` (default: 15000), `RACK_MOVE_TIMEOUT_MS` (default: 12000).
+**Timeouts:** `RACK_MOVE_TIMEOUT_MS` (default: 5000).
 
 **Rack State Machine States:** `IDLE`, `HOMING`, `MOVING`, `AT_HOME`, `AT_EXTEND`, `AT_PRESS`, `FAULT`
 
-### 2.4 Turntable Stepper (DRV8434S Device 2)
+### 2.4 Turntable Stepper (DRV8434S — Not Currently Wired)
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 2.
+**Status: Not currently wired.** The turntable stepper is defined in the protocol and firmware but is not assigned to any device index in the current `board_pins.h` daisy-chain configuration. When wired, it will occupy a SPI1 daisy-chain device slot.
 
 **Position tracking:** `s_turntable_pos_steps` (int32_t). Zeroed on home.
 
@@ -140,12 +169,11 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 | Position | Constant | Default Steps |
 |----------|----------|--------------|
-| TURNTABLE_POS_A | `TURNTABLE_STEPS_A` | 0 |
-| TURNTABLE_POS_B | `TURNTABLE_STEPS_B` | 1250 |
-| TURNTABLE_POS_C | `TURNTABLE_STEPS_C` | 2500 |
-| TURNTABLE_POS_D | `TURNTABLE_STEPS_D` | 3750 |
+| TURNTABLE_POS_INTAKE | `TURNTABLE_STEPS_INTAKE` | 0 (hard stop) |
+| TURNTABLE_POS_TRASH | `TURNTABLE_STEPS_TRASH` | 500 |
+| TURNTABLE_POS_EJECT | `TURNTABLE_STEPS_EJECT` | 1000 |
 
-**Timeouts:** `TURNTABLE_HOME_TIMEOUT_MS` (default: 20000), `TURNTABLE_MOVE_TIMEOUT_MS` (default: 15000).
+**Timeouts:** `TURNTABLE_MOVE_TIMEOUT_MS` (default: 8000).
 
 **Turntable State Machine States:** `UNCALIBRATED`, `HOMING`, `MOVING`, `AT_A`, `AT_B`, `AT_C`, `AT_D`, `FAULT`
 
@@ -183,29 +211,36 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 - Periodic status: send `MSG_VACUUM_STATUS` every `VACUUM_PERIODIC_STATUS_MS` (default: 5000 ms) while pump is on, and immediately on any OK ↔ BLOCKED transition.
 
 **Secondary vacuum pump (MSG_VACUUM2_SET):**
-- Uses the hotwire DRV8263 independent half-bridge IN2 (GP7 driven via `drv8263_set_in2()`).
+- Uses the hotwire DRV8263 independent half-bridge IN2 (`HOTWIRE_PIN_IN2`, driven via `drv8263_set_in2()`).
+- OUT2 is wired to the **ground side** of the pump (not the high side), bypassing the DRV8263 shared current limit that would otherwise apply when both outputs are active.
+- Vacuum 2 trigger uses **active-high** control:
+
+  | IN2 level | OUT2 state | Pump 2 |
+  |-----------|-----------|--------|
+  | HIGH (4095 PWM or GPIO high) | Enabled | On |
+  | LOW (0 PWM or GPIO low) | Disabled | Off |
+
+- The Pico drives IN2 LOW at boot (Step 1 of the boot sequence) so pump 2 remains off when 12 V is applied. `MSG_VACUUM2_SET(enable=true)` drives IN2 HIGH; `MSG_VACUUM2_SET(enable=false)` drives IN2 LOW.
 - Simple on/off, no RPM monitoring.
 - **Not mutually exclusive with hotwire (IN1).** Both can run simultaneously.
 
 **Vacuum States:** `OFF`, `ON_OK`, `ON_BLOCKED`
 
-### 2.8 Hot Wire Traverse Stepper (DRV8434S Device 4 — `STEPPER_DEV_HW_CARRIAGE`)
+### 2.8 Hotwire Traverse Stepper (`STEPPER_DEV_HW_CARRIAGE`, DRV8434S Device 3)
 
-**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_HW_CARRIAGE` in `uart_server.c`.
+**Status: Active — wired as device 3 on the SPI1 daisy-chain.**
 
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 4 (when wired). Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 3. Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
 
-**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward `HOTWIRE_TRAVERSE_STEPS` (default: 1000) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 2000 µs/step). This cuts the tip.
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward in segments. Each segment steps `HOTWIRE_TRAVERSE_PROGRESS_STEPS` (default: 6000) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 1000 µs/step), then backs up `HOTWIRE_TRAVERSE_BACKUP_STEPS` (default: 2000) between segments, until `HOTWIRE_TRAVERSE_STEPS` total (default: -20000) is reached. Full-step mode, no microstep subdivision.
 
-**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse the same number of steps. This retracts the wire.
+**Behavior on `MSG_HOTWIRE_TRAVERSE(direction=1)`:** Move carriage in reverse `HOTWIRE_TRAVERSE_RETRACE_STEPS` (default: 20000) and zero position on successful return. Timeout is bounded by traversal time + `HOTWIRE_TIMEOUT_GUARD_MS` (default: 8000 ms).
 
-**Activation:** To uncomment `STEPPER_DEV_HW_CARRIAGE` in `board_pins.h` and increment `DRV8434S_N_DEVICES` to include this device.
+### 2.9 Indexer / Bag Depth Rack (`STEPPER_DEV_INDEXER` — Not Yet Wired)
 
-### 2.9 Indexer / Bag Depth Rack (DRV8434S Device 5 — `STEPPER_DEV_INDEXER`)
+**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_INDEXER` in `uart_server.c`. Device index not yet assigned.
 
-**Status: Not yet wired.** Defined but guarded with `#ifdef STEPPER_DEV_INDEXER` in `uart_server.c`.
-
-**Hardware:** DRV8434S on SPI0 daisy-chain, device index 5 (when wired). Drives the bag depth/eject rack that centers the incoming substrate bag and pushes out the inoculated bag.
+**Hardware (when wired):** DRV8434S on SPI1 daisy-chain. Drives the bag depth/eject rack that centers the incoming substrate bag and pushes out the inoculated bag.
 
 **Position tracking:** `s_indexer_pos_steps` (int32_t). Updated on each move.
 
@@ -215,7 +250,21 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 | `INDEXER_POS_CENTER` | `INDEXER_STEPS_CENTER` | 3000 | Holds bag centered for weighing/opening |
 | `INDEXER_POS_EJECT` | `INDEXER_STEPS_EJECT` | 8000 | Fully extended; pushes inoculated bag out |
 
-**Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h` and increment `DRV8434S_N_DEVICES`.
+**Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h`, assign a device index, and increment `DRV8434S_N_DEVICES`.
+
+### 2.10 Agitator (`STEPPER_DEV_AGITATOR`, DRV8434S Device 0)
+
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 0. Drives an eccentric arm that kneads the hopper bag to break material bridges.
+
+**Triggered by:** `MSG_AGITATE` with `pl_agitate_t` payload, or automatically by the spawn dosing algorithm on no-flow detection.
+
+**Sensorless homing:** If `AGITATE_FLAG_DO_HOME` is set in the flags byte, the agitator seeks in the negative direction for up to `AGITATOR_HOME_SEARCH_STEPS` (default: -500) using `AGITATOR_HOME_TORQUE_LIMIT` (default: 200). A torque-stop is treated as home; the firmware backs off `AGITATOR_HOME_BACKOFF_STEPS` (default: 20) and zeros position. Timeout: `AGITATOR_HOME_TIMEOUT_MS` (default: 10000 ms).
+
+**Knead cycle:** `AGITATOR_N_CYCLES` (default: 3) forward + reverse cycles of `AGITATOR_KNEAD_STEPS` (default: 400) each at `AGITATOR_STEP_DELAY_US` (default: 2000 µs/step).
+
+**Completion:** `MSG_MOTION_DONE(SUBSYS_AGITATOR, result, steps_done)` sent on completion or fault.
+
+**Agitator States:** `IDLE`, `HOMING`, `KNEADING`, `FAULT`
 
 ### 2.7 Load Cell (HX711)
 
@@ -233,12 +282,12 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 ### 3.1 Overview
 
 When `MSG_DISPENSE_SPAWN` is received, the Pico runs a closed-loop dosing algorithm that:
-1. Opens the hopper flaps
-2. Reads the load cell continuously
-3. Controls flap position to regulate spawn flow rate
-4. Detects and recovers from material bridging
-5. Closes flaps when target mass is dispensed
-6. Reports progress via `MSG_SPAWN_STATUS`
+1. Optionally homes flaps to the closed endpoint
+2. Opens the hopper flaps (PRIME) until initial flow is detected
+3. Runs proportional closed-loop control (DOSE_MAIN) to regulate spawn flow rate
+4. Detects and recovers from material bridging via agitation
+5. Closes flaps when target mass (minus preempt margin) is dispensed
+6. Reports progress via `MSG_SPAWN_STATUS` and prints a summary at completion
 
 ### 3.2 Initiation
 
@@ -258,37 +307,96 @@ Where `innoc_percent` is in tenths of a percent (e.g., 250 = 25.0%).
 
 The dosing algorithm runs on a `repeating_timer` at `SPAWN_TIMER_PERIOD_MS` (default: 50 ms) intervals. Each tick:
 
-1. **Read the load cell** — single-shot reading via `pico-scale`.
-2. **Compute dispensed mass** — `dispensed_ug = current_mass_ug - start_mass_ug`.
-3. **Flow detection** — over a window of `SPAWN_FLOW_WINDOW_MS` (default: 100 ms), if dispensed mass has not increased, flow has stalled.
-4. **Control action** — based on current dosing state (see 3.4).
-5. **Report status** — send `MSG_SPAWN_STATUS` with current state, dispensed mass, target, retries.
+1. **Read the load cell** — drains all queued HX711 FIFO entries, averages them for a noise-tolerant reading.
+2. **Compute dispensed mass** — `dispensed_ug = current_mass_ug - start_mass_ug`, with spike rejection: single-tick jumps exceeding `SPAWN_FLOW_SPIKE_CLAMP_UG` hold the previous value.
+3. **High-water mark** — tracks maximum `dispensed_ug` in the current flow window for noise-robust no-flow detection.
+4. **Per-tick delta** — signed delta computed from consecutive `dispensed_ug` values. Positive-only version is spike-clamped for logging; the **signed** delta feeds the EMA so flap-momentum bounces cancel out rather than accumulating a false DC bias. EMA α = `SPAWN_EMA_ALPHA_X1000` / 1000 (default 0.2), clamped ≥ 0.
+5. **Control action** — based on current dosing state (see 3.4).
+6. **Report status** — send `MSG_SPAWN_STATUS` with current state, dispensed mass, target, retries.
+7. **Diagnostic CSV** — per-tick CSV data row printed only when `SPAWN_VERBOSE_LOG` is defined.
 
 ### 3.4 Dosing State Machine
 
 | State | Entry Condition | Behavior | Exit Condition |
 |-------|----------------|----------|----------------|
-| STARTUP_OPEN | Dose begins | Drive flaps open at full PWM. Wait for first weight change. | Weight change detected → RUNNING |
-| RUNNING | Flow detected | Flaps held at dosing PWM. Monitor flow rate. | `dispensed_ug >= target_ug` → DONE. No flow for window → STALLED. |
-| STALLED | No flow detected for `SPAWN_FLOW_WINDOW_MS` | Close flaps. Activate agitator (eccentric arm stepper) gently. | After agitation period → re-open flaps → RUNNING (retry). Max retries exceeded → BAG_EMPTY. |
-| AGITATING | Bridge detected | Agitator kneads bag side. Flaps closed. | Agitation time elapsed → re-open → RUNNING. |
-| DONE | Target mass reached | Close flaps. Stop timer. | Send SPAWN_STATUS(DONE). Terminal. |
-| BAG_EMPTY | Retries exhausted or insufficient spawn | Close flaps. Stop timer. | Send SPAWN_STATUS(BAG_EMPTY). Terminal. |
-| ERROR | Sensor failure, driver fault | Close flaps. Stop timer. | Send SPAWN_STATUS(ERROR). Terminal. |
+| HOMING | `do_home` flag set | Drive flaps to closed endpoint via torque-monitored close. | FLAP_SM_CLOSED or timeout → PRIME |
+| PRIME | After HOMING (or directly) | Drive flaps open at `SPAWN_OPEN_PWM`. Monitor undercurrent (end-of-travel). | `tick_delta >= SPAWN_STARTUP_FLOW_DETECT_UG` → DOSE_MAIN. Undercurrent with no flow → FAULT. |
+| DOSE_MAIN | Flow confirmed | Proportional closed-loop nudge control. Per-tick desired rate interpolated linearly between `SPAWN_TICK_MIN_UG` and `SPAWN_TICK_MAX_UG` based on remaining mass vs target. Burst-flow emergency close if delta exceeds desired × `SPAWN_FLOW_BURST_FACTOR`. | `dispensed_ug >= target_ug - SPAWN_CLOSE_PREEMPT_UG` → CLOSE_CONFIRM. No-flow detected (see 3.5) → open retries, then AGIT_CLOSING. |
+| AGIT_CLOSING | No-flow after open retries | Fast-close flaps before agitation. | FLAP_SM_CLOSED or timeout → AGITATING. |
+| AGITATING | Flaps closed | Agitator runs N×(forward+reverse) knead cycles. | Cycles complete: retries < max → re-PRIME. Retries exhausted → BAG_EMPTY. |
+| FINISH_A_CLOSE | Early close triggered | Issue close at `SPAWN_CLOSE_EARLY_MARGIN_UG` before target. | Flap SM closed or timeout → FINISH_A_TOPOFF. |
+| FINISH_A_TOPOFF | Flaps closed | Issue small open pulses (`SPAWN_TOPOFF_PULSE_MS`, up to `SPAWN_TOPOFF_MAX_PULSES`) to correct undershoot. Re-read after each pulse + settle. | Within tolerance → DONE. Max pulses → DONE. |
+| FINISH_B_LOWFLOW | Remaining < `SPAWN_LOWFLOW_THRESHOLD_UG` | Switch to minimal-PWM nudges (`SPAWN_LOWFLOW_NUDGE_MS`). | `dispensed_ug >= target_ug - SPAWN_CLOSE_THRESHOLD_UG` → CLOSE_CONFIRM. |
+| CLOSE_CONFIRM | Fast-close issued | Wait for flap state machine to confirm closed or timeout. | Confirmed → DONE. |
+| DONE | Target mass reached | Close flaps. Stop timer. Print summary. | Send SPAWN_STATUS(DONE). Terminal. |
+| BAG_EMPTY | Retries exhausted | Close flaps. Stop timer. | Send SPAWN_STATUS(BAG_EMPTY). Terminal. |
+| FAULT | Sensor/driver fault or flow failure | Close flaps. Stop timer. | Send SPAWN_STATUS(ERROR/FLOW_FAILURE). Terminal. |
 | ABORTED | MSG_CTRL_STOP received | Close flaps. Stop timer. | Send SPAWN_STATUS(ABORTED). Terminal. |
 
-### 3.5 Flap Nudging
+### 3.5 No-Flow Detection and Recovery
 
-During RUNNING state, if flow rate drops but is not zero, the algorithm applies short position-nudge pulses to the flap motors to maintain flow without fully re-opening. A nudge drives the motor for a brief pulse (`nudge_until` timestamp), then stops and waits for the next timer tick to evaluate.
+No-flow is evaluated at each `SPAWN_FLOW_WINDOW_MS` (500 ms) boundary during DOSE_MAIN:
 
-### 3.6 Defaults and Boundaries
+1. **Dual-condition check**: flow is considered stopped only when **both**:
+   - `ema_flow_ug < SPAWN_NOFLOW_EMA_THRESHOLD_UG` (default 5000 µg/tick)
+   - High-water-mark window delta `< SPAWN_FLOW_NOFLOW_UG` (default 5000 µg)
+2. **Open retry before agitation**: When no-flow is detected, up to `SPAWN_NOFLOW_OPEN_RETRIES` (default 3) open nudge pulses are tried first. Each stops any active motor, issues an open pulse, and resets the flow window. Only after all retries fail does the state machine escalate to close + agitate.
+3. **Auto-reset**: When a window completes with detected flow, the open-retry counter resets to 0.
+
+### 3.6 Proportional Flow Control
+
+During DOSE_MAIN, the target per-tick flow rate is interpolated:
+
+| Remaining mass | Desired flow rate |
+|---|---|
+| `> target / SPAWN_PROP_UPPER` (default /2) | `SPAWN_TICK_MAX_UG` (12,000,000 µg/tick) |
+| Between upper and lower thresholds | Linear interpolation (uint64 safe) |
+| `< target / SPAWN_PROP_LOWER` (default /6) | `SPAWN_TICK_MIN_UG` (5,000,000 µg/tick) |
+
+Nudge decisions compare EMA flow vs desired rate ± `SPAWN_TICK_DEADBAND`. Direction-reversal holdoff (`SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS`) prevents hunting.
+
+**Important:** `remaining_ug` is computed relative to the **effective target** (`target_ug − SPAWN_CLOSE_PREEMPT_UG`), not the raw target. This ensures the proportional ramp decelerates before the preempt close trigger fires.
+
+**End-of-travel detection during nudges:** Open nudges in DOSE_MAIN enable DRV8263 current monitoring. At nudge expiry, before stopping the motor, both flap ADC readings are checked against `FLAP_OPEN_CURRENT_DROP_TH`. If both are below threshold (&&), the flaps have reached fully-open end-of-travel (bag empty), and `SPAWN_STATUS_FLOW_FAILURE` is reported.
+
+### 3.7 Close Preempt Margin
+
+DOSE_MAIN closes the flaps `SPAWN_CLOSE_PREEMPT_UG` (default 500,000 µg = 0.5 g) before the actual target to compensate for inoculant squeezed out as the flaps close. Both the proportional ramp's `remaining_ug` and the close trigger use the same effective target:
+
+```
+effective_target = target_ug - SPAWN_CLOSE_PREEMPT_UG
+remaining_ug     = effective_target - dispensed_ug        (for proportional ramp)
+close when:        dispensed_ug >= effective_target        (fast-close trigger)
+```
+
+### 3.8 Dose Summary
+
+At completion (DONE state), a single-line summary is printed:
+```
+Spawn DONE: time=XX.Xs  target=XXXug  actual=XXXug  error=XXXug  retries=N
+```
+This always prints regardless of `SPAWN_VERBOSE_LOG`. The detailed per-tick CSV data is only emitted when `SPAWN_VERBOSE_LOG` is defined at compile time.
+
+### 3.9 Defaults and Boundaries
 
 | Parameter | Default | Unit | Notes |
 |-----------|---------|------|-------|
 | `SPAWN_TIMER_PERIOD_MS` | 50 | ms | Dosing loop tick rate |
-| `SPAWN_FLOW_WINDOW_MS` | 100 | ms | Window for flow detection |
-| `SPAWN_SCALE_READ_SAMPLES` | 1 | — | Single-shot for speed |
-| Max agitation retries | 3 | — | Per dose attempt. Configurable via `s_spawn.max_retries`. |
+| `SPAWN_FLOW_WINDOW_MS` | 500 | ms | Window for flow detection |
+| `SPAWN_EMA_ALPHA_X1000` | 200 | ×1000 | EMA smoothing (α=0.2, lower = more smoothing) |
+| `SPAWN_FLOW_NOFLOW_UG` | 5,000 | µg | Min µg/window to count as flowing |
+| `SPAWN_NOFLOW_EMA_THRESHOLD_UG` | 5,000 | µg/tick | EMA below this = potential no-flow |
+| `SPAWN_NOFLOW_OPEN_RETRIES` | 3 | — | Open nudge attempts before agitation |
+| `SPAWN_CLOSE_PREEMPT_UG` | 6,086,400 | µg | Close margin for squeeze overshoot (calibrated) |
+| `SPAWN_CLOSE_EARLY_MARGIN_UG` | 500,000 | µg | Additional early-close margin for Finish Mode A |
+| `SPAWN_FLOW_SPIKE_CLAMP_UG` | 100,000,000 | µg | Max believable per-tick jump |
+| `SPAWN_STARTUP_FLOW_DETECT_UG` | 1,000,000 | µg | Min change to confirm prime flow |
+| `SPAWN_MAX_RETRIES` | 100 | — | Agitation retries before bag-empty |
+| `SPAWN_TICK_DEADBAND` | 50,000 | µg/tick | ±deadband — no nudge within band |
+| `SPAWN_NUDGE_OPEN_MS` | 300 | ms | Open nudge pulse duration |
+| `SPAWN_NUDGE_CLOSE_MS` | 200 | ms | Close nudge pulse duration |
+| `SPAWN_MAX_OPEN_NUDGES` | 8 | — | Max open nudges per no-flow recovery attempt |
+| `SPAWN_DIRECTION_REVERSAL_HOLDOFF_MS` | 350 | ms | Minimum time between direction reversals |
 
 ---
 
@@ -297,13 +405,52 @@ During RUNNING state, if flow rate drops but is not zero, the algorithm applies 
 The main polling loop must call the following on every iteration:
 
 ```c
-flap_sm_tick();                // polls DRV8263 monitoring_enabled flag, timeout
 vacuum_sm_tick();              // reads RPM counter every VACUUM_RPM_SAMPLE_INTERVAL_MS
+arm_seal_monitor_tick();       // rotary-arm seal monitor (EMA, baseline, LOST/RESTORED edges)
+flap_sm_tick();                // polls DRV8263 monitoring_enabled flag, timeout
 stepper_completion_tick();     // polls drv8434s_motion active flag for arm/rack/turntable, timeout
+arm_press_retry_tick();        // RPM-delta verification and retry logic for ARM_POS_PRESS
 stepper_spi_watchdog_tick();   // reads FAULT register ~2s while idle; logs/clears faults
 ```
 
 These functions are called from within `uart_server_poll()` (or directly in the main loop — implementation choice).
+
+## 4.1 Rotary Arm Seal Monitor (Vacuum RPM, Pico-side)
+
+Purpose: detect suction-cup seal loss during bag opening on the Pico (no high-rate UART telemetry).
+
+Monitor state machine:
+- `SEAL_MON_DISABLED`
+- `SEAL_MON_BASELINING`
+- `SEAL_MON_SEALED_OK`
+- `SEAL_MON_LOST_LATCHED`
+
+Key behavior:
+- Starts baselining after a press command/move sequence while vacuum is ON.
+- Computes `rpm_filt` using EMA (`ARM_SEAL_EMA_ALPHA_X1000`) and sealed baseline via time-window average.
+- Declares LOST on either:
+  - transient trigger (`delta >= ARM_SEAL_TRANSIENT_DELTA_RPM` for `ARM_SEAL_TRANSIENT_DEBOUNCE_MS`)
+  - steady trigger (`delta >= ARM_SEAL_STEADY_DELTA_RPM` for `ARM_SEAL_STEADY_HOLD_MS`)
+  - stale tach while opening-related arm motion (`ARM_SEAL_TACH_STALE_MS`)
+- On LOST:
+  - cancels active arm motion immediately,
+  - keeps stepper outputs enabled (hold position),
+  - sends one `MSG_ARM_SEAL_EVENT(LOST, reason, …)`,
+  - sends `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_STALLED, steps_done)`.
+- LOST is latched; repeated LOST messages are suppressed until recovery.
+- RESTORED is sent once after commanded retry press + re-baseline + restore debounce (`ARM_SEAL_RESTORE_DEBOUNCE_MS`).
+
+Tunables in `board_pins.h` (`#ifndef` guarded defaults):
+- `ARM_SEAL_EMA_ALPHA_X1000` = 250
+- `ARM_SEAL_BASELINE_WINDOW_MS` = 300
+- `ARM_SEAL_BASELINE_MIN_SAMPLES` = 3
+- `ARM_SEAL_BASELINE_TIMEOUT_MS` = 1000
+- `ARM_SEAL_TRANSIENT_DELTA_RPM` = 60
+- `ARM_SEAL_TRANSIENT_DEBOUNCE_MS` = 80
+- `ARM_SEAL_STEADY_DELTA_RPM` = 15
+- `ARM_SEAL_STEADY_HOLD_MS` = 800
+- `ARM_SEAL_TACH_STALE_MS` = 200
+- `ARM_SEAL_RESTORE_DEBOUNCE_MS` = 200
 
 ---
 
@@ -343,9 +490,13 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 ### 6.1 Subsystem State Machines
 - [ ] Flap state machine implements all transitions in Section 2.1 table
 - [ ] Arm state machine implements all transitions in Section 2.2 table
+- [ ] Rotary arm seal monitor emits exactly one LOST and one RESTORED edge per incident/recovery cycle
+- [ ] Seal-loss cancellation sends both `MSG_ARM_SEAL_EVENT(LOST, …)` and `MSG_MOTION_DONE(SUBSYS_ARM, MOTION_STALLED, steps_done)`
 - [ ] Rack state machine implements all transitions including homing via stall
 - [ ] Turntable state machine enforces UNCALIBRATED → HOME before GOTO
 - [ ] Hot wire uses DRV8263 independent half-bridge mode (drv8263_set_in1/in2); IN1 and IN2 can be active simultaneously
+- [ ] `HOTWIRE_PIN_IN2` driven HIGH in the first step of `main()` before `stdio_init_all()`, before any boot delay
+- [ ] `MSG_VACUUM2_SET(enable=true)` drives IN2 HIGH (pump on); `MSG_VACUUM2_SET(enable=false)` drives IN2 LOW (pump off)
 - [ ] Vacuum state machine reports RPM status periodically and on transitions
 - [ ] All state machines send correct MSG_MOTION_DONE on terminal states
 
@@ -358,9 +509,16 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 ### 6.3 Spawn Dosing
 - [ ] MSG_DISPENSE_SPAWN initiates closed-loop dosing with correct target calculation
 - [ ] Dosing reports progress via MSG_SPAWN_STATUS at each timer tick
+- [ ] Proportional flow control interpolates desired rate using uint64 arithmetic (no overflow)
+- [ ] EMA uses signed deltas to cancel flap-momentum DC bias
+- [ ] Spike guard on dispensed_ug rejects single-tick jumps exceeding SPAWN_FLOW_SPIKE_CLAMP_UG
+- [ ] No-flow detection uses dual condition (EMA + high-water-mark) with open-retry before agitation
+- [ ] End-of-travel detected at nudge expiry via ADC threshold check on both flaps (&&)
+- [ ] Close preempt margin applied to both proportional ramp and close trigger
 - [ ] Bridge detection triggers agitation and retry
 - [ ] MSG_CTRL_STOP aborts an active dose and closes flaps
-- [ ] On completion, flaps are closed and SPAWN_STATUS_DONE is sent
+- [ ] On completion, flaps are closed, SPAWN_STATUS_DONE sent, and summary printed
+- [ ] Detailed CSV data gated behind SPAWN_VERBOSE_LOG compile flag
 
 ### 6.4 Safety
 - [ ] All actuators drive to safe state on unrecoverable error
