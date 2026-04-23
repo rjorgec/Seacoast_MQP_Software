@@ -17,6 +17,7 @@
 
 #include "motor_hal.h"
 #include "pico_link.h"
+#include "pico_power.h"
 #include "proto.h"
 
 // #include "recipes.h"
@@ -111,6 +112,12 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
 
+    /* Ensure the 12 V relay is open before anything else on the board gets a
+     * chance to observe GPIO10's reset default. The Pico's Phase 1 pin setup
+     * runs in parallel; neither side should see motor-driver power until the
+     * PING handshake completes below. */
+    ESP_ERROR_CHECK(pico_power_init());
+
     // //recipe upload pipeline
     // ESP_ERROR_CHECK(recipes_init());          //mounts SPIFFS (/spiffs)
     // ESP_ERROR_CHECK(wifi_ap_start());         //starts AP + DHCP (default 192.168.4.1)
@@ -123,8 +130,28 @@ void app_main(void)
         .on_rx = pico_rx_cb};
     ESP_ERROR_CHECK(pico_link_init(&link));
 
-    // ping on boot
-    ESP_ERROR_CHECK(pico_link_send(MSG_PING, NULL, 0, NULL));
+    /* PING handshake. The Pico only ACKs once Phase 1 has run and its UART
+     * handler is live, so an ACK here means IN2 is already HIGH (pump 2
+     * held off) and it is safe to close the 12 V relay. If the Pico is
+     * missing or wedged we leave the relay open and continue booting the UI
+     * so the operator can see the error; motors will NACK until relay is
+     * closed. 30 s covers a worst-case USB-CDC enumeration + startup on
+     * the Pico. */
+    {
+        uint8_t nack_code = 0;
+        esp_err_t ping_err = pico_link_send_rpc(MSG_PING, NULL, 0, 30000u, &nack_code);
+        if (ping_err == ESP_OK)
+        {
+            ESP_ERROR_CHECK(pico_power_enable());
+        }
+        else
+        {
+            ESP_LOGE("app_main",
+                     "Pico PING handshake failed (%s, nack=%u); motor driver"
+                     " power left OFF — UI will still boot.",
+                     esp_err_to_name(ping_err), (unsigned)nack_code);
+        }
+    }
 
     // display/ui
     display_handles_t disp = display_init();

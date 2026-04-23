@@ -131,7 +131,7 @@
 // 1 = single device (still uses the daisy-chain framing, which is valid).
 // Set to 0 to disable the stepper subsystem entirely.
 #ifndef DRV8434S_N_DEVICES
-#define DRV8434S_N_DEVICES 3
+#define DRV8434S_N_DEVICES 4
 #endif
 
 // Interval between periodic idle SPI health checks (milliseconds).
@@ -194,13 +194,13 @@
  * MSG_ARM_HOME. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS, so
  * the idle post-home position is typically negative. */
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS -3800 /* steps to press attachment */
+#define ARM_STEPS_PRESS 3800 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
-#define ARM_STEPS_POS1 -500 /* absolute position 1 */
+#define ARM_STEPS_POS1 500 /* absolute position 1 */
 #endif
 #ifndef ARM_STEPS_POS2
-#define ARM_STEPS_POS2 -100 /* absolute position 2 */
+#define ARM_STEPS_POS2 100 /* absolute position 2 */
 #endif
 #ifndef ARM_PRESS_STALL_WINDOW_STEPS
 #define ARM_PRESS_STALL_WINDOW_STEPS 50 /* steps to confirm press stall */
@@ -226,7 +226,7 @@
 #endif
 #ifndef ARM_HOME_SEARCH_STEPS
 #define ARM_HOME_SEARCH_STEPS                                                  \
-  25000 /* increased search distance for faster home movement */
+  -25000 /* increased search distance for faster home movement */
 #endif
 #ifndef ARM_HOME_STEP_DELAY_US
 #define ARM_HOME_STEP_DELAY_US                                                 \
@@ -237,7 +237,7 @@
   30000 /* allow more time for longer search in fast mode */
 #endif
 #ifndef ARM_HOME_TORQUE_LIMIT
-#define ARM_HOME_TORQUE_LIMIT 120u //
+#define ARM_HOME_TORQUE_LIMIT 180u //
 #endif
 #ifndef ARM_HOME_TORQUE_BLANK_STEPS
 #define ARM_HOME_TORQUE_BLANK_STEPS 100u
@@ -251,28 +251,28 @@
 
 /* Rack stepper (device 1) */
 #ifndef RACK_STEPS_EXTEND
-#define RACK_STEPS_EXTEND 800
+#define RACK_STEPS_EXTEND 2200
 #endif
 #ifndef RACK_STEPS_PRESS
-#define RACK_STEPS_PRESS 1200
+#define RACK_STEPS_PRESS 3000
 #endif
 #ifndef RACK_MOTION_TIMEOUT_MS
 #define RACK_MOTION_TIMEOUT_MS 5000
 #endif
 
-/* Turntable stepper (device 2) — INTAKE is the hard endstop (= 0) */
-#ifndef TURNTABLE_STEPS_INTAKE
-#define TURNTABLE_STEPS_INTAKE 0
-#endif
-#ifndef TURNTABLE_STEPS_TRASH
-#define TURNTABLE_STEPS_TRASH 500
-#endif
-#ifndef TURNTABLE_STEPS_EJECT
-#define TURNTABLE_STEPS_EJECT 1000
-#endif
-#ifndef TURNTABLE_MOTION_TIMEOUT_MS
-#define TURNTABLE_MOTION_TIMEOUT_MS 8000
-#endif
+// /* Turntable stepper (device 2) — INTAKE is the hard endstop (= 0) */
+// #ifndef TURNTABLE_STEPS_INTAKE
+// #define TURNTABLE_STEPS_INTAKE 0
+// #endif
+// #ifndef TURNTABLE_STEPS_TRASH
+// #define TURNTABLE_STEPS_TRASH 500
+// #endif
+// #ifndef TURNTABLE_STEPS_EJECT
+// #define TURNTABLE_STEPS_EJECT 1000
+// #endif
+// #ifndef TURNTABLE_MOTION_TIMEOUT_MS
+// #define TURNTABLE_MOTION_TIMEOUT_MS 8000
+// #endif
 
 /* ================================================================== */
 /*  Flap (DRV8263 primary instance) thresholds                         */
@@ -418,23 +418,28 @@
 
 /* ================================================================== */
 /*  DRV8434S device index assignments within the daisy chain           */
-/*  Increment DRV8434S_N_DEVICES when adding new devices.             */
+/*  Chain length = DRV8434S_N_DEVICES (4).                             */
+/*  Order (SPI daisy-chain position):                                   */
+/*    0 = agitator                                                      */
+/*    1 = rotational plenum (MSG_ARM_MOVE)                              */
+/*    2 = linear plenum (MSG_RACK_MOVE)                                 */
+/*    3 = hotwire traverse (MSG_HOTWIRE_TRAVERSE)                       */
 /* ================================================================== */
 
-#ifndef STEPPER_DEV_ROT_ARM
-#define STEPPER_DEV_ROT_ARM 0 /* Rotary suction arm (MSG_ARM_MOVE) */
-#endif
-// #ifndef STEPPER_DEV_LIN_ARM
-// #define STEPPER_DEV_LIN_ARM 1 /* Linear vacuum arm (MSG_RACK_MOVE) */
-// #endif
-// #ifndef STEPPER_DEV_TURNTABLE
-// #define STEPPER_DEV_TURNTABLE 1 /* Turntable / platform */
-// #endif
-/* Uncomment each entry and bump DRV8434S_N_DEVICES when wired: */
 #ifndef STEPPER_DEV_AGITATOR
-#define STEPPER_DEV_AGITATOR 2 /* Agitator eccentric arm */
+#define STEPPER_DEV_AGITATOR 0 /* Agitator eccentric arm */
 #endif
-#define STEPPER_DEV_HW_CARRIAGE 1 /* Hot wire carriage traverse */
+#ifndef STEPPER_DEV_ROT_ARM
+#define STEPPER_DEV_ROT_ARM 1 /* Rotational plenum (MSG_ARM_MOVE) */
+#endif
+#ifndef STEPPER_DEV_LIN_ARM
+#define STEPPER_DEV_LIN_ARM 2 /* Linear plenum (MSG_RACK_MOVE) */
+#endif
+#ifndef STEPPER_DEV_HW_CARRIAGE
+#define STEPPER_DEV_HW_CARRIAGE 3 /* Hotwire traverse */
+#endif
+/* Not on the daisy chain (define and bump DRV8434S_N_DEVICES if wired): */
+// #define STEPPER_DEV_TURNTABLE   4  /* Turntable / platform */
 // #define STEPPER_DEV_INDEXER     5  /* Bag depth/eject rack (indexer) */
 
 /* Default step delay used by the high-level stepper handlers (µs per step). */
@@ -682,7 +687,7 @@
 #endif
 
 /* ================================================================== */
-/*  Agitator stepper (DRV8434S, STEPPER_DEV_AGITATOR when wired)      */
+/*  Agitator stepper (DRV8434S, STEPPER_DEV_AGITATOR, device 0)       */
 /* ================================================================== */
 
 #ifndef SPAWN_MAX_AGITATE_RETRIES
@@ -690,7 +695,7 @@
   5 /* max agitation attempts before SPAWN_STATUS_BAG_EMPTY */
 #endif
 #ifndef AGITATOR_KNEAD_STEPS
-#define AGITATOR_KNEAD_STEPS 400 /* steps per forward (or reverse) stroke */
+#define AGITATOR_KNEAD_STEPS -400 /* steps per forward (or reverse) stroke */
 #endif
 #ifndef AGITATOR_N_CYCLES
 #define AGITATOR_N_CYCLES                                                      \
@@ -713,7 +718,7 @@
 /* Maximum steps toward the mechanical hard-stop during homing search.
  * Positive = forward; adjust sign to match the physical home direction. */
 #ifndef AGITATOR_HOME_SEARCH_STEPS
-#define AGITATOR_HOME_SEARCH_STEPS -500
+#define AGITATOR_HOME_SEARCH_STEPS 500
 #endif
 /* Stall-torque threshold used during homing.  Lower = less sensitive. */
 #ifndef AGITATOR_HOME_TORQUE_LIMIT
@@ -729,15 +734,15 @@
 #endif
 
 /* ================================================================== */
-/*  Hot wire carriage traverse (DRV8434S, STEPPER_DEV_HW_CARRIAGE)    */
+/*  Hotwire traverse stepper (DRV8434S, STEPPER_DEV_HW_CARRIAGE, dev 3)*/
 /* ================================================================== */
 
 #ifndef HOTWIRE_TRAVERSE_STEPS
 #define HOTWIRE_TRAVERSE_STEPS                                                 \
-  -20000 /* full-step traversal distance (no microstep) */
+  20000 /* full-step traversal distance (no microstep) */
 #endif
 #ifndef HOTWIRE_TRAVERSE_RETRACE_STEPS
-#define HOTWIRE_TRAVERSE_RETRACE_STEPS 20000 /* full-step return distance */
+#define HOTWIRE_TRAVERSE_RETRACE_STEPS -20000 /* full-step return distance */
 #endif
 #ifndef HOTWIRE_TRAVERSE_STEP_DELAY_US
 #define HOTWIRE_TRAVERSE_STEP_DELAY_US 1000u /* µs per step; */
@@ -756,11 +761,11 @@
 #endif
 #ifndef HOTWIRE_HOME_SEARCH_STEPS
 #define HOTWIRE_HOME_SEARCH_STEPS                                              \
-  50000 /* min search steps toward hard stop                                   \
-         */
+  -50000 /* min search steps toward hard stop                                  \
+          */
 #endif
 #ifndef HOTWIRE_HOME_BACKOFF_STEPS
-#define HOTWIRE_HOME_BACKOFF_STEPS 100 /* release after hitting hard stop */
+#define HOTWIRE_HOME_BACKOFF_STEPS -100 /* release after hitting hard stop */
 #endif
 #ifndef HOTWIRE_HOME_TIMEOUT_MS
 #define HOTWIRE_HOME_TIMEOUT_MS                                                \

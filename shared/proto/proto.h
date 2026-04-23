@@ -15,7 +15,7 @@ extern "C" {
  * so the UART payload default cannot drift between projects.
  * 100u is calibrated to avoid false stall trips seen with the previous
  * 300u default during routine moves. */
-#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 100u
+#define PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT 180u
 
 /*
  * Wire format endianness is little-endian for all multi-byte fields.
@@ -28,9 +28,6 @@ typedef enum {
 
   MSG_MOTOR_DRV8263_START_MON = 0x10,
   MSG_MOTOR_DRV8263_STOP_MON = 0x11,
-
-  MSG_MOTOR_STEPPER_ENABLE = 0x20,
-  MSG_MOTOR_STEPPER_STEPJOB = 0x21,
 
   MSG_HX711_TARE = 0x28,
   MSG_HX711_MEASURE = 0x29,
@@ -112,17 +109,6 @@ typedef struct __attribute__((packed)) {
   uint8_t unit;     // mass_unit_t enum value
   uint8_t _rsvd[3]; // Padding for alignment
 } pl_hx711_mass_t;
-
-typedef struct __attribute__((packed)) {
-  uint8_t enable;
-} pl_stepper_enable_t;
-
-typedef struct __attribute__((packed)) {
-  uint8_t dir;
-  uint32_t steps;
-  uint32_t step_delay_us;
-  uint16_t torque_limit; /* soft torque limit (0 = disabled) */
-} pl_stepper_stepjob_t;
 
 typedef struct __attribute__((packed)) {
   uint8_t code;

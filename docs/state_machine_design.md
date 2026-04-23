@@ -320,9 +320,9 @@ stateDiagram-v2
 
 ---
 
-### 3.2 Arm Stepper State Machine
+### 3.2 Rotational Plenum (Arm) Stepper State Machine
 
-**Hardware:** DRV8434S device index 0, daisy-chain on SPI0.  
+**Hardware:** DRV8434S device index 1 (rotational plenum), daisy-chain on SPI1.  
 **Trigger messages:** `MSG_ARM_MOVE` (0x42), `MSG_ARM_HOME` (0x4D).  
 **Position tracking:** `s_arm_pos_steps` — Pico computes delta from current to target and starts a DRV8434S motion job. Boot still initializes `s_arm_pos_steps = 0` for backward compatibility, but the trusted physical reference is established only by `MSG_ARM_HOME`. Named arm positions are measured from the physical home hard-stop reached by homing.
 
@@ -381,9 +381,9 @@ stateDiagram-v2
 
 ---
 
-### 3.3 Rack Stepper State Machine
+### 3.3 Linear Plenum (Rack) Stepper State Machine
 
-**Hardware:** DRV8434S device index 1, daisy-chain on SPI0.  
+**Hardware:** DRV8434S device index 2 (linear plenum), daisy-chain on SPI1.  
 **Trigger message:** `MSG_RACK_MOVE` (0x43).  
 **Position tracking:** `s_rack_pos_steps` — zeroed when `RACK_POS_HOME` completes.  
 **Homing:** Triggered by `MSG_RACK_MOVE(RACK_POS_HOME)`. Drives the rack toward the physical endstop at reduced speed until stall detection fires; the stall position is treated as the zero reference and `s_rack_pos_steps` is cleared. This is analogous to `MSG_ARM_HOME` for the rotary arm, except the rack has no separate home command — homing is simply one of the named positions. Unlike the arm, there is no backoff after the home stall: the rack sits against its endstop at step 0.
@@ -440,7 +440,7 @@ stateDiagram-v2
 
 ### 3.4 Turntable Stepper State Machine
 
-**Hardware:** DRV8434S device index 2, daisy-chain on SPI0.  
+**Hardware:** DRV8434S (turntable — not currently wired on the daisy chain).  
 **Trigger messages:** `MSG_TURNTABLE_HOME` (0x45), `MSG_TURNTABLE_GOTO` (0x44).  
 **Position tracking:** `s_turntable_pos_steps` — zeroed after homing.  
 **Boot requirement:** The turntable **must** receive `MSG_TURNTABLE_HOME` before any `MSG_TURNTABLE_GOTO` is valid. Commands received in `UNCALIBRATED` state are NACKed.
@@ -1290,9 +1290,7 @@ static void ui_ops_update_vacuum(uint8_t status, uint16_t rpm)
 | [`lcd_uext_ili9341/main/flap.c`](lcd_uext_ili9341/main/flap.c) | `FLAP_CMD_MIN_INTERVAL_MS` rate-limiting | **Remove** — no longer needed; Pico SM is stateful. |
 | [`lcd_uext_ili9341/main/ui_screens.c`](lcd_uext_ili9341/main/ui_screens.c) | `ui_show_stepper()` and all `on_step_*` callbacks | **Remove.** Replaced by `ui_show_operations()`. |
 | [`lcd_uext_ili9341/main/ui_screens.c`](lcd_uext_ili9341/main/ui_screens.c) | `s_step_dev_ind[]`, `s_step_lbl_steps`, `s_step_enabled`, `s_step_count` | **Remove** — stepper test state. |
-| [`lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c`](lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c) | `motor_stepper_enable(bool en)` → returns `ESP_ERR_NOT_SUPPORTED` | **Replace** with real implementation calling `MSG_MOTOR_STEPPER_ENABLE`, or remove if superseded by high-level `motor_arm_move / motor_rack_move / motor_turntable_goto`. |
-| [`lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c`](lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c) | `motor_stepper_step()` → returns `ESP_ERR_NOT_SUPPORTED` | **Replace** or remove; high-level positional commands supersede raw step jobs for UI use. |
-| `pico_fw/src/uart_server.c` `handle_stepper_stepjob()` | Hardcodes device 0 | **Keep for low-level debug**; high-level handlers call it internally per device index. |
+| `shared/proto/proto.h` | `MSG_MOTOR_STEPPER_ENABLE` / `MSG_MOTOR_STEPPER_STEPJOB` and their payload structs | **Removed** — raw stepper RPCs are superseded by the high-level per-device handlers (`MSG_ARM_MOVE`, `MSG_RACK_MOVE`, `MSG_HOTWIRE_TRAVERSE`, `MSG_AGITATE`). |
 | [`lcd_uext_ili9341/main/ui_screens.c`](lcd_uext_ili9341/main/ui_screens.c) `on_stepper_page()` | Navigates to stepper test | **Rename to `on_ops_page()`**, target `ui_show_operations()`. |
 
 ### 10.2 Kept Unchanged
@@ -1301,7 +1299,6 @@ static void ui_ops_update_vacuum(uint8_t status, uint16_t rpm)
 |------|--------|--------|
 | [`lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c`](lcd_uext_ili9341/components/motor_hal/motor_hal_pico.c) | `motor_linact_start_monitor_dir()`, `motor_linact_stop_monitor()` | Used internally by `motor_flap_open/close()`; low-level DRV8263 wrappers. |
 | [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_drv8263_start()`, `handle_drv8263_stop()` | Existing MSG_MOTOR_DRV8263_START_MON / STOP_MON handlers | Kept — high-level flap handler calls `drv8263_set_motor_control()` directly; raw commands remain for debug. |
-| [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_stepper_enable()`, `handle_stepper_stepjob()` | Existing MSG_MOTOR_STEPPER_ENABLE / STEPJOB handlers | Kept — still useful for low-level debug and called by new high-level handlers. |
 | [`pico_fw/src/uart_server.c`](pico_fw/src/uart_server.c) `handle_hx711_tare()`, `handle_hx711_read()` | HX711 handlers | Fully unchanged. |
 | [`lcd_uext_ili9341/main/flap.h`](lcd_uext_ili9341/main/flap.h) / `flap_init()` | Init resets linact to stop on boot | Kept — `flap_init()` still useful for boot-time safety; `flap_set_opening()` is the only symbol removed. |
 | [`shared/proto/proto.h`](shared/proto/proto.h) | All existing `msg_type_t` values, `proto_hdr_t`, all existing payload structs | Fully unchanged; new symbols are **additive only**. |

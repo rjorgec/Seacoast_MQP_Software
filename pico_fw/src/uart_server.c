@@ -93,6 +93,17 @@ static uint32_t s_spi_watchdog_last_ms = 0u; /* timestamp of last idle SPI healt
 static uart_inst_t *s_uart;
 static bool s_uart_ready;
 
+/* ── Boot-phase handshake state ────────────────────────────────────────────── *
+ * The Pico runs init in two stages: early (Phase 1: UART + PING handler only,
+ * runs before 12 V is applied) and late (Phase 3: motor drivers, load cell,
+ * and stepper SPI chain, runs after the ESP closes the relay). The first
+ * PING ACKed by this firmware arms a short settle timer; when it expires
+ * from uart_server_poll() the late init runs exactly once. */
+#define PHASE3_RELAY_SETTLE_MS 300u
+static bool s_phase3_armed = false;
+static bool s_phase3_done = false;
+static uint32_t s_phase3_due_ms = 0u;
+
 /* ── HX711 load cell ───────────────────────────────────────────────────────── */
 
 static hx711_t s_hx711;
@@ -3085,98 +3096,6 @@ static void arm_seal_monitor_tick(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
-/*  Existing low-level stepper handlers (unchanged)                            */
-/* ═══════════════════════════════════════════════════════════════════════════ */
-
-static void handle_stepper_enable(uint16_t seq, const uint8_t *payload, uint16_t len)
-{
-    if (len != (uint16_t)sizeof(pl_stepper_enable_t))
-    {
-        send_nack(seq, NACK_BAD_LEN);
-        return;
-    }
-
-    if (!s_stepper_ready)
-    {
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
-
-    if (arm_stepper_control_locked())
-    {
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
-
-    const pl_stepper_enable_t *p = (const pl_stepper_enable_t *)payload;
-    bool ok = true;
-    for (uint8_t k = 0; k < s_stepper_chain.cfg.n_devices && ok; ++k)
-    {
-        if (p->enable)
-            ok = drv8434s_chain_enable(&s_stepper_chain, k, NULL);
-        else
-            ok = drv8434s_chain_disable(&s_stepper_chain, k, NULL);
-    }
-    #ifdef STEP_DEBUG
-    printf("Stepper: %s all → %s\n", p->enable ? "enable" : "disable",
-           ok ? "ok" : "fail");
-    #endif
-
-    ok ? send_ack(seq) : send_nack(seq, NACK_UNKNOWN);
-}
-
-static void handle_stepper_stepjob(uint16_t seq, const uint8_t *payload, uint16_t len)
-{
-    const uint16_t expected_new = (uint16_t)sizeof(pl_stepper_stepjob_t);
-    const uint16_t expected_old = (uint16_t)(sizeof(pl_stepper_stepjob_t) - sizeof(uint16_t));
-
-    if (len != expected_new && len != expected_old)
-    {
-        send_nack(seq, NACK_BAD_LEN);
-        return;
-    }
-
-    if (!s_stepper_ready)
-    {
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
-
-    if (arm_stepper_control_locked())
-    {
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
-
-    const pl_stepper_stepjob_t *p = (const pl_stepper_stepjob_t *)payload;
-    uint16_t torque_limit = 0u;
-    if (len == expected_new)
-    {
-        torque_limit = p->torque_limit;
-    }
-
-    int32_t target = (p->dir == 0) ? (int32_t)p->steps : -(int32_t)p->steps;
-
-    #ifdef STEP_DEBUG
-        printf("Stepper: %lu steps dir=%u delay=%lu us torque_limit=%u\n",
-           (unsigned long)p->steps,
-           (unsigned)p->dir,
-           (unsigned long)p->step_delay_us,
-           (unsigned)torque_limit);
-    #endif
-    /* Start motion on device 0 (non-blocking) */
-    if (!start_stepper_job(0u, target, torque_limit,
-                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
-                           p->step_delay_us))
-    {
-        send_nack(seq, NACK_UNKNOWN);
-        return;
-    }
-
-    send_ack(seq);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════ */
 /*  Existing low-level DRV8263 handlers (unchanged)                            */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -3905,9 +3824,9 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
     (void)start_stepper_motion((uint8_t)STEPPER_DEV_LIN_ARM, target, &s_rack_pending,
                                SUBSYS_RACK, (uint32_t)RACK_MOTION_TIMEOUT_MS, seq);
 #else
-    /* No linear arm / rack device in the current chain configuration.
+    /* No linear plenum device in the current chain configuration.
      * Define STEPPER_DEV_LIN_ARM in board_pins.h and bump DRV8434S_N_DEVICES
-     * when the linear arm stepper is wired. */
+     * when the linear plenum stepper is wired. */
     printf("Rack Move: STEPPER_DEV_LIN_ARM not defined (device not wired)\n");
     send_nack(seq, NACK_UNKNOWN);
     (void)target;
@@ -3915,7 +3834,7 @@ static void handle_rack_move(uint16_t seq, const uint8_t *payload, uint16_t len)
 }
 
 /**
- * @brief MSG_TURNTABLE_GOTO (0x44) — move turntable stepper (device 2) to
+ * @brief MSG_TURNTABLE_GOTO (0x44) — move turntable stepper (not wired) to
  *        named angular position.  NACKs if turntable is not yet homed.
  */
 static void handle_turntable_goto(uint16_t seq, const uint8_t *payload, uint16_t len)
@@ -4105,8 +4024,8 @@ static void handle_vacuum_set(uint16_t seq, const uint8_t *payload, uint16_t len
  * @brief MSG_VACUUM2_SET (0x48) — enable or disable the second vacuum pump.
  *
  * DRV8263 independent H-bridge mode: IN2 (ctrl_b_pin) drives vacuum pump 2.
- * This is completely independent of IN1 (hot wire) — both can run simultaneously.
- * No mutual exclusion is required or applied.
+ * Vacuum 2 uses active-high trigger semantics: IN2 HIGH enables pump 2 and
+ * IN2 LOW disables it.
  */
 static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
@@ -4126,26 +4045,24 @@ static void handle_vacuum2_set(uint16_t seq, const uint8_t *payload, uint16_t le
 
     if (pl->enable)
     {
-        /* Drive IN2 independently at full duty — IN1 (hot wire) is unaffected. */
         (void)drv8263_set_in2(&s_drv8263_hotwire, 4095u);
-        printf("Vacuum2 ON (DRV8263 IN2, independent)\n");
+        printf("Vacuum2 ON (IN2=HIGH)\n");
     }
     else
     {
         (void)drv8263_set_in2(&s_drv8263_hotwire, 0u);
-        printf("Vacuum2 OFF\n");
+        printf("Vacuum2 OFF (IN2=LOW)\n");
     }
 
     send_ack(seq);
 }
 
 /**
- * @brief MSG_HOTWIRE_TRAVERSE (0x4B) — move the hot wire carriage stepper.
+ * @brief MSG_HOTWIRE_TRAVERSE (0x4B) — move the hotwire traverse stepper.
  *
  * Direction 0 = cut (traverse forward through spawn bag tip).
  * Direction 1 = return (retract to home position and zero position on success).
- * Uses DRV8434S STEPPER_DEV_HW_CARRIAGE (device 4 — not wired in current HW).
- * When device 4 is not in the chain, this handler logs and NACKs.
+ * Uses DRV8434S STEPPER_DEV_HW_CARRIAGE (device 3 on the daisy chain).
  */
 static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
@@ -4292,7 +4209,7 @@ static void handle_hotwire_traverse(uint16_t seq, const uint8_t *payload, uint16
  * INDEXER_POS_OPEN   — retracted (bag can slide in).
  * INDEXER_POS_CENTER — extended to bag-centering position.
  * INDEXER_POS_EJECT  — fully extended to push bag out.
- * Uses DRV8434S STEPPER_DEV_INDEXER (device 5 — not wired in current HW).
+ * Uses DRV8434S STEPPER_DEV_INDEXER (not wired in current HW).
  */
 static void handle_indexer_move(uint16_t seq, const uint8_t *payload, uint16_t len)
 {
@@ -4595,6 +4512,15 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
     case MSG_PING:
         printf("Ping\n");
         send_ack(hdr.seq);
+        if (!s_phase3_done && !s_phase3_armed)
+        {
+            /* ESP asserts the 12 V relay as soon as it sees this ACK.
+             * Arm the Phase 3 timer; uart_server_poll() runs the late init
+             * after the relay has had time to settle. */
+            s_phase3_armed = true;
+            s_phase3_due_ms = to_ms_since_boot(get_absolute_time()) +
+                              PHASE3_RELAY_SETTLE_MS;
+        }
         break;
 
     case MSG_MOTOR_DRV8263_START_MON:
@@ -4605,16 +4531,6 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
     case MSG_MOTOR_DRV8263_STOP_MON:
         printf("DRV8263 Stop Mon\n");
         handle_drv8263_stop(hdr.seq);
-        break;
-
-    case MSG_MOTOR_STEPPER_ENABLE:
-        printf("Stepper Enable\n");
-        handle_stepper_enable(hdr.seq, payload, hdr.len);
-        break;
-
-    case MSG_MOTOR_STEPPER_STEPJOB:
-        printf("Stepper StepJob\n");
-        handle_stepper_stepjob(hdr.seq, payload, hdr.len);
         break;
 
     case MSG_HX711_TARE:
@@ -4778,6 +4694,8 @@ static void init_drv8263_flap2(void)
         .startup_blanking_ms = (uint32_t)DRV8263_DEFAULT_STARTUP_BLANKING_MS,
         .current_cb = NULL,
         .delay_ms = NULL,
+        .initial_duty_a = 0u,
+        .initial_duty_b = 0u,
     };
 
     if (!drv8263_init(&s_drv8263_flap2, &cfg))
@@ -4815,6 +4733,8 @@ static void init_drv8263(void)
         .startup_blanking_ms = DRV8263_DEFAULT_STARTUP_BLANKING_MS,
         .current_cb = NULL,
         .delay_ms = NULL,
+        .initial_duty_a = 0u,
+        .initial_duty_b = 0u,
     };
 
     if (!drv8263_init(&s_drv8263, &cfg))
@@ -4852,6 +4772,11 @@ static void init_drv8263_hotwire(void)
         .startup_blanking_ms = (uint32_t)DRV8263_DEFAULT_STARTUP_BLANKING_MS,
         .current_cb = NULL,
         .delay_ms = NULL,
+        /* Hot-wire instance: IN1 (hot wire) LOW = off; IN2 (pump 2, OUT2
+         * ground-side wired) HIGH = pump off. Matches the GPIO level the
+         * Pico set in Phase 1, so the handover is glitch-free. */
+        .initial_duty_a = 0u,
+        .initial_duty_b = 0u,
     };
 
     if (!drv8263_init(&s_drv8263_hotwire, &cfg))
@@ -5132,7 +5057,41 @@ static void init_vacuum(void)
 /*  Public API                                                                  */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
-void uart_server_init(void)
+/* Drive a single GPIO as a push-pull output at the given level.
+ * Used by uart_server_phase1_pinmodes() only. */
+static inline void phase1_gpio_out(uint pin, bool level)
+{
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_put(pin, level);
+}
+
+void uart_server_phase1_pinmodes(void)
+{
+    /* Hot-wire DRV8263: IN1 LOW = hot wire off; IN2 LOW = pump 2 off.
+     * Keep this separate Phase 1 setup so the line is defined before
+     * the Phase 3 driver init runs after relay power-up. */
+    phase1_gpio_out((uint)HOTWIRE_PIN_IN1, false);
+    phase1_gpio_out((uint)HOTWIRE_PIN_IN2, false);
+
+    /* Flap 1 DRV8263 inputs — LOW/LOW = coast (safe during 12 V ramp). */
+    phase1_gpio_out((uint)DRV8263_CTRL_A_GPIO, false);
+    phase1_gpio_out((uint)DRV8263_CTRL_B_GPIO, false);
+
+    /* Flap 2 DRV8263 inputs — LOW/LOW = coast. */
+    phase1_gpio_out((uint)FLAP2_CTRL_A_PIN, false);
+    phase1_gpio_out((uint)FLAP2_CTRL_B_PIN, false);
+
+    /* Vacuum pump 1 trigger (standard high-side drive) — LOW = pump off. */
+    phase1_gpio_out((uint)VACUUM_TRIGGER_PIN, false);
+
+    /* DRV8434S SPI chip-select idles HIGH. Setting it now keeps the chain
+     * deselected from the moment 12 V comes up, before init_drv8434s_chain()
+     * reconfigures the pin as part of spi_init() in Phase 3. */
+    phase1_gpio_out((uint)DRV8434S_CS_GPIO, true);
+}
+
+void uart_server_init_early(void)
 {
     memset(&s_rx_ring, 0, sizeof(s_rx_ring));
     s_frame_len = 0u;
@@ -5168,6 +5127,10 @@ void uart_server_init(void)
     s_step_timer_active = false;
     s_step_timer_period_us = 0u;
 
+    s_phase3_armed = false;
+    s_phase3_done = false;
+    s_phase3_due_ms = 0u;
+
     if (PICO_UART_TX_GPIO < 0 || PICO_UART_RX_GPIO < 0)
     {
         printf("uart_server: UART pins unset in board_pins.h; UART disabled\n");
@@ -5178,21 +5141,25 @@ void uart_server_init(void)
         gpio_set_function((uint)PICO_UART_TX_GPIO, GPIO_FUNC_UART);
         gpio_set_function((uint)PICO_UART_RX_GPIO, GPIO_FUNC_UART);
         s_uart_ready = true;
-
         printf("uart_server: UART%u up @ %u baud (TX=%d RX=%d)\n",
                (unsigned)PICO_UART_ID,
                (unsigned)PICO_UART_BAUD,
                PICO_UART_TX_GPIO,
                PICO_UART_RX_GPIO);
     }
+}
 
-    /* Existing subsystems */
+/* Runs exactly once, after the ESP has closed the 12 V relay (detected via
+ * the first PING ACK plus PHASE3_RELAY_SETTLE_MS). Brings up every subsystem
+ * whose silicon is only powered once the relay is closed. */
+static void uart_server_init_late(void)
+{
+    printf("uart_server: Phase 3 — initialising motor drivers and HX711\n");
+
     init_drv8263();
     init_drv8263_flap2();
     init_hx711();
     init_drv8434s_chain();
-
-    /* New subsystems */
     init_drv8263_hotwire();
     init_vacuum();
 }
@@ -5202,6 +5169,21 @@ void uart_server_poll(void)
     if (!s_uart_ready)
     {
         return;
+    }
+
+    /* ── Phase 3 deferred init ─────────────────────────────────────────
+     * The first PING received after boot arms the relay-settle timer.
+     * When it expires we run motor-driver / HX711 / SPI chain init exactly
+     * once. Until then the subsystem _ready flags stay false and the
+     * corresponding MSG_* handlers NACK. */
+    if (s_phase3_armed && !s_phase3_done)
+    {
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        if ((int32_t)(now_ms - s_phase3_due_ms) >= 0)
+        {
+            uart_server_init_late();
+            s_phase3_done = true;
+        }
     }
 
     /* ── Run state-machine ticks before processing incoming bytes ── */

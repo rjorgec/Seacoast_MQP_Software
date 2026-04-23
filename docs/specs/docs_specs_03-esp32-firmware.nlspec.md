@@ -1,7 +1,7 @@
 # NLSpec: ESP32-C6 Firmware
 
 ## Version
-0.1.2
+0.1.3
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -47,9 +47,35 @@ ESP-IDF FreeRTOS with the following tasks:
 
 ---
 
-## 2. pico_link Transport Component
+## 2. Power Rail & Startup Sequence
 
-### 2.1 Initialization
+### 2.1 12 V Motor Driver Power Control (GPIO10 Relay)
+
+GPIO10 is configured as a push-pull digital output, driven LOW at reset. It drives the coil of a normally-open relay whose contact connects the 12 V supply to all motor driver ICs (DRV8424s and DRV8263). The drivers are unpowered until the ESP asserts GPIO10 HIGH.
+
+| GPIO | Direction | Default | Effect when HIGH |
+|------|-----------|---------|-----------------|
+| 10 | Output | LOW (relay open) | Relay closes → 12 V applied to DRV8424s + DRV8263 |
+
+The ESP asserts GPIO10 only after LVGL, the display, and the pico_link transport are fully initialised. This guarantees the Pico has already configured its GPIO pin modes and set safe output defaults before the motor drivers are powered.
+
+### 2.2 Startup Sequence
+
+The three-phase power-on order prevents any motor driver input from floating or glitching to an active state during the 12 V ramp:
+
+| Phase | Actor | Action |
+|-------|-------|--------|
+| 1 | Pico | Configures all GPIO pin modes; drives IN2 (vacuum pump 2) LOW to hold pump off before 12 V arrives |
+| 2 | ESP32 | Initialises pico_link transport, display (ILI9341 + NS2009), and LVGL UI; then asserts GPIO10 HIGH to close the relay and apply 12 V to motor drivers |
+| 3 | Pico | Detects controller power-on and performs DRV8424 / DRV8263 SPI chain initialisation |
+
+Phase 1 must complete before Phase 2 asserts GPIO10. In practice this is guaranteed by the Pico's boot being faster than the ESP's full UI init; no explicit handshake is required, but the design relies on this ordering.
+
+---
+
+## 3. pico_link Transport Component
+
+### 3.1 Initialization
 
 ```c
 pico_link_cfg_t link = {
@@ -62,14 +88,14 @@ pico_link_cfg_t link = {
 ESP_ERROR_CHECK(pico_link_init(&link));
 ```
 
-### 2.2 Send API
+### 3.2 Send API
 
 | Function | Behavior |
 |----------|----------|
 | `pico_link_send(type, payload, len, NULL)` | Fire-and-forget: encode and transmit, no ACK wait |
 | `pico_link_send_rpc(type, payload, len, timeout_ms, &nack_code)` | Blocking RPC: send, wait for ACK/NACK up to `timeout_ms`. Returns `ESP_OK` on ACK, `ESP_ERR_*` on NACK or timeout. `nack_code` is populated on NACK. |
 
-### 2.3 Receive Callback
+### 3.3 Receive Callback
 
 `pico_rx_cb(type, seq, payload, len)` is called from the pico_link RX task for every decoded frame from the Pico. The callback in `app_main.c` dispatches based on `type`:
 
@@ -83,7 +109,7 @@ ESP_ERROR_CHECK(pico_link_init(&link));
 
 ---
 
-## 3. motor_hal Component
+## 4. motor_hal Component
 
 The `motor_hal` component provides ESP-side convenience functions that compose `pico_link_send()` calls with the correct message types and payloads. These are the functions UI button callbacks and the control task call.
 
@@ -105,10 +131,6 @@ The `motor_hal` component provides ESP-side convenience functions that compose `
 | `motor_agitate_home(void)` | `MSG_AGITATE` | `pl_agitate_t{flags=AGITATE_FLAG_DO_HOME}` (home then knead) |
 | `motor_linact_start_monitor_dir(dir, speed, low, high, interval)` | `MSG_MOTOR_DRV8263_START_MON` | `pl_drv8263_start_mon_t` (legacy) |
 | `motor_linact_stop_monitor()` | `MSG_MOTOR_DRV8263_STOP_MON` | none (legacy) |
-| `motor_stepper_enable(bool en)` | `MSG_MOTOR_STEPPER_ENABLE` | `pl_stepper_enable_t{enable}` (legacy/raw stepper API) |
-| `motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_delay_us)` | `MSG_MOTOR_STEPPER_STEPJOB` | `pl_stepper_stepjob_t{dir,steps,step_delay_us,torque_limit}` (legacy/raw stepper API) |
-
-For `motor_stepper_step()`, the fallback `torque_limit` value is sourced from `PROTO_STEPPER_SOFT_TORQUE_LIMIT_DEFAULT` in the shared protocol header (via `STEPPER_SOFT_TORQUE_LIMIT`), keeping ESP and Pico default behavior aligned.
 
 `motor_arm_home()` is explicit/operator-invoked only. Boot still allows arm moves before the first home for backward compatibility, but after an arm `MOTION_STALLED`, `MOTION_TIMEOUT`, `MOTION_FAULT`, or `MOTION_SPI_FAULT`, later `motor_arm_move()` requests are NACKed until `motor_arm_home()` succeeds.
 
@@ -116,9 +138,9 @@ All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_se
 
 ---
 
-## 4. UI Screens (LVGL)
+## 5. UI Screens (LVGL)
 
-### 4.1 Display Hardware
+### 5.1 Display Hardware
 
 | Parameter | Value |
 |-----------|-------|
@@ -128,7 +150,7 @@ All `motor_*` functions return `esp_err_t`. They are non-blocking (`pico_link_se
 | Color format | RGB565 |
 | Touch | NS2009 resistive, I2C (SDA=GP6, SCL=GP7, addr=0x48) |
 
-### 4.2 Screen Map
+### 5.2 Screen Map
 
 ```
 Home Screen
@@ -138,7 +160,7 @@ Home Screen
 └── Scale Screen                (HX711 weight readout + tare)
 ```
 
-### 4.3 Home Screen (`ui_show_home()`)
+### 5.3 Home Screen (`ui_show_home()`)
 
 **Layout:** Status label at top, four navigation buttons (300 × 46 px each, 4 px gap).
 
@@ -150,7 +172,7 @@ Home Screen
 | Button | "Operations" | `on_ops_page()` | Navigate to Operations screen (blocked while sequence active) |
 | Button | "Dosing" | `on_dose()` | Navigate to Dosing screen (blocked while sequence active) |
 
-### 4.4 Operations Screen (`ui_show_operations()`)
+### 5.4 Operations Screen (`ui_show_operations()`)
 
 **Layout:** 320 × 240, landscape, 10px padding. Title "Operations" top-left, "Home" nav button top-right. Rows of actuator buttons, status bar at bottom.
 
@@ -175,7 +197,7 @@ Home Screen
 
 **Status feedback:** When `MSG_MOTION_DONE` is received, `ui_ops_on_motion_done()` updates the status label with subsystem name and result (e.g., "ARM: OK" or "FLAPS: TIMEOUT"). When `MSG_VACUUM_STATUS` is received, `ui_ops_on_vacuum_status()` updates the vacuum status label (e.g., "Vacuum: OK 1200 RPM" or "Vacuum: BLOCKED 350 RPM"). If the arm faults or stalls during a normal move, the operator must use the `"Arm Home"` button before later arm-position buttons will be accepted again.
 
-### 4.5 Automated Functions Screen (`ui_show_auto()`)
+### 5.5 Automated Functions Screen (`ui_show_auto()`)
 
 **Purpose:** Supervise the full inoculation sequence via `sys_sequence.c`. Disabled while sequence is not active.
 
@@ -189,7 +211,7 @@ Home Screen
 
 > **Abort routing note:** `on_seq_abort()` sends `SYS_CMD_ABORT` to the sequence task queue via `sys_sequence_send_cmd()`. The sequence task's main loop checks for this command at the top of every iteration and calls `safe_stop_all()` before transitioning back to `SYS_IDLE`, immediately re-enabling manual controls. (An earlier implementation incorrectly sent `CTRL_CMD_STOP` to the legacy control task queue, which had no effect on the sequence state machine.)
 
-#### 4.5.1 `sys_sequence` State Table (`sys_state_t`)
+#### 5.5.1 `sys_sequence` State Table (`sys_state_t`)
 
 | Value | State | Description |
 |-------|-------|-------------|
@@ -210,7 +232,7 @@ Home Screen
 | 14 | `SYS_ERROR` | Safe-stop all actuators; operator intervention required |
 | 15 | `SYS_ESTOP` | Emergency stop |
 
-### 4.6 Dosing Screen (`ui_show_dosing()`)
+### 5.6 Dosing Screen (`ui_show_dosing()`)
 
 **Purpose:** Isolated manual spawn dispensing for testing purposes (LEGACY path — see `dosing.h`). Accessible from Home Screen; blocked while a sequence is active.
 
@@ -234,9 +256,9 @@ Home Screen
 
 ---
 
-## 5. Control Task
+## 6. Control Task
 
-### 5.1 Command Queue
+### 6.1 Command Queue
 
 The control task receives `ctrl_cmd_t` structs via a FreeRTOS queue (depth: 8).
 
@@ -249,7 +271,7 @@ The control task receives `ctrl_cmd_t` structs via a FreeRTOS queue (depth: 8).
 | Clean | `CTRL_CMD_CLEAN` | Future — not implemented |
 | Home | `CTRL_CMD_HOME` | Future — not implemented |
 
-### 5.2 ESP-Side Dosing (Legacy)
+### 6.2 ESP-Side Dosing (Legacy)
 
 The `dosing.c` module implements an ESP-side dosing state machine that reads the load cell via `loadcell_read_g()` and commands flap opening via `flap_set_opening()`. This is a **legacy path** used when the control task's START command is invoked. The Pico-side `MSG_DISPENSE_SPAWN` path (triggered from the Dosing screen) is the **preferred path** for new development.
 
@@ -272,7 +294,7 @@ The `dosing.c` module implements an ESP-side dosing state machine that reads the
 
 ---
 
-## 6. Async Status Handling
+## 7. Async Status Handling
 
 The ESP32 receives unsolicited messages from the Pico that must be routed to the correct UI handler:
 
@@ -284,7 +306,7 @@ The ESP32 receives unsolicited messages from the Pico that must be routed to the
 | `MSG_SPAWN_STATUS` | Extract `pl_spawn_status_t`, call `ui_dosing_on_spawn_status()` |
 | `MSG_HX711_MEASURE` ACK | Extract `pl_hx711_mass_t`, update weight label via `ui_screens_pico_rx_handler()` |
 
-## 6.1 Bag-Opening Recovery on Arm Seal Loss
+## 7.1 Bag-Opening Recovery on Arm Seal Loss
 
 When `MSG_ARM_SEAL_EVENT(LOST)` arrives during bag opening:
 - transition to `SYS_OPEN_RECOVERING`,
@@ -298,7 +320,7 @@ All UI updates from the RX callback must acquire the LVGL lock (`lvgl_port_lock(
 
 ---
 
-## 7. Intentional Ambiguity
+## 8. Intentional Ambiguity
 
 The following are explicitly left to implementer choice:
 
@@ -310,14 +332,14 @@ The following are explicitly left to implementer choice:
 
 ---
 
-## 8. Definition of Done
+## 9. Definition of Done
 
-### 8.1 Transport
+### 9.1 Transport
 - [ ] `pico_link_init()` establishes UART communication at 115200 baud
 - [ ] `pico_link_send()` successfully transmits and receives ACK for MSG_PING
 - [ ] `pico_link_send_rpc()` blocks and returns ESP_OK on ACK, ESP_ERR_TIMEOUT on timeout
 
-### 8.2 UI Screens
+### 9.2 UI Screens
 - [ ] Home screen displays all buttons listed in Section 4.3
 - [ ] Operations screen displays all actuator buttons listed in Section 4.4
 - [ ] Operations screen updates status label on MSG_MOTION_DONE receipt
@@ -326,20 +348,25 @@ The following are explicitly left to implementer choice:
 - [ ] Dosing screen allows setting inoculation percentage and starting a dose
 - [ ] Dosing screen displays spawn status for all 8 status codes per Section 4.5
 
-### 8.3 Sequence Recovery (Bag Opening)
+### 9.3 Sequence Recovery (Bag Opening)
 - [ ] `MSG_ARM_SEAL_EVENT(LOST)` during bag opening transitions to `SYS_OPEN_RECOVERING`
 - [ ] Sequence retries bag opening at most `ARM_OPEN_RETRY_MAX` times
 - [ ] Exceeded retries transitions to `SYS_ERROR` with safe-stop
 
-### 8.4 motor_hal
+### 9.4 motor_hal
 - [ ] All motor_hal functions listed in Section 3 compile and send the correct message type with correct payload
 
-### 8.5 Control Task
+### 9.5 Control Task
 - [ ] control_task processes CTRL_CMD_START, CTRL_CMD_STOP, CTRL_CMD_PAUSE, CTRL_CMD_TARE
 - [ ] dosing_tick() is called at 20 ms intervals while running
 - [ ] dosing_abort() closes flaps and sends MSG_CTRL_STOP
 
-### 8.6 Build
+### 9.6 Power Sequencing
+- [ ] GPIO10 configured as output, default LOW at boot
+- [ ] GPIO10 asserted HIGH only after pico_link, display, and UI init complete
+- [ ] Relay de-asserted (GPIO10 LOW) during any safe-stop or shutdown path
+
+### 9.7 Build
 - [ ] Firmware compiles cleanly with ESP-IDF v5.5.x targeting ESP32-C6
 - [ ] LVGL v9.4.x via esp_lvgl_port v2.7.x
 - [ ] All ESP_LOGx tags match source file names

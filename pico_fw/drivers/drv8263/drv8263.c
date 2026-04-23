@@ -67,10 +67,6 @@ bool drv8263_init(drv8263_t *dev, const drv8263_config_t *cfg)
     memset(pdata, 0, sizeof(drv8263_platform_t));
     dev->platform_data = pdata;
 
-    /* Initialize PWM for motor control */
-    gpio_set_function(cfg->ctrl_a_pin, GPIO_FUNC_PWM);
-    gpio_set_function(cfg->ctrl_b_pin, GPIO_FUNC_PWM);
-
     /* Get PWM slice and channels */
     pdata->pwm_slice = pwm_gpio_to_slice_num(cfg->ctrl_a_pin);
     pdata->pwm_chan_a = pwm_gpio_to_channel(cfg->ctrl_a_pin);
@@ -83,12 +79,18 @@ bool drv8263_init(drv8263_t *dev, const drv8263_config_t *cfg)
     float divider = (float)clock_get_hz(clk_sys) / (cfg->pwm_frequency_hz * 4096.0f);
     pwm_set_clkdiv(pdata->pwm_slice, divider);
 
-    /* Initialize both channels to 0 (coast) */
-    pwm_set_chan_level(pdata->pwm_slice, pdata->pwm_chan_a, 0);
-    pwm_set_chan_level(pdata->pwm_slice, pdata->pwm_chan_b, 0);
+    /* Apply caller-supplied initial duty before the PWM slice is enabled and
+     * before the GPIO function is switched — guarantees glitch-free handover
+     * from any prior SIO drive (e.g. the Pico's Phase 1 safe-state setup). */
+    uint16_t init_a = cfg->initial_duty_a > 4095u ? 4095u : cfg->initial_duty_a;
+    uint16_t init_b = cfg->initial_duty_b > 4095u ? 4095u : cfg->initial_duty_b;
+    pwm_set_chan_level(pdata->pwm_slice, pdata->pwm_chan_a, init_a);
+    pwm_set_chan_level(pdata->pwm_slice, pdata->pwm_chan_b, init_b);
 
-    /* Enable PWM */
+    /* Enable PWM, then hand the pins over to the slice. */
     pwm_set_enabled(pdata->pwm_slice, true);
+    gpio_set_function(cfg->ctrl_a_pin, GPIO_FUNC_PWM);
+    gpio_set_function(cfg->ctrl_b_pin, GPIO_FUNC_PWM);
 
     /* Initialize ADC for current sensing.
      * NOTE: In independent H-bridge mode (hot wire / vacuum pump 2 instance)

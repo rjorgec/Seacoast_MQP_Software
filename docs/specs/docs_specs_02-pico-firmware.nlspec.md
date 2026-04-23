@@ -1,7 +1,7 @@
 # NLSpec: Raspberry Pi Pico 2 Firmware
 
 ## Version
-0.2.0
+0.2.1
 
 ## Depends On
 `01-shared-protocol.nlspec.md`
@@ -42,10 +42,23 @@ while (true) {
 There is no RTOS. All subsystem state machines are polled every loop iteration via tick functions. Stepper pulse generation uses the Pico SDK `repeating_timer` at per-axis `step_delay_us` intervals.
 
 **Boot sequence:**
-1. `stdio_init_all()` — enables USB CDC for debug printf
-2. `sleep_ms(10000)` — 10-second boot delay for USB enumeration
-3. `uart_server_init()` — initializes UART, GPIO, ADC, SPI, DRV8263 instances, DRV8434S daisy chain, HX711 load cell
-4. Enter polling loop
+1. Configure all output GPIO pin modes; drive `HOTWIRE_PIN_IN2` (vacuum pump 2 IN2) LOW — pump held off. **This must complete before the ESP asserts the 12 V relay (GPIO10) in Phase 2 of the system startup; see Section 1.3.**
+2. `stdio_init_all()` — enables USB CDC for debug printf
+3. `sleep_ms(10000)` — 10-second boot delay for USB enumeration
+4. `uart_server_init()` — initializes UART, ADC, SPI, DRV8263 instances, DRV8434S daisy chain, HX711 load cell
+5. Enter polling loop
+
+DRV8434S SPI chain initialisation (Phase 3 of system startup) runs inside `uart_server_init()` after the ESP has asserted the 12 V relay and the motor drivers are powered.
+
+### 1.3 System Startup Phases
+
+The three-phase power-on order is documented in the ESP32 spec (Section 2.2). From the Pico's perspective:
+
+| Phase | Pico Responsibility |
+|-------|-------------------|
+| 1 (Pico boot) | Configure all GPIO pin modes; drive `HOTWIRE_PIN_IN2` LOW immediately (Step 1 above) |
+| 2 (ESP init + relay) | Pico is in boot delay (Step 3); no action required — IN2 is already safe |
+| 3 (SPI chain init) | `uart_server_init()` initialises DRV8434S daisy chain and all subsystems (Step 4 above) |
 
 ---
 
@@ -83,9 +96,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Second flap driver (`s_drv8263_flap2`):** If present and initialized (`s_drv8263_flap2_ready == true`), both flap DRV8263 instances are commanded in parallel for every flap state transition. Both must complete before MOTION_DONE is sent.
 
-### 2.2 Arm Stepper (`STEPPER_DEV_ROT_ARM`, DRV8434S Device 0)
+### 2.2 Rotational Plenum Stepper (`STEPPER_DEV_ROT_ARM`, DRV8434S Device 1)
 
-**Hardware:** DRV8434S on SPI1 daisy-chain, device index 0.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 1. Drives the rotational plenum (rotary suction arm) addressed by `MSG_ARM_MOVE` / `MSG_ARM_HOME`.
 
 **Position tracking:** `s_arm_pos_steps` (int32_t), maintained by the Pico. Boot still initializes it to `0` for backward compatibility, but the trusted physical reference is established only by `MSG_ARM_HOME`.
 
@@ -128,9 +141,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 | HOMING_BACKOFF | Step job complete | AT_HOME_RELEASED | Send MOTION_DONE(ARM, OK, `-ARM_HOME_BACKOFF_STEPS`) |
 | HOMING_SEEK / HOMING_BACKOFF | SPI / driver fault / timeout | REHOME_REQUIRED | Send matching MOTION_DONE; reject later `MSG_ARM_MOVE` |
 
-### 2.3 Rack Stepper (DRV8434S — Not Currently Wired)
+### 2.3 Linear Plenum Stepper (`STEPPER_DEV_LIN_ARM`, DRV8434S Device 2)
 
-**Status: Not currently wired.** The rack stepper is defined in the protocol and firmware but is not assigned to any device index in the current `board_pins.h` daisy-chain configuration. When wired, it will occupy a SPI1 daisy-chain device slot.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 2. Drives the linear plenum (linear vacuum arm / rack) addressed by `MSG_RACK_MOVE`.
 
 **Position tracking:** `s_rack_pos_steps` (int32_t). Zeroed on successful home.
 
@@ -198,17 +211,26 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 - Periodic status: send `MSG_VACUUM_STATUS` every `VACUUM_PERIODIC_STATUS_MS` (default: 5000 ms) while pump is on, and immediately on any OK ↔ BLOCKED transition.
 
 **Secondary vacuum pump (MSG_VACUUM2_SET):**
-- Uses the hotwire DRV8263 independent half-bridge IN2 (GP7 driven via `drv8263_set_in2()`).
+- Uses the hotwire DRV8263 independent half-bridge IN2 (`HOTWIRE_PIN_IN2`, driven via `drv8263_set_in2()`).
+- OUT2 is wired to the **ground side** of the pump (not the high side), bypassing the DRV8263 shared current limit that would otherwise apply when both outputs are active.
+- Vacuum 2 trigger uses **active-high** control:
+
+  | IN2 level | OUT2 state | Pump 2 |
+  |-----------|-----------|--------|
+  | HIGH (4095 PWM or GPIO high) | Enabled | On |
+  | LOW (0 PWM or GPIO low) | Disabled | Off |
+
+- The Pico drives IN2 LOW at boot (Step 1 of the boot sequence) so pump 2 remains off when 12 V is applied. `MSG_VACUUM2_SET(enable=true)` drives IN2 HIGH; `MSG_VACUUM2_SET(enable=false)` drives IN2 LOW.
 - Simple on/off, no RPM monitoring.
 - **Not mutually exclusive with hotwire (IN1).** Both can run simultaneously.
 
 **Vacuum States:** `OFF`, `ON_OK`, `ON_BLOCKED`
 
-### 2.8 Hot Wire Traverse Stepper (`STEPPER_DEV_HW_CARRIAGE`, DRV8434S Device 1)
+### 2.8 Hotwire Traverse Stepper (`STEPPER_DEV_HW_CARRIAGE`, DRV8434S Device 3)
 
-**Status: Active — wired as device 1 on the SPI1 daisy-chain.**
+**Status: Active — wired as device 3 on the SPI1 daisy-chain.**
 
-**Hardware:** DRV8434S on SPI1 daisy-chain, device index 1. Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 3. Drives the linear carriage that traverses the nichrome wire through the crimp point of the spawn bag tip.
 
 **Behavior on `MSG_HOTWIRE_TRAVERSE(direction=0)`:** Move carriage forward in segments. Each segment steps `HOTWIRE_TRAVERSE_PROGRESS_STEPS` (default: 6000) at `HOTWIRE_TRAVERSE_STEP_DELAY_US` (default: 1000 µs/step), then backs up `HOTWIRE_TRAVERSE_BACKUP_STEPS` (default: 2000) between segments, until `HOTWIRE_TRAVERSE_STEPS` total (default: -20000) is reached. Full-step mode, no microstep subdivision.
 
@@ -230,9 +252,9 @@ There is no RTOS. All subsystem state machines are polled every loop iteration v
 
 **Activation:** Uncomment `STEPPER_DEV_INDEXER` in `board_pins.h`, assign a device index, and increment `DRV8434S_N_DEVICES`.
 
-### 2.10 Agitator (`STEPPER_DEV_AGITATOR`, DRV8434S Device 2)
+### 2.10 Agitator (`STEPPER_DEV_AGITATOR`, DRV8434S Device 0)
 
-**Hardware:** DRV8434S on SPI1 daisy-chain, device index 2. Drives an eccentric arm that kneads the hopper bag to break material bridges.
+**Hardware:** DRV8434S on SPI1 daisy-chain, device index 0. Drives an eccentric arm that kneads the hopper bag to break material bridges.
 
 **Triggered by:** `MSG_AGITATE` with `pl_agitate_t` payload, or automatically by the spawn dosing algorithm on no-flow detection.
 
@@ -473,6 +495,8 @@ All pin assignments live in `pico_fw/src/board_pins.h` with `#ifndef` guards.
 - [ ] Rack state machine implements all transitions including homing via stall
 - [ ] Turntable state machine enforces UNCALIBRATED → HOME before GOTO
 - [ ] Hot wire uses DRV8263 independent half-bridge mode (drv8263_set_in1/in2); IN1 and IN2 can be active simultaneously
+- [ ] `HOTWIRE_PIN_IN2` driven HIGH in the first step of `main()` before `stdio_init_all()`, before any boot delay
+- [ ] `MSG_VACUUM2_SET(enable=true)` drives IN2 HIGH (pump on); `MSG_VACUUM2_SET(enable=false)` drives IN2 LOW (pump off)
 - [ ] Vacuum state machine reports RPM status periodically and on transitions
 - [ ] All state machines send correct MSG_MOTION_DONE on terminal states
 

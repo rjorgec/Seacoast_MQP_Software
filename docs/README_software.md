@@ -113,14 +113,14 @@ The DRV8434S stepper controllers are daisy-chained on SPI1.
 
 | Index | Constant                  | Subsystem                    | Status            |
 |:-----:|---------------------------|------------------------------|:-----------------:|
-| 0     | `STEPPER_DEV_ROT_ARM`     | Rotary suction arm           | Wired             |
-| 1     | `STEPPER_DEV_LIN_ARM`     | Linear vacuum arm (rack)     | Wired             |
-| 2     | `STEPPER_DEV_TURNTABLE`   | Turntable / platform         | Wired             |
-| 3     | `STEPPER_DEV_AGITATOR`    | Agitator eccentric arm       | Not yet wired     |
-| 4     | `STEPPER_DEV_HW_CARRIAGE` | Hot wire carriage traverse   | Not yet wired     |
-| 5     | `STEPPER_DEV_INDEXER`     | Bag depth/eject rack         | Not yet wired     |
+| 0     | `STEPPER_DEV_AGITATOR`    | Agitator eccentric arm       | Wired             |
+| 1     | `STEPPER_DEV_ROT_ARM`     | Rotational plenum (MSG_ARM_MOVE)  | Wired        |
+| 2     | `STEPPER_DEV_LIN_ARM`     | Linear plenum (MSG_RACK_MOVE)     | Wired        |
+| 3     | `STEPPER_DEV_HW_CARRIAGE` | Hotwire traverse             | Wired             |
+| —     | `STEPPER_DEV_TURNTABLE`   | Turntable / platform         | Not on chain      |
+| —     | `STEPPER_DEV_INDEXER`     | Bag depth/eject rack         | Not on chain      |
 
-To add a device: uncomment the `#define` in `board_pins.h` and increment `DRV8434S_N_DEVICES`.
+Chain length (`DRV8434S_N_DEVICES`) is **4**. To add a device to the chain: define its `STEPPER_DEV_*` macro in `board_pins.h` with the next SPI slot index and increment `DRV8434S_N_DEVICES`.
 
 ---
 

@@ -73,8 +73,6 @@ The following compile-time protocol defaults are defined in `shared/proto/proto.
 | 0x01 | `MSG_PING` | ESP → Pico | none (len=0) | Connectivity check; Pico responds with ACK |
 | 0x10 | `MSG_MOTOR_DRV8263_START_MON` | ESP → Pico | `pl_drv8263_start_mon_t` (12 bytes) | Start DRV8263 motor with current monitoring |
 | 0x11 | `MSG_MOTOR_DRV8263_STOP_MON` | ESP → Pico | none (len=0) | Stop DRV8263 motor and monitoring |
-| 0x20 | `MSG_MOTOR_STEPPER_ENABLE` | ESP → Pico | `pl_stepper_enable_t` (1 byte) | Enable/disable DRV8434S stepper drivers |
-| 0x21 | `MSG_MOTOR_STEPPER_STEPJOB` | ESP → Pico | `pl_stepper_stepjob_t` (11 bytes) | Execute a raw step job (includes soft torque limit) |
 | 0x28 | `MSG_HX711_TARE` | ESP → Pico | none (len=0) | Zero the load cell |
 | 0x29 | `MSG_HX711_MEASURE` | ESP → Pico | `pl_hx711_measure_t` (4 bytes) | Request a weight reading; Pico responds with ACK containing `pl_hx711_mass_t` |
 | 0x30 | `MSG_CTRL_TARE` | ESP → Pico | none | Control-level tare command |
@@ -97,7 +95,7 @@ The following compile-time protocol defaults are defined in `shared/proto/proto.
 | 0x48 | `MSG_VACUUM2_SET` | `pl_vacuum2_set_t` | 1 | Turn secondary vacuum pump on/off — drives DRV8263 independent half-bridge IN2. NOT mutually exclusive with hotwire (IN1); both can run simultaneously. |
 | 0x49 | `MSG_DISPENSE_SPAWN` | `pl_innoculate_bag_t` | 7 | Start closed-loop spawn dosing on Pico |
 | 0x4A | `MSG_SPAWN_STATUS` | `pl_spawn_status_t` | 16 | Pico → ESP unsolicited: dosing progress updates |
-| 0x4B | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t` | 1 | Traverse hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE); direction 0=cut, 1=return |
+| 0x4B | `MSG_HOTWIRE_TRAVERSE` | `pl_hotwire_traverse_t` | 1 | Traverse hotwire stepper (STEPPER_DEV_HW_CARRIAGE, device 3); direction 0=cut, 1=return |
 | 0x4C | `MSG_INDEXER_MOVE` | `pl_indexer_move_t` | 1 | Move bag depth/eject rack (STEPPER_DEV_INDEXER) to named position |
 | 0x4D | `MSG_ARM_HOME` | none (len=0) | 0 | Sensorlessly home the rotary arm against its positive hard stop, then back off |
 | 0x4E | `MSG_AGITATE` | `pl_agitate_t` | 1 | Trigger agitator knead cycle; optional home before kneading via `AGITATE_FLAG_DO_HOME` in flags byte |
@@ -146,13 +144,13 @@ For `MSG_DISPENSE_SPAWN`, ACK confirms the dosing run has started. Progress is r
 | Value | Name | Hardware |
 |-------|------|----------|
 | 0 | `SUBSYS_FLAPS` | DRV8263 flap instance(s) |
-| 1 | `SUBSYS_ARM` | DRV8434S device 0 (rotary suction arm) |
-| 2 | `SUBSYS_RACK` | DRV8434S device 1 (linear vacuum arm) |
-| 3 | `SUBSYS_TURNTABLE` | DRV8434S device 2 (platform) |
-| 4 | `SUBSYS_HOTWIRE` | DRV8263 hotwire instance (IN1 independent half-bridge) |
+| 1 | `SUBSYS_ARM` | DRV8434S device 1 (rotational plenum) |
+| 2 | `SUBSYS_RACK` | DRV8434S device 2 (linear plenum) |
+| 3 | `SUBSYS_TURNTABLE` | DRV8434S (platform) — not yet wired |
+| 4 | `SUBSYS_HOTWIRE` | DRV8263 hotwire instance (IN1 independent half-bridge); traverse stepper is DRV8434S device 3 |
 | 5 | `SUBSYS_VACUUM` | Vacuum pump 1 GPIO + RPM ISR |
 | 6 | `SUBSYS_INDEXER` | DRV8434S (bag depth/eject rack) — not yet wired |
-| 7 | `SUBSYS_AGITATOR` | DRV8434S device 2 (agitator eccentric arm) |
+| 7 | `SUBSYS_AGITATOR` | DRV8434S device 0 (agitator eccentric arm) |
 
 ### 4.3 Motion Result Codes (`motion_result_t`)
 
@@ -256,8 +254,6 @@ All structs are C99, `__attribute__((packed))`, fixed-width types from `<stdint.
 | `pl_drv8263_start_mon_t` | 12 | `dir:u8, _rsvd:u8, speed:u16, low_th:u16, high_th:u16, interval_ms:u32` |
 | `pl_hx711_measure_t` | 4 | `interval_us:u32` |
 | `pl_hx711_mass_t` | 8 | `mass_ug:i32, unit:u8, _rsvd[3]:u8` |
-| `pl_stepper_enable_t` | 1 | `enable:u8` |
-| `pl_stepper_stepjob_t` | 11 | `dir:u8, steps:u32, step_delay_us:u32, torque_limit:u16` |
 | `pl_nack_t` | 1 | `code:u8` |
 | `pl_arm_move_t` | 1 | `position:u8` (arm_pos_t) |
 | `pl_rack_move_t` | 1 | `position:u8` (rack_pos_t) |

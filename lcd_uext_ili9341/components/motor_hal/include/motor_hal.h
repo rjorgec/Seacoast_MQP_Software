@@ -14,11 +14,6 @@ esp_err_t motor_linact_stop_monitor(void);
 esp_err_t motor_linact_run(motor_dir_t dir, uint16_t speed);
 esp_err_t motor_linact_stop(void);
 
-// DRV8434S: simple stepping API (upgrade later to queued motion)
-esp_err_t motor_stepper_enable(bool en);
-esp_err_t motor_stepper_step(motor_dir_t dir, uint32_t steps,
-                             uint32_t step_delay_us);
-
 /* ------------------------------------------------------------------ */
 /*  State-based actuator commands (state machine, not atomic steps)    */
 /* ------------------------------------------------------------------ */
@@ -101,7 +96,7 @@ esp_err_t motor_vacuum_set(bool enable);
 esp_err_t motor_vacuum2_set(bool enable);
 
 /**
- * @brief Traverse the hot wire carriage stepper (STEPPER_DEV_HW_CARRIAGE).
+ * @brief Traverse the hotwire stepper (STEPPER_DEV_HW_CARRIAGE, device 3).
  * @param cut  true = cut direction (forward), false = return direction
  *             (retrace to home; Pico zeroes traverse position on success)
  * @return ESP_OK if the command was ACK'd, error otherwise.

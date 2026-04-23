@@ -19,6 +19,7 @@
 #include "sys_sequence.h"
 #include "motor_hal.h"
 #include "pico_link.h"
+#include "pico_power.h"
 #include "proto.h"
 
 #include "freertos/FreeRTOS.h"
@@ -82,8 +83,16 @@ static volatile uint16_t s_last_arm_seal_snapshot = 0u; /* [15:8]=event, [7:0]=r
 
 static void set_state(sys_state_t next)
 {
+    sys_state_t prev = s_state;
     s_state = next;
     ESP_LOGI(TAG, "→ %s", sys_sequence_state_name(next));
+
+    /* E-Stop entry drops the 12 V relay. SYS_ERROR deliberately does not —
+     * operators need motor power to recover (re-home, nudge clear, etc.). */
+    if (next == SYS_ESTOP && prev != SYS_ESTOP)
+    {
+        (void)pico_power_disable();
+    }
 }
 
 /** Safe-stop all outputs. Called on error or E-Stop. */
