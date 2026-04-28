@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,6 +27,7 @@ static lv_obj_t *lbl_weight = NULL; /* weight readout; NULL on screens without i
 static float s_last_weight_g = -1.0f; /* -1 = no reading yet */
 static uint16_t s_weight_req_seq = 0u; /* 0 = no in-flight read request */
 static uint32_t s_weight_req_interval_us = 0u;
+static bool s_pico_ready = false;
 
 /* Scale screen auto-refresh timer — non-NULL only while the Scale screen is active */
 static lv_timer_t *s_scale_timer = NULL;
@@ -62,6 +64,37 @@ static void set_status(const char *s)
     ui_status_set(s);
 }
 
+static const char *ui_default_status_text(void)
+{
+    return s_pico_ready ? "Ready" : "Waiting for Pico READY...";
+}
+
+static const char *ui_home_banner_text(void)
+{
+    return s_pico_ready ? "IDLE \xe2\x80\xa2 Seacoast Inoculator"
+                        : "WAITING \xe2\x80\xa2 Pico READY";
+}
+
+void ui_set_pico_ready(bool ready)
+{
+    s_pico_ready = ready;
+    if (lbl_status)
+    {
+        ui_status_set(ready ? "Pico READY" : "Waiting for Pico READY...");
+    }
+}
+
+static bool require_pico_ready(void)
+{
+    if (s_pico_ready)
+    {
+        return true;
+    }
+
+    set_status("Waiting for Pico READY...");
+    return false;
+}
+
 static bool sequence_manual_actions_blocked(void)
 {
     switch (sys_sequence_get_state())
@@ -81,6 +114,10 @@ static bool sequence_manual_actions_blocked(void)
 static void on_dose(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     if (sequence_manual_actions_blocked())
     {
         set_status("SEQ active: manual disabled");
@@ -146,6 +183,10 @@ static void on_scale_page(lv_event_t *e)
 static void on_tare(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     if (sequence_manual_actions_blocked())
     {
         set_status("SEQ active: manual disabled");
@@ -176,6 +217,10 @@ static void on_tare(lv_event_t *e)
 static void on_read_weight(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     pl_hx711_measure_t measure_payload = {
         .interval_us = 1000000 /* 1 s interval */
     };
@@ -204,6 +249,10 @@ static void on_read_weight(lv_event_t *e)
 static void on_setup_load(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = sys_sequence_send_cmd(SYS_CMD_SETUP_LOAD);
     set_status(err == ESP_OK ? "Setup/Load started" : "Setup/Load FAILED");
     ESP_LOGI(TAG, "Setup/Load (%s)", esp_err_to_name(err));
@@ -220,6 +269,10 @@ static void on_start(lv_event_t *e)
 static void on_seq_start(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = sys_sequence_send_cmd(SYS_CMD_START);
     set_status(err == ESP_OK ? "SEQ: START sent" : "SEQ: START failed");
     ESP_LOGI(TAG, "Sequence start (%s)", esp_err_to_name(err));
@@ -238,6 +291,10 @@ static void on_seq_abort(lv_event_t *e)
 static void on_flap_open(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_flap_open();
     set_status(err == ESP_OK ? "Flaps: opening..." : "Flap open: FAILED");
     ESP_LOGI(TAG, "Flap open (%s)", esp_err_to_name(err));
@@ -246,6 +303,10 @@ static void on_flap_open(lv_event_t *e)
 static void on_flap_close(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_flap_close();
     set_status(err == ESP_OK ? "Flaps: closing..." : "Flap close: FAILED");
     ESP_LOGI(TAG, "Flap close (%s)", esp_err_to_name(err));
@@ -254,6 +315,10 @@ static void on_flap_close(lv_event_t *e)
 static void on_arm_press(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_arm_move((uint8_t)ARM_POS_PRESS);
     set_status(err == ESP_OK ? "Arm: to PRESS..." : "Arm press: FAILED");
     ESP_LOGI(TAG, "Arm press (%s)", esp_err_to_name(err));
@@ -262,6 +327,10 @@ static void on_arm_press(lv_event_t *e)
 static void on_arm_home(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_arm_home();
     set_status(err == ESP_OK ? "Arm: homing..." : "Arm home: FAILED");
     ESP_LOGI(TAG, "Arm home (%s)", esp_err_to_name(err));
@@ -270,6 +339,10 @@ static void on_arm_home(lv_event_t *e)
 static void on_arm_pos1(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_arm_move((uint8_t)ARM_POS_1);
     set_status(err == ESP_OK ? "Arm: to POS1..." : "Arm pos1: FAILED");
     ESP_LOGI(TAG, "Arm pos1 (%s)", esp_err_to_name(err));
@@ -278,6 +351,10 @@ static void on_arm_pos1(lv_event_t *e)
 static void on_arm_pos2(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_arm_move((uint8_t)ARM_POS_2);
     set_status(err == ESP_OK ? "Arm: to POS2..." : "Arm pos2: FAILED");
     ESP_LOGI(TAG, "Arm pos2 (%s)", esp_err_to_name(err));
@@ -286,6 +363,10 @@ static void on_arm_pos2(lv_event_t *e)
 static void on_agitate_home(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     /* Sensorlessly home the agitator (AGITATE_FLAG_DO_HOME, default n_cycles) */
     pl_agitate_t pl = { .flags = AGITATE_FLAG_DO_HOME, .n_cycles = 0u };
     uint8_t nack_code = 0u;
@@ -299,6 +380,10 @@ static void on_agitate_home(lv_event_t *e)
 static void on_rack_home(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_rack_move((uint8_t)RACK_POS_HOME);
     set_status(err == ESP_OK ? "Rack: homing..." : "Rack home: FAILED");
     ESP_LOGI(TAG, "Rack home (%s)", esp_err_to_name(err));
@@ -307,6 +392,10 @@ static void on_rack_home(lv_event_t *e)
 static void on_rack_extend(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_rack_move((uint8_t)RACK_POS_EXTEND);
     set_status(err == ESP_OK ? "Rack: extending..." : "Rack extend: FAILED");
     ESP_LOGI(TAG, "Rack extend (%s)", esp_err_to_name(err));
@@ -315,46 +404,22 @@ static void on_rack_extend(lv_event_t *e)
 static void on_rack_press(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_rack_move((uint8_t)RACK_POS_PRESS);
     set_status(err == ESP_OK ? "Rack: to PRESS..." : "Rack press: FAILED");
     ESP_LOGI(TAG, "Rack press (%s)", esp_err_to_name(err));
 }
 
-static void on_turntable_home(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_home();
-    set_status(err == ESP_OK ? "Tbl: homing..." : "Tbl home: FAILED");
-    ESP_LOGI(TAG, "Turntable home (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_intake(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_INTAKE);
-    set_status(err == ESP_OK ? "Tbl: to INTAKE..." : "Tbl INTAKE: FAILED");
-    ESP_LOGI(TAG, "Turntable INTAKE (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_trash(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_TRASH);
-    set_status(err == ESP_OK ? "Tbl: to TRASH..." : "Tbl TRASH: FAILED");
-    ESP_LOGI(TAG, "Turntable TRASH (%s)", esp_err_to_name(err));
-}
-
-static void on_turntable_eject(lv_event_t *e)
-{
-    (void)e;
-    esp_err_t err = motor_turntable_goto((uint8_t)TURNTABLE_POS_EJECT);
-    set_status(err == ESP_OK ? "Tbl: to EJECT..." : "Tbl EJECT: FAILED");
-    ESP_LOGI(TAG, "Turntable EJECT (%s)", esp_err_to_name(err));
-}
-
 static void on_agitate(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_agitate();
     set_status(err == ESP_OK ? "Agitating..." : "Agitate: FAILED");
     ESP_LOGI(TAG, "Agitate (%s)", esp_err_to_name(err));
@@ -363,6 +428,10 @@ static void on_agitate(lv_event_t *e)
 static void on_hotwire_on(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_hotwire_set(true);
     set_status(err == ESP_OK ? "Wire: ON" : "Wire ON: FAILED");
     ESP_LOGI(TAG, "Hotwire on (%s)", esp_err_to_name(err));
@@ -371,6 +440,10 @@ static void on_hotwire_on(lv_event_t *e)
 static void on_hotwire_off(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_hotwire_set(false);
     set_status(err == ESP_OK ? "Wire: OFF" : "Wire OFF: FAILED");
     ESP_LOGI(TAG, "Hotwire off (%s)", esp_err_to_name(err));
@@ -379,6 +452,10 @@ static void on_hotwire_off(lv_event_t *e)
 static void on_hotwire_cut(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_hotwire_traverse(true);
     set_status(err == ESP_OK ? "Wire: CUT..." : "Wire CUT: FAILED");
     ESP_LOGI(TAG, "Hotwire cut traverse (%s)", esp_err_to_name(err));
@@ -387,6 +464,10 @@ static void on_hotwire_cut(lv_event_t *e)
 static void on_hotwire_return(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_hotwire_traverse(false);
     set_status(err == ESP_OK ? "Wire: RETURN (zeroing)..." : "Wire RETURN: FAILED");
     ESP_LOGI(TAG, "Hotwire return traverse (%s); Pico zeros position on success",
@@ -396,6 +477,10 @@ static void on_hotwire_return(lv_event_t *e)
 static void on_vacuum_on(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_vacuum_set(true);
     set_status(err == ESP_OK ? "Vac: ON" : "Vac ON: FAILED");
     ESP_LOGI(TAG, "Vacuum on (%s)", esp_err_to_name(err));
@@ -404,6 +489,10 @@ static void on_vacuum_on(lv_event_t *e)
 static void on_vacuum_off(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     esp_err_t err = motor_vacuum_set(false);
     set_status(err == ESP_OK ? "Vac: OFF" : "Vac OFF: FAILED");
     ESP_LOGI(TAG, "Vacuum off (%s)", esp_err_to_name(err));
@@ -412,6 +501,10 @@ static void on_vacuum_off(lv_event_t *e)
 static void on_vacuum2_on(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     ESP_LOGI(TAG, "Vacuum2 ON");
     esp_err_t err = motor_vacuum2_set(true);
     set_status(err == ESP_OK ? "Vac2: ON" : "Vac2 ON failed");
@@ -420,6 +513,10 @@ static void on_vacuum2_on(lv_event_t *e)
 static void on_vacuum2_off(lv_event_t *e)
 {
     (void)e;
+    if (!require_pico_ready())
+    {
+        return;
+    }
     ESP_LOGI(TAG, "Vacuum2 OFF");
     esp_err_t err = motor_vacuum2_set(false);
     set_status(err == ESP_OK ? "Vac2: OFF" : "Vac2 OFF failed");
@@ -704,7 +801,7 @@ void ui_show_auto(void)
 
     /* ── Status label (y=20) ─────────────────────────────────────────────── */
     lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "Ready");
+    lv_label_set_text(lbl_status, ui_default_status_text());
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 20);
@@ -818,7 +915,7 @@ void ui_show_home(void)
 
     /* Status strip */
     lbl_status = lv_label_create(scr);
-    lv_label_set_text(lbl_status, "IDLE \xe2\x80\xa2 Seacoast Inoculator");
+    lv_label_set_text(lbl_status, ui_home_banner_text());
     lv_obj_align(lbl_status, LV_ALIGN_TOP_LEFT, 0, 0);
 
     /* Four navigation buttons */
@@ -835,11 +932,10 @@ void ui_show_home(void)
  *  y= 22  [Flap Open  148×24]  4  [Flap Close  148×24]
  *  y= 50  4-btn 72px: [Arm Home][Arm Press][Arm Pos1][Arm Pos2]
  *  y= 78  [Rack Home  96×24]  4  [Rack Ext 96×24]  4  [Rack Press 96×24]
- *  y=106  4-btn 72px: [Tbl Home][Intake][Trash][Eject]
- *  y=134  4-btn 72px: [Wire ON][Wire OFF][Cut][Rtn+Zero]
- *  y=162  6-btn 46px: [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]
- *  y=188  s_ops_lbl_status  (motion-done text)
- *  y=204  s_ops_lbl_vacuum  (vacuum status text)
+ *  y=106  4-btn 72px: [Wire ON][Wire OFF][Cut][Rtn+Zero]
+ *  y=134  6-btn 46px: [Vac ON][Vac OFF][Vac2 ON][Vac2 OFF][Agitate][Agit Home]
+ *  y=166  s_ops_lbl_status  (motion-done text)
+ *  y=184  s_ops_lbl_vacuum  (vacuum status text)
  *
  *  Button-row widths:
  *    2-btn 148px: 148+4+148 = 300 px
@@ -889,36 +985,30 @@ void ui_show_operations(void)
     make_btn(scr, "Rack Extend", 100, 78, 96, 24, on_rack_extend);
     make_btn(scr, "Rack Press",  200, 78, 96, 24, on_rack_press);
 
-    /* ── Row 4: Turntable  (y=106, h=24)  4 × 72 px + 3 × 4 px = 300 px ── */
-    make_btn(scr, "Tbl Home", 0,   106, 72, 24, on_turntable_home);
-    make_btn(scr, "Intake",   76,  106, 72, 24, on_turntable_intake);
-    make_btn(scr, "Trash",    152, 106, 72, 24, on_turntable_trash);
-    make_btn(scr, "Eject",    228, 106, 72, 24, on_turntable_eject);
+    /* ── Row 4: Hot Wire  (y=106, h=24)  4 × 72 px + 3 × 4 px = 300 px ───── */
+    make_btn(scr, "Wire ON",  0,   106, 72, 24, on_hotwire_on);
+    make_btn(scr, "Wire OFF", 76,  106, 72, 24, on_hotwire_off);
+    make_btn(scr, "Cut",      152, 106, 72, 24, on_hotwire_cut);
+    make_btn(scr, "Rtn+Zero", 228, 106, 72, 24, on_hotwire_return);
 
-    /* ── Row 5: Hot Wire  (y=134, h=24)  4 × 72 px + 3 × 4 px = 300 px ───── */
-    make_btn(scr, "Wire ON",  0,   134, 72, 24, on_hotwire_on);
-    make_btn(scr, "Wire OFF", 76,  134, 72, 24, on_hotwire_off);
-    make_btn(scr, "Cut",      152, 134, 72, 24, on_hotwire_cut);
-    make_btn(scr, "Rtn+Zero", 228, 134, 72, 24, on_hotwire_return);
+    /* ── Row 5: Vacuum + Agitator  (y=134, h=24)  6 × 46 px + 5 × 4 px = 296 px ── */
+    make_btn(scr, "Vac ON",    0,   134, 46, 24, on_vacuum_on);
+    make_btn(scr, "Vac OFF",   50,  134, 46, 24, on_vacuum_off);
+    make_btn(scr, "Vac2 ON",   100, 134, 46, 24, on_vacuum2_on);
+    make_btn(scr, "Vac2 OFF",  150, 134, 46, 24, on_vacuum2_off);
+    make_btn(scr, "Agitate",   200, 134, 46, 24, on_agitate);
+    make_btn(scr, "Agit Home", 250, 134, 46, 24, on_agitate_home);
 
-    /* ── Row 6: Vacuum + Agitator  (y=162, h=24)  6 × 46 px + 5 × 4 px = 296 px ── */
-    make_btn(scr, "Vac ON",    0,   162, 46, 24, on_vacuum_on);
-    make_btn(scr, "Vac OFF",   50,  162, 46, 24, on_vacuum_off);
-    make_btn(scr, "Vac2 ON",   100, 162, 46, 24, on_vacuum2_on);
-    make_btn(scr, "Vac2 OFF",  150, 162, 46, 24, on_vacuum2_off);
-    make_btn(scr, "Agitate",   200, 162, 46, 24, on_agitate);
-    make_btn(scr, "Agit Home", 250, 162, 46, 24, on_agitate_home);
-
-    /* ── Status labels  (y=188, y=204) ───────────────────────────────────── */
+    /* ── Status labels  (y=166, y=184) ───────────────────────────────────── */
     s_ops_lbl_status = lv_label_create(scr);
-    lv_label_set_text(s_ops_lbl_status, "Status: --");
+    lv_label_set_text(s_ops_lbl_status, ui_default_status_text());
     lv_obj_set_style_text_font(s_ops_lbl_status, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_ops_lbl_status, LV_ALIGN_TOP_LEFT, 0, 188);
+    lv_obj_align(s_ops_lbl_status, LV_ALIGN_TOP_LEFT, 0, 166);
 
     s_ops_lbl_vacuum = lv_label_create(scr);
     lv_label_set_text(s_ops_lbl_vacuum, "Vac: --");
     lv_obj_set_style_text_font(s_ops_lbl_vacuum, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_ops_lbl_vacuum, LV_ALIGN_TOP_LEFT, 0, 204);
+    lv_obj_align(s_ops_lbl_vacuum, LV_ALIGN_TOP_LEFT, 0, 184);
 
     /*
      * Point lbl_status at s_ops_lbl_status so that set_status() (called by
@@ -959,6 +1049,11 @@ static void on_innoc_plus(lv_event_t *e)
 static void on_dose_start(lv_event_t *e)
 {
     (void)e;
+
+    if (!require_pico_ready())
+    {
+        return;
+    }
 
     pl_innoculate_bag_t pl = {
         .bag_mass = 0,      /* unused by Pico — scale read internally */

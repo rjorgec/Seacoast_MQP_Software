@@ -194,7 +194,7 @@
  * MSG_ARM_HOME. Successful homing then backs off by ARM_HOME_BACKOFF_STEPS, so
  * the idle post-home position is typically negative. */
 #ifndef ARM_STEPS_PRESS
-#define ARM_STEPS_PRESS 3800 /* steps to press attachment */
+#define ARM_STEPS_PRESS 4500 /* steps to press attachment */
 #endif
 #ifndef ARM_STEPS_POS1
 #define ARM_STEPS_POS1 500 /* absolute position 1 */
@@ -222,7 +222,7 @@
   10u /* corrected to observed 10-15 RPM behavior; 2000 was out-of-scale */
 #endif
 #ifndef ARM_MOTION_TIMEOUT_MS
-#define ARM_MOTION_TIMEOUT_MS 5000
+#define ARM_MOTION_TIMEOUT_MS 10000
 #endif
 #ifndef ARM_HOME_SEARCH_STEPS
 #define ARM_HOME_SEARCH_STEPS                                                  \
@@ -248,13 +248,29 @@
 #ifndef ARM_HOME_BACKOFF_STEPS
 #define ARM_HOME_BACKOFF_STEPS 100
 #endif
+#ifndef ARM_MOVE_TORQUE_LIMIT
+#define ARM_MOVE_TORQUE_LIMIT                                                  \
+  130u /* lowered to reduce false stalls leaving press */
+#endif
+#ifndef ARM_MOVE_TORQUE_BLANK_STEPS
+#define ARM_MOVE_TORQUE_BLANK_STEPS                                            \
+  200u /* ignore release transient after start */
+#endif
+#ifndef ARM_MOVE_TORQUE_SAMPLE_DIV
+#define ARM_MOVE_TORQUE_SAMPLE_DIV                                             \
+  12u /* lighter stall sampling during normal moves */
+#endif
+#ifndef ARM_MOVE_STEP_DELAY_US
+#define ARM_MOVE_STEP_DELAY_US                                                 \
+  1400u /* slightly slower arm moves for release stability */
+#endif
 
 /* Rack stepper (device 1) */
 #ifndef RACK_STEPS_EXTEND
 #define RACK_STEPS_EXTEND 2200
 #endif
 #ifndef RACK_STEPS_PRESS
-#define RACK_STEPS_PRESS 4500
+#define RACK_STEPS_PRESS 5500
 #endif
 #ifndef RACK_HOME_SEARCH_STEPS
 #define RACK_HOME_SEARCH_STEPS -12000
@@ -266,10 +282,10 @@
 #define RACK_HOME_TIMEOUT_MS 15000
 #endif
 #ifndef RACK_HOME_TORQUE_LIMIT
-#define RACK_HOME_TORQUE_LIMIT 300u
+#define RACK_HOME_TORQUE_LIMIT 260u
 #endif
 #ifndef RACK_HOME_TORQUE_BLANK_STEPS
-#define RACK_HOME_TORQUE_BLANK_STEPS 100u
+#define RACK_HOME_TORQUE_BLANK_STEPS 50u
 #endif
 #ifndef RACK_HOME_TORQUE_SAMPLE_DIV
 #define RACK_HOME_TORQUE_SAMPLE_DIV 1u
@@ -284,7 +300,7 @@
 #define RACK_PRESS_TORQUE_BLANK_STEPS DRV8434S_MOTION_TORQUE_BLANK_STEPS
 #endif
 #ifndef RACK_MOTION_TIMEOUT_MS
-#define RACK_MOTION_TIMEOUT_MS 5000
+#define RACK_MOTION_TIMEOUT_MS 10000
 #endif
 
 // /* Turntable stepper (device 2) — INTAKE is the hard endstop (= 0) */

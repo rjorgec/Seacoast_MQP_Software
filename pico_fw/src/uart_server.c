@@ -478,6 +478,16 @@ static void send_motion_done(subsystem_id_t subsys, motion_result_t result, int3
     (void)uart_send_frame(MSG_MOTION_DONE, 0u, &pl, (uint16_t)sizeof(pl));
 }
 
+static void send_pico_ready(void)
+{
+    pl_pico_ready_t pl = {
+        .proto_version = PROTO_VERSION,
+        .flags = PICO_READY_FLAG_COMMANDS,
+        ._rsvd = {0u, 0u},
+    };
+    (void)uart_send_frame(MSG_PICO_READY, 0u, &pl, (uint16_t)sizeof(pl));
+}
+
 /**
  * @brief Send MSG_VACUUM_STATUS (unsolicited, seq=0) to the ESP32.
  */
@@ -1972,14 +1982,15 @@ static bool arm_stepper_control_locked(void)
 
 static bool arm_motion_requires_rehome(motion_result_t result)
 {
-    return result == MOTION_STALLED ||
-           result == MOTION_TIMEOUT ||
+    return result == MOTION_TIMEOUT ||
            result == MOTION_FAULT ||
            result == MOTION_SPI_FAULT;
 }
 
 static void finish_arm_motion(motion_result_t result, bool require_rehome)
 {
+    set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
+
     if (require_rehome)
     {
         s_arm_rehome_required = true;
@@ -2990,12 +3001,15 @@ static bool start_arm_internal_relative_move(int32_t relative_steps,
 {
     int32_t target_steps = s_arm_pos_steps + relative_steps;
 
+    set_motion_torque_sample_div((uint8_t)ARM_MOVE_TORQUE_SAMPLE_DIV);
+
     if (!start_stepper_job((uint8_t)STEPPER_DEV_ROT_ARM,
                            relative_steps,
                            torque_limit,
-                           (uint16_t)DRV8434S_MOTION_TORQUE_BLANK_STEPS,
-                           (uint32_t)STEPPER_DEFAULT_STEP_DELAY_US))
+                           (uint16_t)ARM_MOVE_TORQUE_BLANK_STEPS,
+                           (uint32_t)ARM_MOVE_STEP_DELAY_US))
     {
+        set_motion_torque_sample_div((uint8_t)STEPPER_DEFAULT_TORQUE_SAMPLE_DIV);
         return false;
     }
 
@@ -3939,9 +3953,19 @@ static void handle_arm_move(uint16_t seq, const uint8_t *payload, uint16_t len)
             s_arm_seal.rearm_requested = true;
         }
     }
-    if (start_stepper_motion((uint8_t)STEPPER_DEV_ROT_ARM, target, &s_arm_pending,
-                             SUBSYS_ARM, (uint32_t)ARM_MOTION_TIMEOUT_MS, seq))
+    if (start_arm_internal_absolute_move(target,
+                                         (uint16_t)ARM_MOVE_TORQUE_LIMIT,
+                                         (uint32_t)ARM_MOTION_TIMEOUT_MS))
     {
+        send_ack(seq);
+
+        if (!s_arm_pending.pending)
+        {
+            send_motion_done(SUBSYS_ARM, MOTION_OK, s_arm_pos_steps);
+            reset_arm_press_retry();
+            return;
+        }
+
         if (arm_press_retry_should_arm(target))
         {
             s_arm_press_retry.phase = ARM_PRESS_RETRY_PRESSING;
@@ -4772,6 +4796,11 @@ static void dispatch_decoded(const uint8_t *decoded, size_t decoded_len)
     case MSG_PING:
         printf("Ping\n");
         send_ack(hdr.seq);
+        if (s_phase3_done)
+        {
+            printf("uart_server: ping received after phase3; re-sending PICO_READY\n");
+            send_pico_ready();
+        }
         if (!s_phase3_done && !s_phase3_armed)
         {
             /* ESP asserts the 12 V relay as soon as it sees this ACK.
@@ -5425,6 +5454,7 @@ static void uart_server_init_late(void)
     init_drv8434s_chain();
     init_drv8263_hotwire();
     init_vacuum();
+    send_pico_ready();
 }
 
 void uart_server_poll(void)

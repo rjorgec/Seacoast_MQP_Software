@@ -1,4 +1,5 @@
-#include "freertos/FreeRTOS.h"
++
+++#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -30,6 +31,20 @@ static void pico_rx_cb(uint8_t type, uint16_t seq, const uint8_t *pl, uint16_t l
 
     switch (type)
     {
+    case MSG_PICO_READY:
+        if (len >= sizeof(pl_pico_ready_t))
+        {
+            const pl_pico_ready_t *ready = (const pl_pico_ready_t *)pl;
+            ESP_LOGI("app_main", "RX PICO_READY proto=%u flags=0x%02x",
+                     (unsigned)ready->proto_version,
+                     (unsigned)ready->flags);
+        }
+        else
+        {
+            ESP_LOGI("app_main", "RX PICO_READY len=%u", (unsigned)len);
+        }
+        ui_set_pico_ready(true);
+        break;
     case MSG_MOTION_DONE:
         if (len >= sizeof(pl_motion_done_t))
         {
@@ -118,6 +133,13 @@ void app_main(void)
      * PING handshake completes below. */
     ESP_ERROR_CHECK(pico_power_init());
 
+    /* Bring up the display before the Pico handshake so the operator sees a
+     * waiting screen instead of a blank white panel while the ESP waits for
+     * the Pico and relay sequencing to complete. */
+    display_handles_t disp = display_init();
+    ui_init(&disp);
+    ui_set_pico_ready(false);
+
     // //recipe upload pipeline
     // ESP_ERROR_CHECK(recipes_init());          //mounts SPIFFS (/spiffs)
     // ESP_ERROR_CHECK(wifi_ap_start());         //starts AP + DHCP (default 192.168.4.1)
@@ -152,10 +174,6 @@ void app_main(void)
                      esp_err_to_name(ping_err), (unsigned)nack_code);
         }
     }
-
-    // display/ui
-    display_handles_t disp = display_init();
-    ui_init(&disp);
 
     ESP_ERROR_CHECK(control_start()); // ONLY ONCE
     ESP_ERROR_CHECK(sys_sequence_init());

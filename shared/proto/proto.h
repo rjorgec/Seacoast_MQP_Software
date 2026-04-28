@@ -64,6 +64,7 @@ typedef enum {
   MSG_MOTION_DONE = 0x60,    /* Pico→ESP: motion/action complete notification */
   MSG_VACUUM_STATUS = 0x61,  /* Pico→ESP: vacuum pump RPM/blocked status */
   MSG_ARM_SEAL_EVENT = 0x62, /* Pico→ESP: rotary arm seal transition event */
+  MSG_PICO_READY = 0x63,     /* Pico→ESP: controller ready after late init */
 
   MSG_ACK = 0x80,
   MSG_NACK = 0x81,
@@ -311,6 +312,15 @@ typedef struct __attribute__((packed)) {
   uint16_t rpm;   /**< measured RPM (0 if pump off) */
 } pl_vacuum_status_t;
 
+#define PICO_READY_FLAG_COMMANDS (1u << 0)
+
+/** MSG_PICO_READY payload (4 bytes) -- unsolicited Pico->ESP */
+typedef struct __attribute__((packed)) {
+  uint8_t proto_version; /**< PROTO_VERSION implemented by the Pico */
+  uint8_t flags;         /**< PICO_READY_FLAG_* bitmask */
+  uint8_t _rsvd[2];      /**< reserved, set to 0 */
+} pl_pico_ready_t;
+
 typedef enum __attribute__((packed)) {
   ARM_SEAL_EVENT_LOST = 0,
   ARM_SEAL_EVENT_RESTORED = 1,
@@ -336,9 +346,11 @@ typedef struct __attribute__((packed)) {
 #if defined(__cplusplus)
 static_assert(sizeof(pl_arm_seal_event_t) == 10u,
               "pl_arm_seal_event_t size must be 10");
+static_assert(sizeof(pl_pico_ready_t) == 4u, "pl_pico_ready_t size must be 4");
 #else
 _Static_assert(sizeof(pl_arm_seal_event_t) == 10u,
                "pl_arm_seal_event_t size must be 10");
+_Static_assert(sizeof(pl_pico_ready_t) == 4u, "pl_pico_ready_t size must be 4");
 #endif
 
 #ifdef __cplusplus

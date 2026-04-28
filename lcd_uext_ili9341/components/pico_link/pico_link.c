@@ -107,6 +107,21 @@ static void handle_incoming_frame(const uint8_t *encoded, size_t encoded_len) {
 
     const uint8_t *payload = decoded + sizeof(proto_hdr_t);
 
+    if (hdr.type == MSG_PICO_READY) {
+        uint8_t proto_version = 0u;
+        uint8_t flags = 0u;
+        if (hdr.len >= sizeof(pl_pico_ready_t)) {
+            const pl_pico_ready_t *ready = (const pl_pico_ready_t *)payload;
+            proto_version = ready->proto_version;
+            flags = ready->flags;
+        }
+        ESP_LOGI(TAG, "RX low-level PICO_READY seq=%u len=%u proto=%u flags=0x%02x",
+                 (unsigned)hdr.seq,
+                 (unsigned)hdr.len,
+                 (unsigned)proto_version,
+                 (unsigned)flags);
+    }
+
     if (xSemaphoreTake(s_lock, portMAX_DELAY) == pdTRUE) {
         if (s_pending.active && hdr.seq == s_pending.seq && (hdr.type == MSG_ACK || hdr.type == MSG_NACK)) {
             if (hdr.type == MSG_ACK) {
