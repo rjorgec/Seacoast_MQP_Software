@@ -19,7 +19,8 @@
 #include "sys_sequence.h"
 #include "motor_hal.h"
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "pico_power.h"
+#include "proto.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -42,6 +43,8 @@ static const char *TAG = "sys_seq";
 
 /** Timeout for spawn dosing to complete (ms). */
 #define SEQ_DOSE_TIMEOUT_MS 120000u
+#define ARM_OPEN_RETRY_MAX 3u
+#define ARM_SEAL_EVENT_POLL_TIMEOUT_MS 200u
 
 /** Threshold for bag detection via HX711 scale (µg). */
 #define BAG_DETECT_THRESHOLD_UG 50000000u /* 50 g */
@@ -55,6 +58,7 @@ static const char *TAG = "sys_seq";
 #define EVT_SPAWN_DONE (1u << 1)
 #define EVT_SPAWN_EMPTY (1u << 2)
 #define EVT_SPAWN_AGITATING (1u << 3)
+#define EVT_ARM_SEAL_EVENT (1u << 4)
 
 /* ── Module state ──────────────────────────────────────────────────────────── */
 
@@ -71,13 +75,24 @@ static volatile uint8_t s_last_motion_result = 0u;
 
 /* Last spawn status from MSG_SPAWN_STATUS notification */
 static volatile uint8_t s_last_spawn_status = 0u;
+static volatile uint8_t s_last_arm_seal_event = 0u;
+static volatile uint8_t s_last_arm_seal_reason = 0u;
+static volatile uint16_t s_last_arm_seal_snapshot = 0u; /* [15:8]=event, [7:0]=reason */
 
 /* ── Internal helpers ──────────────────────────────────────────────────────── */
 
 static void set_state(sys_state_t next)
 {
+    sys_state_t prev = s_state;
     s_state = next;
     ESP_LOGI(TAG, "→ %s", sys_sequence_state_name(next));
+
+    /* E-Stop entry drops the 12 V relay. SYS_ERROR deliberately does not —
+     * operators need motor power to recover (re-home, nudge clear, etc.). */
+    if (next == SYS_ESTOP && prev != SYS_ESTOP)
+    {
+        (void)pico_power_disable();
+    }
 }
 
 /** Safe-stop all outputs. Called on error or E-Stop. */
@@ -99,11 +114,19 @@ static void safe_stop_all(void)
  */
 static bool wait_motion_done(uint8_t expected_subsys, uint32_t timeout_ms)
 {
+    /* DIAG: confirm task is about to block — abort queued before this will be
+     * silently ignored until the wait returns or times out. */
+    ESP_LOGD(TAG, "wait_motion_done: BLOCKING up to %u ms for subsys=%u (state=%s)",
+             (unsigned)timeout_ms, (unsigned)expected_subsys,
+             sys_sequence_state_name(s_state));
+
     EventBits_t bits = xEventGroupWaitBits(s_events,
                                            EVT_MOTION_DONE,
                                            pdTRUE, /* clear on exit */
                                            pdFALSE,
                                            pdMS_TO_TICKS(timeout_ms));
+
+    ESP_LOGD(TAG, "wait_motion_done: unblocked, bits=0x%lx", (unsigned long)bits);
 
     if (!(bits & EVT_MOTION_DONE))
     {
@@ -225,6 +248,31 @@ static bool open_bag_sequence(void)
     return true;
 }
 
+static bool open_bag_recover_sequence(void)
+{
+    ESP_LOGW(TAG, "bag_open: recovery sequence (seal lost)");
+
+    (void)motor_arm_move(ARM_POS_1);
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    (void)motor_arm_move(ARM_POS_PRESS);
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    (void)motor_arm_move(ARM_POS_2);
+    if (!wait_motion_done(SUBSYS_ARM, SEQ_MOTION_TIMEOUT_MS))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 /* ── Main sequence task ────────────────────────────────────────────────────── */
 
 static void seq_task(void *arg)
@@ -247,7 +295,7 @@ static void seq_task(void *arg)
             else if (cmd == SYS_CMD_ABORT && s_state != SYS_IDLE)
             {
                 safe_stop_all();
-                set_state(SYS_ERROR);
+                set_state(SYS_IDLE);
             }
         }
 
@@ -261,7 +309,7 @@ static void seq_task(void *arg)
             if (c == SYS_CMD_SETUP_LOAD)
             {
                 set_state(SYS_SETUP_LOAD);
-                /* Open flaps, open arms, rotate platform to trash, tare */
+                /* Open flaps, open arms, rotate platform to intake for homing, tare */
                 ESP_LOGI(TAG, "setup: open flaps");
                 (void)motor_flap_open();
                 ESP_LOGI(TAG, "setup: arm to pos1 (open)");
@@ -269,7 +317,7 @@ static void seq_task(void *arg)
                 ESP_LOGI(TAG, "setup: rack home (open lin)");
                 (void)motor_rack_move(RACK_POS_HOME);
                 ESP_LOGI(TAG, "setup: turntable home");
-                (void)motor_turntable_home();
+                (void)motor_turntable_home(); // TODO: create function for moving turntable to hardstop and zeroing position counter on Pico
                 wait_motion_done(0xFFu, SEQ_MOTION_TIMEOUT_MS);
                 ESP_LOGI(TAG, "setup: tare scale via pico_link");
                 /* Note: HX711 tare sent via existing MSG_HX711_TARE RPC */
@@ -280,7 +328,10 @@ static void seq_task(void *arg)
                 if (s2 == SYS_CMD_START)
                     set_state(SYS_CUTTING_TIP);
                 else
+                {
+                    safe_stop_all();
                     set_state(SYS_IDLE);
+                }
             }
             break;
         }
@@ -300,7 +351,7 @@ static void seq_task(void *arg)
             (void)motor_hotwire_traverse(true);
             wait_motion_done(0xFFu, SEQ_MOTION_TIMEOUT_MS);
 
-            ESP_LOGI(TAG, "cut: retract hotwire");
+            ESP_LOGI(TAG, "cut: retract hotwire (position zeroes on successful retrace)");
             (void)motor_hotwire_traverse(false);
             wait_motion_done(0xFFu, SEQ_MOTION_TIMEOUT_MS);
 
@@ -314,8 +365,8 @@ static void seq_task(void *arg)
         /* ── ROTATING TO ACCEPT ─────────────────────────────────────── */
         case SYS_ROTATING_TO_ACCEPT:
         {
-            ESP_LOGI(TAG, "rotate: turntable to accept (POS_B)");
-            (void)motor_turntable_goto(TURNTABLE_POS_B);
+            ESP_LOGI(TAG, "rotate: turntable to intake position");
+            (void)motor_turntable_goto(TURNTABLE_POS_INTAKE);
             if (!wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS))
             {
                 set_state(SYS_ERROR);
@@ -358,16 +409,64 @@ static void seq_task(void *arg)
         /* ── OPENING BAG ────────────────────────────────────────────── */
         case SYS_OPENING_BAG:
         {
-            if (!open_bag_sequence())
+            uint8_t retries = 0u;
+            for (;;)
             {
-                ESP_LOGE(TAG, "bag opening sub-sequence failed");
-                safe_stop_all();
-                set_state(SYS_ERROR);
+                bool open_ok = false;
+                if (retries == 0u)
+                {
+                    open_ok = open_bag_sequence();
+                }
+                else
+                {
+                    set_state(SYS_OPEN_RECOVERING);
+                    open_ok = open_bag_recover_sequence();
+                }
+
+                EventBits_t seal_bits = xEventGroupWaitBits(s_events,
+                                                            EVT_ARM_SEAL_EVENT,
+                                                            pdTRUE,
+                                                            pdFALSE,
+                                                            pdMS_TO_TICKS(ARM_SEAL_EVENT_POLL_TIMEOUT_MS));
+                uint16_t seal_snapshot = s_last_arm_seal_snapshot;
+                uint8_t seal_event = (uint8_t)(seal_snapshot >> 8);
+                uint8_t seal_reason = (uint8_t)(seal_snapshot & 0xFFu);
+                bool seal_lost = (seal_bits & EVT_ARM_SEAL_EVENT) &&
+                                 (seal_event == (uint8_t)ARM_SEAL_EVENT_LOST);
+
+                if (!open_ok && !seal_lost)
+                {
+                    ESP_LOGE(TAG, "bag opening sub-sequence failed");
+                    safe_stop_all();
+                    set_state(SYS_ERROR);
+                    break;
+                }
+
+                if (seal_lost)
+                {
+                    if (retries == (uint8_t)ARM_OPEN_RETRY_MAX)
+                    {
+                        ESP_LOGE(TAG, "bag opening: seal lost after max retries");
+                        safe_stop_all();
+                        set_state(SYS_ERROR);
+                        break;
+                    }
+                    ++retries;
+                    ESP_LOGW(TAG, "bag opening: seal lost, retry %u/%u reason=%u",
+                             (unsigned)retries, (unsigned)ARM_OPEN_RETRY_MAX,
+                             (unsigned)seal_reason);
+                    set_state(SYS_OPENING_BAG);
+                    continue;
+                }
+
+                set_state(SYS_INOCULATING);
                 break;
             }
-            set_state(SYS_INOCULATING);
             break;
         }
+
+        case SYS_OPEN_RECOVERING:
+            break;
 
         /* ── INOCULATING ────────────────────────────────────────────── */
         case SYS_INOCULATING:
@@ -436,7 +535,7 @@ static void seq_task(void *arg)
         case SYS_EJECTING:
         {
             ESP_LOGI(TAG, "eject: turn platform to eject, release vacuum");
-            (void)motor_turntable_goto(TURNTABLE_POS_C); /* eject position */
+            (void)motor_turntable_goto(TURNTABLE_POS_EJECT); /* eject position */
             wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS);
 
             /* Release vacuum cups */
@@ -464,7 +563,7 @@ static void seq_task(void *arg)
         case SYS_ROTATING_TO_INTAKE:
         {
             ESP_LOGI(TAG, "rotate: platform back to accept");
-            (void)motor_turntable_goto(TURNTABLE_POS_B);
+            (void)motor_turntable_goto(TURNTABLE_POS_INTAKE);
             wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS);
 
             /* Re-open indexer for next bag */
@@ -490,7 +589,7 @@ static void seq_task(void *arg)
             ESP_LOGI(TAG, "continue: close arms, rotate to trash, open flaps");
             (void)motor_rack_move(RACK_POS_HOME);
             (void)motor_arm_move(ARM_POS_PRESS);
-            (void)motor_turntable_goto(TURNTABLE_POS_A); /* trash */
+            (void)motor_turntable_goto(TURNTABLE_POS_TRASH); /* trash */
             wait_motion_done(SUBSYS_TURNTABLE, SEQ_MOTION_TIMEOUT_MS);
 
             (void)motor_flap_open();
@@ -612,6 +711,17 @@ void sys_sequence_notify_spawn_status(uint8_t status)
     }
 }
 
+void sys_sequence_notify_arm_seal_event(uint8_t event, uint8_t reason)
+{
+    s_last_arm_seal_event = event;
+    s_last_arm_seal_reason = reason;
+    s_last_arm_seal_snapshot = (uint16_t)(((uint16_t)event << 8) | (uint16_t)reason);
+    if (s_events)
+    {
+        xEventGroupSetBitsFromISR(s_events, EVT_ARM_SEAL_EVENT, NULL);
+    }
+}
+
 const char *sys_sequence_state_name(sys_state_t state)
 {
     switch (state)
@@ -630,6 +740,8 @@ const char *sys_sequence_state_name(sys_state_t state)
         return "INTAKE_WEIGHING";
     case SYS_OPENING_BAG:
         return "OPENING_BAG";
+    case SYS_OPEN_RECOVERING:
+        return "OPEN_RECOVERING";
     case SYS_INOCULATING:
         return "INOCULATING";
     case SYS_POST_DOSE:

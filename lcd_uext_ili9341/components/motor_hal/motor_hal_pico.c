@@ -1,7 +1,7 @@
 #include "motor_hal.h"
 
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "proto.h"
 #include "esp_log.h"
 
 static const char *TAG = "motor_hal_pico";
@@ -82,21 +82,6 @@ esp_err_t motor_linact_stop(void)
     return motor_linact_stop_monitor();
 }
 
-// Stepper not supported yet
-esp_err_t motor_stepper_enable(bool en)
-{
-    (void)en;
-    return ESP_ERR_NOT_SUPPORTED;
-}
-
-esp_err_t motor_stepper_step(motor_dir_t dir, uint32_t steps, uint32_t step_delay_us)
-{
-    (void)dir;
-    (void)steps;
-    (void)step_delay_us;
-    return ESP_ERR_NOT_SUPPORTED;
-}
-
 /* ------------------------------------------------------------------ */
 /*  State-based actuator commands (state machine, not atomic steps)    */
 /* ------------------------------------------------------------------ */
@@ -147,6 +132,22 @@ esp_err_t motor_arm_move(uint8_t pos)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "arm_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_arm_home(void)
+{
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_ARM_HOME,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "arm_home rpc failed (%s), nack=%u",
                  esp_err_to_name(err), (unsigned)nack_code);
     }
     return err;
@@ -256,6 +257,8 @@ esp_err_t motor_vacuum2_set(bool enable)
 
 esp_err_t motor_hotwire_traverse(bool cut)
 {
+    /* Direction 0 = cut traverse; direction 1 = retrace/home.
+     * On successful retrace completion, Pico zeros the traverse position. */
     pl_hotwire_traverse_t pl = {.direction = cut ? 0u : 1u};
     uint8_t nack_code = 0u;
     esp_err_t err = pico_link_send_rpc(MSG_HOTWIRE_TRAVERSE,
@@ -283,6 +286,49 @@ esp_err_t motor_indexer_move(uint8_t position)
     if (err != ESP_OK)
     {
         ESP_LOGW(TAG, "indexer_move rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_agitate(void)
+{
+    /* MSG_AGITATE (0x4E) — zero-length payload; Pico uses all defaults from
+     * board_pins.h: AGITATOR_N_CYCLES forward+reverse strokes, no homing.
+     * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent asynchronously when done. */
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       NULL,
+                                       0u,
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "agitate rpc failed (%s), nack=%u",
+                 esp_err_to_name(err), (unsigned)nack_code);
+    }
+    return err;
+}
+
+esp_err_t motor_agitate_home(void)
+{
+    /* MSG_AGITATE with AGITATE_FLAG_DO_HOME: sensorlessly home the agitator
+     * (stall-detect to mechanical endstop, then backoff only), and stop
+     * in place (do not run knead cycles).
+     * MSG_MOTION_DONE(SUBSYS_AGITATOR) is sent asynchronously when done. */
+    pl_agitate_t pl = {
+        .flags    = AGITATE_FLAG_DO_HOME,
+        .n_cycles = 0u, /* 0 = use AGITATOR_N_CYCLES from firmware */
+    };
+    uint8_t nack_code = 0u;
+    esp_err_t err = pico_link_send_rpc(MSG_AGITATE,
+                                       &pl,
+                                       (uint16_t)sizeof(pl),
+                                       MOTOR_RPC_TIMEOUT_MS,
+                                       &nack_code);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "agitate_home rpc failed (%s), nack=%u",
                  esp_err_to_name(err), (unsigned)nack_code);
     }
     return err;

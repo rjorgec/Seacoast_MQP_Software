@@ -67,6 +67,8 @@ typedef struct
     uint32_t startup_blanking_ms;          /* Ignore overcurrent for this duration after motor start */
     drv8263_current_callback_t current_cb; /* Current event callback (optional, may be NULL) */
     drv8263_delay_ms_t delay_ms;           /* Millisecond delay function (optional, may be NULL) */
+    uint16_t initial_duty_a;               /* PWM level applied to IN1 before slice enable (0-4095) */
+    uint16_t initial_duty_b;               /* PWM level applied to IN2 before slice enable (0-4095) */
 } drv8263_config_t;
 
 /* Driver Instance */

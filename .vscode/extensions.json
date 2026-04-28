@@ -1,0 +1,36 @@
+{
+    // VS Code extension recommendations for the Seacoast MQP project.
+    // When you open this repository VS Code will prompt you to install these.
+    // All of them are free and available in the VS Code Marketplace.
+    "recommendations": [
+        // CMake Tools — configure, build, and manage cmake projects from the
+        // VS Code sidebar; required for the Pico firmware build tasks.
+        "ms-vscode.cmake-tools",
+
+        // C/C++ IntelliSense — code completion, go-to-definition, and error
+        // highlighting for C and C++ source files.
+        "ms-vscode.cpptools",
+
+        // Espressif ESP-IDF — full ESP-IDF integration: build, flash, monitor,
+        // OpenOCD debugging, and component manager for ESP32-C6.
+        "espressif.esp-idf-extension",
+
+        // Raspberry Pi Pico — manages Pico SDK / toolchain / picotool downloads
+        // and provides cmake presets for RP2040/RP2350 boards.
+        "raspberrypi.raspberry-pi-pico",
+
+        // Python — language support for ESP-IDF scripts and any Python tooling.
+        "ms-python.python",
+
+        // Serial Monitor — built-in serial console inside VS Code for viewing
+        // Pico USB CDC stdio output or any /dev/tty* device without leaving
+        // the editor.  Use the "PICO: Serial Monitor" task or open the command
+        // palette → "Serial Monitor: Start Monitoring".
+        "ms-vscode.serial-monitor",
+
+        // Cortex-Debug — run/step/inspect ARM Cortex-M firmware directly in
+        // VS Code using OpenOCD or pyOCD; useful for debugging Pico 2 over SWD.
+        "marus25.cortex-debug"
+    ],
+    "unwantedRecommendations": []
+}

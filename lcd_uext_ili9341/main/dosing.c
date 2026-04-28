@@ -23,7 +23,7 @@
 #include "flap.h"
 #include "loadcell.h"
 #include "pico_link.h"
-#include "proto/proto.h"
+#include "proto.h"
 
 static const char *TAG = "dosing";
 
